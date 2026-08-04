@@ -3,7 +3,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from auth.exceptions import AuthDatabaseError
+from auth.exceptions import AuthDatabaseError, DuplicateEmailError, ProtectedAccountError
 from auth.passwords import hash_password
 
 logger = logging.getLogger(__name__)
@@ -13,6 +13,11 @@ DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
 SEED_ADMIN_EMAIL = "admin@admin.com"
 SEED_ADMIN_PASSWORD = "nimda"
 SEED_ADMIN_NAME = "Admin"
+# SQLite AUTOINCREMENT guarantees the first-ever inserted row keeps id 1 forever (ids are
+# never reused), and seeding only ever fires on an empty table, so the seeded admin is
+# always user_id 1. Identifying it this way (rather than by email) keeps protection intact
+# even if a superuser edits the seeded admin's email later.
+SEED_ADMIN_USER_ID = 1
 
 _CREATE_USERS_TABLE = """
 CREATE TABLE IF NOT EXISTS users (
@@ -96,3 +101,95 @@ def get_user_by_id(user_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> dict 
     with get_connection(db_path) as connection:
         row = connection.execute("SELECT * FROM users WHERE user_id = ?;", (user_id,)).fetchone()
         return dict(row) if row is not None else None
+
+
+def list_users(db_path: Path | str = DEFAULT_DB_PATH) -> list[dict]:
+    """Returns every user, ordered by name, for display on the User Management screen."""
+    with get_connection(db_path) as connection:
+        rows = connection.execute("SELECT * FROM users ORDER BY name COLLATE NOCASE;").fetchall()
+        return [dict(row) for row in rows]
+
+
+def create_user(
+    email: str,
+    name: str,
+    password: str,
+    role: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """Creates a new user account with the given role and an initial password.
+
+    Raises:
+        DuplicateEmailError: if the email is already registered.
+        AuthDatabaseError: on any other database failure.
+    """
+    try:
+        with get_connection(db_path) as connection:
+            password_hash = hash_password(password)
+            cursor = connection.execute(
+                "INSERT INTO users (email, name, password_hash, role) VALUES (?, ?, ?, ?);",
+                (email, name, password_hash, role),
+            )
+            new_id = cursor.lastrowid
+    except AuthDatabaseError as error:
+        if isinstance(error.__cause__, sqlite3.IntegrityError):
+            logger.warning("Attempted to create a duplicate user for email %s.", email)
+            raise DuplicateEmailError(f"An account with email {email} already exists.") from error.__cause__
+        raise
+
+    return get_user_by_id(new_id, db_path)
+
+
+def update_user(
+    user_id: int,
+    name: str,
+    email: str,
+    role: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """Updates a user's name, email, and role. Does not touch password_hash or photo_path,
+    since those are self-service only (Section 2.4).
+
+    Raises:
+        ProtectedAccountError: if user_id is the seeded superuser account and role would change.
+        DuplicateEmailError: if email collides with a different existing user.
+        AuthDatabaseError: on any other database failure, or if user_id does not exist.
+    """
+    try:
+        with get_connection(db_path) as connection:
+            current = connection.execute("SELECT * FROM users WHERE user_id = ?;", (user_id,)).fetchone()
+            if current is None:
+                raise AuthDatabaseError(f"No user found with id {user_id}.")
+            if user_id == SEED_ADMIN_USER_ID and role != "superuser":
+                logger.warning("Blocked role change away from superuser for the seeded admin account.")
+                raise ProtectedAccountError("The default superuser account's role cannot be changed.")
+
+            connection.execute(
+                "UPDATE users SET name = ?, email = ?, role = ? WHERE user_id = ?;",
+                (name, email, role, user_id),
+            )
+    except AuthDatabaseError as error:
+        if isinstance(error.__cause__, sqlite3.IntegrityError):
+            logger.warning("Attempted to rename a user to a duplicate email %s.", email)
+            raise DuplicateEmailError(f"An account with email {email} already exists.") from error.__cause__
+        raise
+
+    return get_user_by_id(user_id, db_path)
+
+
+def delete_user(user_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+    """Deletes a user account.
+
+    Raises:
+        ProtectedAccountError: if user_id is the seeded superuser account.
+        AuthDatabaseError: on any other database failure, or if user_id does not exist.
+    """
+    with get_connection(db_path) as connection:
+        current = connection.execute("SELECT * FROM users WHERE user_id = ?;", (user_id,)).fetchone()
+        if current is None:
+            raise AuthDatabaseError(f"No user found with id {user_id}.")
+        if user_id == SEED_ADMIN_USER_ID:
+            logger.warning("Blocked delete attempt on the seeded admin account.")
+            raise ProtectedAccountError("The default superuser account can never be deleted.")
+
+        connection.execute("DELETE FROM users WHERE user_id = ?;", (user_id,))

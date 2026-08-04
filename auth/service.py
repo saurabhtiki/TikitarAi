@@ -47,3 +47,14 @@ def logout() -> None:
 def is_authenticated() -> bool:
     """Returns True iff a user_id is present in session state."""
     return st.session_state.get("user_id") is not None
+
+
+def require_role(*allowed_roles: str) -> bool:
+    """Returns True iff the current session's role is one of allowed_roles.
+
+    Intended for use at the top of a role-gated page as defense-in-depth: the
+    primary gate is that streamlit_app.py never lists such a page for
+    disallowed roles, but Streamlit pages remain directly navigable by path
+    even when absent from st.navigation's list.
+    """
+    return st.session_state.get("role") in allowed_roles

@@ -19,7 +19,7 @@ Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- update this line each time a phase is completed -->
-Stage 1: Login system — complete
+Stage 2: User Management screen — complete
 
 # Library docs (Agno, Streamlit)
 

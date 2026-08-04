@@ -35,6 +35,14 @@ if not is_authenticated():
     pages = [st.Page("app_pages/login.py", title="Log in", icon=":material/login:")]
 else:
     pages = [st.Page("app_pages/home.py", title="Home", icon=":material/home:", default=True)]
+    if st.session_state.get("role") == "superuser":
+        pages.append(
+            st.Page(
+                "app_pages/user_management.py",
+                title="User management",
+                icon=":material/manage_accounts:",
+            )
+        )
 
 navigation = st.navigation(pages)
 navigation.run()
