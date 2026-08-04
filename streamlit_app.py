@@ -37,18 +37,23 @@ except (AuthDatabaseError, LLMDatabaseError):
 if not is_authenticated():
     pages = [st.Page("app_pages/login.py", title="Log in", icon=":material/login:")]
 else:
-    pages = [
-        st.Page("app_pages/home.py", title="Home", icon=":material/home:", default=True),
-        st.Page("app_pages/settings.py", title="Settings", icon=":material/settings:"),
-    ]
+    # Sections rather than a flat list, because Utilities is an open-ended category
+    # (spec 4) that more standalone tools get added to over time.
+    pages = {
+        "": [st.Page("app_pages/home.py", title="Home", icon=":material/home:", default=True)],
+        "Utilities": [
+            st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon=":material/cleaning_services:")
+        ],
+        "Account": [st.Page("app_pages/settings.py", title="Settings", icon=":material/settings:")],
+    }
     if st.session_state.get("role") == "superuser":
-        pages.append(
+        pages["Admin"] = [
             st.Page(
                 "app_pages/user_management.py",
                 title="User management",
                 icon=":material/manage_accounts:",
             )
-        )
+        ]
 
 navigation = st.navigation(pages)
 navigation.run()

@@ -7,8 +7,11 @@ requires-python = ">=3.12"
 dependencies = [
     "bcrypt>=5.0.0",
     "cryptography>=50.0.0",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.5",
     "pillow>=12.3.0",
     "streamlit>=1.60.0",
+    "xlsxwriter>=3.2.9",
 ]
 
 [dependency-groups]
