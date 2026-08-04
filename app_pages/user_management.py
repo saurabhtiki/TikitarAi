@@ -5,23 +5,28 @@ import streamlit as st
 
 from auth.db import create_user, delete_user, get_user_by_id, list_users, update_user
 from auth.exceptions import AuthDatabaseError, DuplicateEmailError, ProtectedAccountError
-from auth.service import logout, require_role
-from branding import LOGO_PATH
+from auth.service import require_role
+from sidebar import render_sidebar
 
 logger = logging.getLogger(__name__)
 
 ROLE_OPTIONS = ["normal_user", "admin", "superuser"]
 
 
-def _reset_table_selection() -> None:
-    """Clears the dataframe's row selection, including its own widget state.
+def _queue_table_reset() -> None:
+    """Marks the users table's row selection to be cleared on the next run.
 
     Needed after any create/update/delete: the table is re-sorted by name and
     may have a different row count on the next run, so a previously selected
     positional row index could point at the wrong row or be out of bounds.
+
+    The actual session_state["um_users_table"] write happens just before that
+    widget is instantiated below, not here -- Streamlit forbids writing to a
+    widget's own session_state key in the same run after that widget has
+    already been created, and these handlers run after the dataframe has
+    already rendered earlier in the script.
     """
-    st.session_state["um_selected_user_id"] = None
-    st.session_state["um_users_table"] = {"selection": {"rows": [], "columns": []}}
+    st.session_state["um_table_reset_pending"] = True
 
 if not require_role("superuser"):
     st.error("You don't have permission to view this page.", icon=":material/lock:")
@@ -35,18 +40,7 @@ except AuthDatabaseError:
     profile = None
 
 if profile is not None:
-    with st.sidebar:
-        st.image(LOGO_PATH, width=50)
-        st.markdown(f"**{profile['name']}**")
-        st.caption(profile["email"])
-        st.caption(profile["role"].replace("_", " ").title())
-        st.button(
-            "Log out",
-            key="logout_button",
-            icon=":material/logout:",
-            help="End your session and return to the login screen.",
-            on_click=logout,
-        )
+    render_sidebar(profile)
 
 
 @st.dialog("Add new user")
@@ -88,7 +82,7 @@ def _handle_create_user(email: str, name: str, role: str, password: str) -> None
         logger.exception("Database error while creating user %s.", email)
         st.error("We couldn't create the user. Please try again shortly.")
     else:
-        _reset_table_selection()
+        _queue_table_reset()
         st.rerun()
 
 
@@ -136,7 +130,7 @@ def _handle_update_user(user_id: int, name: str, email: str, role: str) -> None:
         logger.exception("Database error while updating user_id %s.", user_id)
         st.error("We couldn't save these changes. Please try again shortly.")
     else:
-        _reset_table_selection()
+        _queue_table_reset()
         st.rerun()
 
 
@@ -160,7 +154,7 @@ def _open_delete_confirmation_dialog(user_id: int) -> None:
     with confirm_col:
         if st.button(
             "Confirm delete",
-            key="um_confirm_delete_button",
+            key="um_confirm_delete_button",type="primary",
             icon=":material/delete_forever:",
             help="Permanently delete this account.",
         ):
@@ -168,7 +162,7 @@ def _open_delete_confirmation_dialog(user_id: int) -> None:
     with cancel_col:
         if st.button(
             "Cancel",
-            key="um_cancel_delete_button",
+            key="um_cancel_delete_button",type="primary",
             help="Close without deleting.",
         ):
             st.rerun()
@@ -184,13 +178,13 @@ def _handle_delete_user(user_id: int) -> None:
         logger.exception("Database error while deleting user_id %s.", user_id)
         st.error("We couldn't delete this user. Please try again shortly.")
     else:
-        _reset_table_selection()
+        _queue_table_reset()
         st.rerun()
 
 
 if profile is not None:
     st.title("User management")
-    st.caption("Add, edit, or remove user accounts and change roles.")
+    st.write(":blue[**Add, edit, or remove user accounts and change roles.**]")
 
     try:
         users = list_users()
@@ -203,11 +197,15 @@ if profile is not None:
         "Add new",
         key="um_add_user_button",
         icon=":material/person_add:",
-        help="Create a new user account.",
+        help="Create a new user account.",type="primary"
     ):
         _open_add_user_dialog()
 
     users_df = pd.DataFrame(users)[["user_id", "photo_path", "name", "email", "role"]]
+
+    if st.session_state.pop("um_table_reset_pending", False):
+        st.session_state["um_selected_user_id"] = None
+        st.session_state["um_users_table"] = {"selection": {"rows": [], "columns": []}}
 
     st.caption("Select a row to edit or delete that user.")
     selection = st.dataframe(
@@ -236,14 +234,14 @@ if profile is not None:
             if st.button(
                 "Edit",
                 key="um_edit_button",
-                icon=":material/edit:",
+                icon=":material/edit:",type="primary",
                 help="Change this user's name, email, or role.",
             ):
                 _open_edit_user_dialog(selected_user_id)
         with delete_col:
             if st.button(
                 "Delete",
-                key="um_delete_button",
+                key="um_delete_button",type="primary",
                 icon=":material/delete:",
                 help="Permanently remove this user account.",
             ):

@@ -8,9 +8,11 @@ from auth.db import (
     init_db,
     list_users,
     seed_default_admin,
+    update_own_password,
+    update_own_profile,
     update_user,
 )
-from auth.exceptions import AuthDatabaseError, DuplicateEmailError, ProtectedAccountError
+from auth.exceptions import AuthDatabaseError, DuplicateEmailError, InvalidPasswordError, ProtectedAccountError
 from auth.passwords import verify_password
 
 
@@ -189,3 +191,59 @@ def test_delete_user_nonexistent_raises(db_path):
 
     with pytest.raises(AuthDatabaseError):
         delete_user(999, db_path)
+
+
+def test_update_own_profile_updates_name_only_by_default(db_path):
+    init_db(db_path)
+    seed_default_admin(db_path)
+    created = create_user("bob@example.com", "Bob", "password123", "normal_user", db_path)
+
+    updated = update_own_profile(created["user_id"], "Bobby", db_path=db_path)
+
+    assert updated["name"] == "Bobby"
+    assert updated["photo_path"] is None
+
+
+def test_update_own_profile_updates_photo_when_provided(db_path):
+    init_db(db_path)
+    seed_default_admin(db_path)
+    created = create_user("bob@example.com", "Bob", "password123", "normal_user", db_path)
+
+    updated = update_own_profile(created["user_id"], "Bob", photo_path="/tmp/photo.png", db_path=db_path)
+
+    assert updated["photo_path"] == "/tmp/photo.png"
+
+    unchanged = update_own_profile(created["user_id"], "Bobby", db_path=db_path)
+    assert unchanged["photo_path"] == "/tmp/photo.png"
+
+
+def test_update_own_password_success(db_path):
+    init_db(db_path)
+    seed_default_admin(db_path)
+    created = create_user("bob@example.com", "Bob", "password123", "normal_user", db_path)
+
+    update_own_password(created["user_id"], "password123", "newpassword456", db_path=db_path)
+
+    fetched = get_user_by_id(created["user_id"], db_path)
+    assert verify_password("newpassword456", fetched["password_hash"]) is True
+
+
+def test_update_own_password_wrong_current_password_raises(db_path):
+    init_db(db_path)
+    seed_default_admin(db_path)
+    created = create_user("bob@example.com", "Bob", "password123", "normal_user", db_path)
+
+    with pytest.raises(InvalidPasswordError):
+        update_own_password(created["user_id"], "wrongpassword", "newpassword456", db_path=db_path)
+
+    fetched = get_user_by_id(created["user_id"], db_path)
+    assert verify_password("password123", fetched["password_hash"]) is True
+
+
+def test_update_own_password_empty_new_password_raises_value_error(db_path):
+    init_db(db_path)
+    seed_default_admin(db_path)
+    created = create_user("bob@example.com", "Bob", "password123", "normal_user", db_path)
+
+    with pytest.raises(ValueError):
+        update_own_password(created["user_id"], "password123", "", db_path=db_path)

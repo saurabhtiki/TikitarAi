@@ -30,7 +30,7 @@ with center:
         )
         submitted = st.form_submit_button(
             "Log in",
-            icon=":material/login:",
+            icon=":material/login:",type="primary",
             help="Submit your credentials to sign in.",
         )
 

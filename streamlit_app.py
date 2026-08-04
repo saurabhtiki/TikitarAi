@@ -6,6 +6,8 @@ from auth.db import init_db, seed_default_admin
 from auth.exceptions import AuthDatabaseError
 from auth.service import is_authenticated
 from branding import LOGO_PATH
+from llm.db import init_llm_table
+from llm.exceptions import LLMDatabaseError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,22 +21,26 @@ def bootstrap_database() -> bool:
     try:
         init_db()
         seed_default_admin()
-    except AuthDatabaseError:
-        logger.exception("Failed to bootstrap the user database.")
+        init_llm_table()
+    except (AuthDatabaseError, LLMDatabaseError):
+        logger.exception("Failed to bootstrap the application database.")
         raise
     return True
 
 
 try:
     bootstrap_database()
-except AuthDatabaseError:
-    st.error("The application couldn't start because the user database is unavailable.")
+except (AuthDatabaseError, LLMDatabaseError):
+    st.error("The application couldn't start because the database is unavailable.")
     st.stop()
 
 if not is_authenticated():
     pages = [st.Page("app_pages/login.py", title="Log in", icon=":material/login:")]
 else:
-    pages = [st.Page("app_pages/home.py", title="Home", icon=":material/home:", default=True)]
+    pages = [
+        st.Page("app_pages/home.py", title="Home", icon=":material/home:", default=True),
+        st.Page("app_pages/settings.py", title="Settings", icon=":material/settings:"),
+    ]
     if st.session_state.get("role") == "superuser":
         pages.append(
             st.Page(

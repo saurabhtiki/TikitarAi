@@ -19,7 +19,7 @@ Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- update this line each time a phase is completed -->
-Stage 2: User Management screen — complete
+Stage 3: User Settings — Profile, Password & LLM Provider Configuration — complete
 
 # Library docs (Agno, Streamlit)
 

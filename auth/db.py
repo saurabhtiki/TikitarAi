@@ -3,8 +3,13 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from auth.exceptions import AuthDatabaseError, DuplicateEmailError, ProtectedAccountError
-from auth.passwords import hash_password
+from auth.exceptions import (
+    AuthDatabaseError,
+    DuplicateEmailError,
+    InvalidPasswordError,
+    ProtectedAccountError,
+)
+from auth.passwords import hash_password, verify_password
 
 logger = logging.getLogger(__name__)
 
@@ -193,3 +198,60 @@ def delete_user(user_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> None:
             raise ProtectedAccountError("The default superuser account can never be deleted.")
 
         connection.execute("DELETE FROM users WHERE user_id = ?;", (user_id,))
+
+
+def update_own_profile(
+    user_id: int,
+    name: str,
+    photo_path: str | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """Updates a user's own name and, optionally, their photo.
+
+    photo_path is only written when a new one is provided (not None) — there's
+    no "remove photo" action, so None always means "leave the current photo alone."
+
+    Raises:
+        AuthDatabaseError: on any database failure, or if user_id does not exist.
+    """
+    with get_connection(db_path) as connection:
+        current = connection.execute("SELECT * FROM users WHERE user_id = ?;", (user_id,)).fetchone()
+        if current is None:
+            raise AuthDatabaseError(f"No user found with id {user_id}.")
+
+        if photo_path is not None:
+            connection.execute(
+                "UPDATE users SET name = ?, photo_path = ? WHERE user_id = ?;",
+                (name, photo_path, user_id),
+            )
+        else:
+            connection.execute("UPDATE users SET name = ? WHERE user_id = ?;", (name, user_id))
+
+    return get_user_by_id(user_id, db_path)
+
+
+def update_own_password(
+    user_id: int,
+    current_password: str,
+    new_password: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> dict:
+    """Changes a user's own password after verifying their current one.
+
+    Raises:
+        InvalidPasswordError: if current_password doesn't match the stored hash.
+        ValueError: if new_password is empty (propagated from hash_password).
+        AuthDatabaseError: on any other database failure, or if user_id does not exist.
+    """
+    with get_connection(db_path) as connection:
+        current = connection.execute("SELECT * FROM users WHERE user_id = ?;", (user_id,)).fetchone()
+        if current is None:
+            raise AuthDatabaseError(f"No user found with id {user_id}.")
+        if not verify_password(current_password, current["password_hash"]):
+            logger.warning("Rejected password change for user_id %s: wrong current password.", user_id)
+            raise InvalidPasswordError("Your current password is incorrect.")
+
+        new_hash = hash_password(new_password)
+        connection.execute("UPDATE users SET password_hash = ? WHERE user_id = ?;", (new_hash, user_id))
+
+    return get_user_by_id(user_id, db_path)
