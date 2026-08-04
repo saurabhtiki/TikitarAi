@@ -19,7 +19,7 @@ Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- update this line each time a phase is completed -->
-Phase 0: project setup — not started
+Stage 1: Login system — complete
 
 # Library docs (Agno, Streamlit)
 

@@ -8,5 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
-# entire docs folder
-docs/
+
+# Runtime SQLite database
+data/
+
