@@ -214,31 +214,38 @@ The shared, in-memory DuckDB foundation used by both Chat with Data
 - A visual relationship diagram (a box per table, a line per confirmed
   relationship) is shown once more than two or three tables are involved,
   to make multi-table structures easy to read at a glance.
-- **Relationships are enforced as real foreign keys.** Financial data
-  requires accurate results, so a confirmed relationship is implemented as
-  an actual DuckDB `FOREIGN KEY` constraint between the two tables, not
-  just informational metadata.
-- **Pre-check before enforcement, so errors are clear and fixable.** Before
-  a foreign key constraint is applied, the system runs a validation query
-  that finds every row on the child side whose key value has no match on
+- **A confirmed relationship is always usable for querying, whether or not
+  it becomes a database constraint.** What the agent (Section 5.5) actually
+  needs is to know which two columns join — not a guarantee that every row
+  matches. A relationship the user accepts is recorded and included in the
+  schema context either way, so "show attendance by employee" always
+  produces the right join, even when a few Attendance rows have no matching
+  Employee Master record.
+- **The system checks each relationship and shows the match, not a
+  pass/fail gate.** Before the user accepts a suggestion, a validation
+  query finds every row on the child side whose key value has no match on
   the parent side (e.g. every row in Attendance whose `emp_id` doesn't
-  exist in Employee Master). If any are found:
-  - The relationship is **not** established.
+  exist in Employee Master), and the result is shown plainly — "100%
+  match" or "2 rows don't match". If any don't match:
   - The exact offending rows are shown to the user in full (every column's
     value, not just a row number — this is easier to locate and fix in the
-    source file than a bare row index).
-  - The user corrects the source data and re-uploads; the relationship is
-    only enforced once the check comes back clean.
-- Once a relationship passes the check and is enforced as a foreign key,
-  every query against those tables is guaranteed to join cleanly — there
-  are no orphaned or unmatched rows to account for downstream.
+    source file than a bare row index), with a CSV download.
+  - The user may fix the source data and re-upload, or simply accept the
+    relationship as-is — it's still recorded for querying.
+- **A relationship is enforced as a real DuckDB `FOREIGN KEY` only when its
+  check comes back completely clean.** This gives financial-data accuracy
+  a real database guarantee wherever the data supports it, without
+  blocking every other relationship on a full clean-up first. A
+  relationship with unmatched rows is used for joins as `LEFT JOIN`
+  instead, so downstream questions still work — the unmatched rows just
+  don't contribute a match, the same way they wouldn't in Excel.
 - Once relationships are confirmed, the system moves directly into chat.
   The agent (Section 5.5) writes the correct SQL `JOIN` for each question
-  directly, using the foreign keys already defined in the database — this
-  covers any number of related tables, including a table linking to
-  several others (e.g. Sales linking to both Customer and Stock) and
-  multi-level chains (e.g. PO Details → PO Header → Inventory Master), with
-  no additional join configuration needed.
+  directly, using the confirmed relationships (foreign keys where enforced,
+  `LEFT JOIN` where not) — this covers any number of related tables,
+  including a table linking to several others (e.g. Sales linking to both
+  Customer and Stock) and multi-level chains (e.g. PO Details → PO Header →
+  Inventory Master), with no additional join configuration needed.
 
 ### 5.3 Column Descriptions & Aliases
 - After relationships are confirmed and before chat begins, the user sees

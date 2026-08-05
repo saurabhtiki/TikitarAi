@@ -159,7 +159,8 @@ def test_every_role_can_open_the_page(tmp_path, monkeypatch, role):
     app = _make_app(tmp_path, monkeypatch, role=role)
 
     assert not app.exception
-    assert app.title[0].value == "Data Cleaner"
+    # The page heading is an st.subheader, not an st.title.
+    assert any("Data Cleaner" in heading.value for heading in app.subheader)
 
 
 def test_the_page_is_calm_with_nothing_uploaded(tmp_path, monkeypatch):
@@ -559,6 +560,34 @@ def test_a_download_is_offered_with_one_sheet_per_table(tmp_path, monkeypatch):
     assert not app.exception
     assert app.download_button[0].label == "Download cleaned workbook"
     assert session.export_sheet_names(_tables(app)) == ["salaries", "other"]
+
+
+def test_exporting_adopts_the_tables_before_switching_pages(tmp_path, monkeypatch):
+    """The export menu is the push side of the handoff `TestCleanerHandoff` in
+    test_chat_with_data_page.py covers from the pull side. It must land the tables in
+    the Data Engine itself — not just navigate — since the destination page's own
+    "Use these tables" button is what the pull side already exercises.
+
+    `AppTest.from_file` runs one page in isolation, without the `st.navigation` registry
+    `streamlit_app.py` builds at real runtime, so `st.switch_page("app_pages/chat_with_
+    data.py")` has no page list to resolve against here and raises — a harness gap, not
+    a bug (same category as the other testing gaps `docs/plan.md` already calls out).
+    What's checked is that adoption completes and lands in session_state *before* that
+    call, which is the part a real click depends on.
+    """
+    from engine import session as engine_session
+
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+
+    app.menu_button(key="dc_export_menu").click("Chat with Data").run()
+
+    assert len(app.exception) == 1
+    assert "Could not find page" in app.exception[0].value
+    assert "chat_with_data.py" in app.exception[0].value
+
+    tables = app.session_state[engine_session.DE_TABLES_KEY]
+    assert tables
+    assert all(table.from_cleaner for table in tables.values())
 
 
 def test_start_over_discards_every_table(tmp_path, monkeypatch):

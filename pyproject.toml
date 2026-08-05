@@ -5,11 +5,15 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "agno>=2.8.6",
     "bcrypt>=5.0.0",
     "cryptography>=50.0.0",
+    "duckdb>=1.4",
+    "openai>=2.53.0",
     "openpyxl>=3.1.5",
     "pandas>=3.0.5",
     "pillow>=12.3.0",
+    "pydantic>=2.13.4",
     "streamlit>=1.60.0",
     "xlsxwriter>=3.2.9",
 ]

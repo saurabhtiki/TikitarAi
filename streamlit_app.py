@@ -46,6 +46,9 @@ else:
     # (spec 4) that more standalone tools get added to over time.
     pages = {
         "": [st.Page("app_pages/home.py", title="Home", icon=":material/home:", default=True)],
+        "Explore": [
+            st.Page("app_pages/chat_with_data.py", title="Chat with data", icon=":material/forum:")
+        ],
         "Utilities": [
             st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon=":material/cleaning_services:")
         ],

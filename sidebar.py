@@ -7,6 +7,8 @@ import streamlit as st
 
 from auth.service import logout
 from branding import LOGO_PATH
+from llm import session as llm_session
+from llm.client import LLMConnectionError, describe_profile, test_connection
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +43,70 @@ def _avatar_and_name_html(profile: dict) -> str:
     )
 
 
+def _on_model_pick(user_id: int) -> None:
+    """Records the newly picked session model.
+
+    A callback rather than a return-value read, so the choice is stored before the
+    script re-executes and every page below sees it on the same run.
+    """
+    picked = st.session_state.get(llm_session.LLM_PICKER_KEY)
+    llm_session.set_active_profile(picked["profile_id"] if picked else None)
+
+
+def _render_model_picker(user_id: int) -> None:
+    """The active session model, plus Test connection (requirements 3.3 and 3.4).
+
+    Lives in the sidebar rather than on one page because requirement 3.3 lets the choice
+    change at any point mid-session — so it has to be reachable from wherever the user
+    happens to be.
+    """
+    profiles = llm_session.session_profiles(user_id)
+    if not profiles:
+        st.caption("No AI connection yet — add one in Settings.")
+        return
+
+    active = llm_session.active_profile(user_id)
+    st.selectbox(
+        "Model",
+        options=profiles,
+        index=next((position for position, item in enumerate(profiles) if item == active), 0),
+        format_func=describe_profile,
+        key=llm_session.LLM_PICKER_KEY,
+        help="Which saved connection this session uses. You can change it at any time.",
+        on_change=_on_model_pick,
+        args=(user_id,),
+    )
+
+    if st.button(
+        "Test connection",
+        key="llm_test_connection_button",
+        icon=":material/network_check:",
+        width="stretch",
+        help="Send one tiny request and report whether the provider answered.",
+    ):
+        target = llm_session.active_profile(user_id)
+        if target is None:
+            llm_session.record_test_result(False, "No connection is selected.")
+        else:
+            with st.spinner("Testing…"):
+                try:
+                    succeeded, message = test_connection(target)
+                except LLMConnectionError as error:
+                    succeeded, message = False, str(error)
+            llm_session.record_test_result(succeeded, message)
+        st.rerun(scope="app")
+
+    result = llm_session.last_test_result()
+    if result:
+        if result["ok"]:
+            st.success(result["message"], icon=":material/check_circle:")
+        else:
+            st.error(result["message"], icon=":material/error:")
+
+
 def render_sidebar(profile: dict) -> None:
-    """Renders the app-wide sidebar: logo (via st.logo), a Log out button always at the
-    top, then a round avatar + name (no email, per the app's sidebar spec)."""
+    """Renders the app-wide sidebar: a Log out button always at the top, a round avatar
+    + name (no email, per the app's sidebar spec), then the session model picker."""
     #st.logo(LOGO_PATH, size="medium")
     with st.sidebar:
         col1,col2 = st.columns(2,vertical_alignment="center")
@@ -57,4 +120,7 @@ def render_sidebar(profile: dict) -> None:
                 help="End your session and return to the login screen.",
                 on_click=logout,type="primary"
             )
-      
+
+        st.divider()
+        _render_model_picker(profile["user_id"])
+

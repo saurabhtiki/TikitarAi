@@ -31,11 +31,19 @@ from cleaner.steps import (
     FILL_STRATEGIES,
     get_spec,
 )
+from engine import session as engine_session
 from sidebar import render_sidebar
 
 logger = logging.getLogger(__name__)
 
 RESET_ACTION = "reset"
+
+# Which pages can receive the cleaned tables, and where each one lives. Chat with Data
+# is the only consumer so far (it's the only page with an adoption path into the Data
+# Engine) — add an entry here when a future page grows one.
+EXPORT_DESTINATIONS: dict[str, str] = {
+    "Chat with Data": "app_pages/chat_with_data.py",
+}
 
 _FILL_LABELS = {
     "custom": "Fill with a value I choose",
@@ -905,7 +913,7 @@ def _render_download(tables: list[session.TableState]) -> None:
         st.error(str(error))
         return
 
-    download_col, reset_col = st.columns(2)
+    download_col, export_col, reset_col = st.columns(3)
     with download_col:
         st.download_button(
             "Download cleaned workbook",
@@ -918,6 +926,8 @@ def _render_download(tables: list[session.TableState]) -> None:
             on_click="ignore",
             help="One .xlsx containing every cleaned table and the cleaning log.",
         )
+    with export_col:
+        _render_export_menu()
     with reset_col:
         if st.button(
             "Start over",
@@ -928,6 +938,36 @@ def _render_download(tables: list[session.TableState]) -> None:
         ):
             session.queue_start_over()
             st.rerun(scope="app")
+
+
+def _render_export_menu() -> None:
+    """Sends the cleaned tables straight into another page's Data Engine and jumps there.
+
+    Adoption happens on this page, where the uploaded bytes are guaranteed to still be
+    cached (see `cleaner.session.cached_file_bytes`), rather than on the destination
+    page — so it can never hit the "no longer available" case that a cross-page read of
+    the uploader itself would. `adopt_cleaner_tables` reports any per-table failure as a
+    warning rather than raising, so a bad table is skipped and the rest still switch.
+    """
+    destination = st.menu_button(
+        "Export to",
+        options=list(EXPORT_DESTINATIONS),
+        key="dc_export_menu",
+        icon=":material/output:",
+        type="primary",
+        help="Load these cleaned tables into another page's Data Engine, then jump there.",
+    )
+    if destination is None:
+        return
+
+    adopted, warnings = engine_session.adopt_cleaner_tables()
+    for warning in warnings:
+        st.warning(warning, icon=":material/error:")
+    if not adopted:
+        return
+
+    engine_session.refresh_dictionary()
+    st.switch_page(EXPORT_DESTINATIONS[destination])
 
 
 # --------------------------------------------------------------------------------------

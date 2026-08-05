@@ -19,7 +19,7 @@ Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- update this line each time a phase is completed -->
-Stage 4: Data Cleaner utility — complete
+Stage 5: Data Engine core + LLM client — complete
 
 # Library docs (Agno, Streamlit)
 

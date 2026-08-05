@@ -6,6 +6,7 @@ import streamlit as st
 from auth.db import get_user_by_id, update_own_password, update_own_profile
 from auth.exceptions import AuthDatabaseError, InvalidPasswordError, PhotoProcessingError
 from auth.photos import save_user_photo
+from llm.client import LLMConnectionError, test_connection
 from llm.db import create_profile, delete_profile, list_profiles, set_light_model, unset_light_model, update_profile
 from llm.exceptions import LLMDatabaseError
 from sidebar import photo_data_uri, render_sidebar
@@ -332,6 +333,24 @@ def _handle_unset_light_model(user_id: int, profile_id: int) -> None:
         st.rerun()
 
 
+def _handle_test_connection(llm_profile: dict) -> None:
+    """Fires one minimal request against a saved profile (requirement 3.4).
+
+    Reports the provider's own failure text — "Incorrect API key provided", "Connection
+    error" — because that names what to fix, which a generic message never does.
+    """
+    with st.spinner("Testing…"):
+        try:
+            succeeded, message = test_connection(llm_profile)
+        except LLMConnectionError as error:
+            succeeded, message = False, str(error)
+
+    if succeeded:
+        st.success(message, icon=":material/check_circle:")
+    else:
+        st.error(message, icon=":material/error:")
+
+
 def _render_llm_section(current_profile: dict) -> None:
     user_id = current_profile["user_id"]
     st.write(""":blue[**Manage your saved LLM connection profiles.
@@ -393,7 +412,24 @@ def _render_llm_section(current_profile: dict) -> None:
         selected_profile_id = int(selected_row["profile_id"])
         st.session_state["settings_selected_profile_id"] = selected_profile_id
 
-        edit_col, delete_col, light_col = st.columns(3)
+        edit_col, delete_col, light_col, test_col = st.columns(4)
+        with test_col:
+            if st.button(
+                "Test connection",
+                key="settings_test_connection_button",
+                icon=":material/network_check:",
+                help="Send one tiny request and report whether the provider answered.",
+                type="primary",
+            ):
+                # Not selected_row.to_dict(): pandas silently turns a NULL
+                # api_key_encrypted (normal for local providers) into a float
+                # NaN, which then crashes llm.crypto.decrypt_api_key. Re-fetch
+                # the real profile dict instead, same as Edit/Delete below.
+                selected_profile = next(
+                    (row for row in profiles if row["profile_id"] == selected_profile_id), None
+                )
+                if selected_profile is not None:
+                    _handle_test_connection(selected_profile)
         with edit_col:
             if st.button(
                 "Edit", key="settings_edit_profile_button", icon=":material/edit:", help="Change this profile's details.",type="primary"

@@ -27,6 +27,7 @@ DC_UPLOADER_KEY = "dc_uploader"
 DC_TABS_KEY = "dc_tabs"
 DC_DIALOG_KEY = "dc_open_dialog"
 DC_START_OVER_KEY = "dc_start_over_pending"
+DC_FILE_BYTES_KEY = "dc_file_bytes"
 
 MAX_UPLOAD_SIZE_MB = 50
 PREVIEW_ROWS = 500
@@ -108,6 +109,18 @@ def get_tables() -> dict[str, TableState]:
     return st.session_state.setdefault(DC_TABLES_KEY, {})
 
 
+def cached_file_bytes() -> dict[str, bytes]:
+    """Every uploaded file's bytes this session has read, keyed by `file_id`.
+
+    `st.file_uploader`'s own widget state is ephemeral and only reliable on the page
+    that renders it — reading `st.session_state[DC_UPLOADER_KEY]` from another page
+    (as the Chat with Data handoff does) can silently come back empty after
+    navigation. A plain session_state dict, written once per file here, does not have
+    that restriction and is what every cross-page reader should use instead.
+    """
+    return st.session_state.setdefault(DC_FILE_BYTES_KEY, {})
+
+
 def get_table(table_id: str) -> TableState | None:
     """Returns one table's state, or None if it is no longer loaded."""
     return get_tables().get(table_id)
@@ -182,6 +195,7 @@ def consume_start_over() -> bool:
         return False
     clear_tables()
     st.session_state.pop(DC_UPLOADER_KEY, None)
+    st.session_state.pop(DC_FILE_BYTES_KEY, None)
     return True
 
 
@@ -206,6 +220,7 @@ def _seed_steps(frame: pd.DataFrame) -> list[Step]:
 
 def _new_table_state(uploaded_file, sheet_name: str | None, taken_sheet_names: set[str]) -> TableState:
     file_bytes = uploaded_file.getvalue()
+    cached_file_bytes()[uploaded_file.file_id] = file_bytes
     table_id = make_table_id(uploaded_file.file_id, sheet_name)
 
     base_name = sheet_name or uploaded_file.name.rsplit(".", 1)[0]
@@ -260,6 +275,12 @@ def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[T
         logger.info("Dropped %d table(s) no longer selected in the uploader.", len(dropped))
 
     st.session_state[DC_TABLES_KEY] = reconciled
+
+    still_referenced = {table.file_id for table in reconciled.values()}
+    bytes_cache = cached_file_bytes()
+    for file_id in set(bytes_cache) - still_referenced:
+        del bytes_cache[file_id]
+
     return list(reconciled.values())
 
 

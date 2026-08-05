@@ -26,7 +26,8 @@ def test_any_role_can_access_settings_page(tmp_path, monkeypatch):
     at = _make_app(tmp_path, monkeypatch, role="normal_user")
 
     assert not at.exception
-    assert at.title[0].value == "Settings"
+    # The page heading is an st.subheader, not an st.title.
+    assert any("Settings" in heading.value for heading in at.subheader)
 
 
 def test_profile_section_shows_by_default(tmp_path, monkeypatch):
