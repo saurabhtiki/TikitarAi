@@ -11,7 +11,7 @@ import re
 import warnings
 
 import pandas as pd
-from pandas.api.types import is_numeric_dtype, is_string_dtype
+from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype, is_string_dtype
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,29 @@ _ACCOUNTING_PARENTHESES = re.compile(r"^\((.*)\)$")
 _TRAILING_MINUS = re.compile(r"^(.*)-$")
 _LEADING_ZERO_NUMBER = re.compile(r"^0\d+$")
 _ALPHANUMERIC_ID = re.compile(r"^[A-Za-z0-9._\-/]+$")
+_BLANK_TEXT = re.compile(rf"^[\s{INVISIBLE_WHITESPACE}]*$")
+
+
+def blank_mask(series: pd.Series) -> pd.Series:
+    """True wherever a value is missing *or* looks empty on screen.
+
+    One definition of "blank", shared by the stats panel, the missing-values metric and
+    the fill and empty-row steps, because they have to agree: a cell holding a single
+    space reads as empty to the person looking at it, and a panel that calls it filled
+    while a fill step refuses to touch it is just confusing. `str.strip()` alone is not
+    enough — it leaves the non-breaking space that Excel exports are full of.
+    """
+    if not is_string_dtype(series):
+        return series.isna().astype(bool)
+    text = series.astype("string")
+    return (text.isna() | text.str.match(_BLANK_TEXT).fillna(False)).astype(bool)
+
+
+def blank_count(frame: pd.DataFrame) -> int:
+    """How many cells across the whole frame are missing or visually blank."""
+    if frame.empty:
+        return 0
+    return sum(int(blank_mask(frame[column]).sum()) for column in frame.columns)
 
 
 def parse_numeric_series(
@@ -192,23 +215,49 @@ def detect_column_types(frame: pd.DataFrame, **kwargs) -> dict[str, str]:
     return {str(column): detect_column_type(frame[column], **kwargs) for column in frame.columns}
 
 
-def column_stats(frame: pd.DataFrame, sample_size: int = 3) -> pd.DataFrame:
-    """One row per column: name, detected type, counts, missing percentage and samples.
+def effective_column_type(series: pd.Series, declared: str | None = None) -> str:
+    """The type a column actually has now, rather than a fresh guess at it.
+
+    The dtype decides where it can: a numeric or datetime column is what it is. For the
+    string-backed types it cannot — pandas stores text, categorical and id identically —
+    so a type the user explicitly set wins over detection. Without that, setting a column
+    of plain digits to `id` would leave the panel still reporting `numeric`, flatly
+    contradicting the choice the user just made.
+    """
+    if is_numeric_dtype(series):
+        return NUMERIC
+    if is_datetime64_any_dtype(series):
+        return DATE
+    if declared in COLUMN_TYPES:
+        return declared
+    return detect_column_type(series)
+
+
+def column_stats(
+    frame: pd.DataFrame, sample_size: int = 3, declared_types: dict[str, str] | None = None
+) -> pd.DataFrame:
+    """One row per column: name, current type, counts, blank percentage and samples.
 
     Rendered read-only in the UI so the auto-suggested `categorical` columns stay
-    reviewable at a glance without an editable grid.
+    reviewable at a glance without an editable grid. `declared_types` carries the types
+    the recipe explicitly set, from `pipeline.declared_column_types`.
+
+    Blanks are counted with `blank_mask`, so a cell holding only spaces is reported the
+    way it looks — empty — instead of as a filled value.
     """
     row_count = len(frame)
+    declared_types = declared_types or {}
     records = []
 
     for column in frame.columns:
         series = frame[column]
-        missing = int(series.isna().sum())
-        samples = series.dropna().astype("string").head(sample_size).tolist()
+        blanks = blank_mask(series)
+        missing = int(blanks.sum())
+        samples = series[~blanks].astype("string").head(sample_size).tolist()
         records.append(
             {
                 "column": str(column),
-                "detected_type": detect_column_type(series),
+                "column_type": effective_column_type(series, declared_types.get(str(column))),
                 "non_null": row_count - missing,
                 "missing": missing,
                 "missing_pct": round(missing / row_count * 100, 1) if row_count else 0.0,
@@ -219,7 +268,7 @@ def column_stats(frame: pd.DataFrame, sample_size: int = 3) -> pd.DataFrame:
 
     return pd.DataFrame.from_records(
         records,
-        columns=["column", "detected_type", "non_null", "missing", "missing_pct", "unique", "sample_values"],
+        columns=["column", "column_type", "non_null", "missing", "missing_pct", "unique", "sample_values"],
     )
 
 

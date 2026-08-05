@@ -8,6 +8,7 @@ button idiom the dialog closes on the next rerun and its widgets disappear.
 """
 
 import io
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -15,7 +16,8 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from auth.db import init_db, seed_default_admin
-from cleaner import loaders, pipeline, session
+from cleaner import loaders, pipeline, profiling, session
+from cleaner.steps import FILL_STRATEGIES, STEP_REGISTRY
 from llm.db import init_llm_table
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +25,10 @@ DATA_CLEANER_PAGE_PATH = str(PROJECT_ROOT / "app_pages" / "data_cleaner.py")
 
 SALARIES_CSV = b"emp_id,name,dept,amount\n007, Ana ,Sales,\"$1,200.50\"\n008, Bo ,Sales,(300)\n008, Bo ,Sales,(300)\n"
 OTHER_CSV = b"code,city\nX1,Delhi\nX2,Mumbai\n"
+# The merged-cell shape: a label written once, then left blank down the rows it covers.
+REGIONS_CSV = b"region,city\nNorth,Delhi\n,Mumbai\n,Pune\nSouth,Goa\n"
+# Cells that read as empty but aren't: one plain space, one non-breaking space.
+SPACED_CSV = "name,city\nAna,Delhi\n ,Mumbai\n\xa0,Pune\nBo,Goa\n".encode()
 
 
 def _workbook(sheets: dict[str, pd.DataFrame]) -> bytes:
@@ -62,6 +68,75 @@ def _only_table(app) -> session.TableState:
     tables = _tables(app)
     assert len(tables) == 1
     return tables[0]
+
+
+# Streamlit lifts a leading Material directive out of an option's label into a separate
+# icon field, so the option content AppTest reports is the face text without it.
+_ICON_PREFIX = re.compile(r"^:material/[^:]+:\s*")
+
+
+def _command_control(app, table_id: str, action: str):
+    """Finds the command-bar segmented control offering `action`, or None.
+
+    The page's grouping is deliberately not duplicated here — importing the page module
+    would execute it outside a run context — so the group is found by asking each
+    control's own `format_func` what `action` would look like and checking whether that
+    face is on offer.
+    """
+    for control in app.segmented_control:
+        key = control.key or ""
+        if not (key.startswith("dc_cmd_") and key.endswith(table_id)):
+            continue
+        if _ICON_PREFIX.sub("", control.format_func(action)) in control.options:
+            return control
+    return None
+
+
+def _open(app, table_id: str, action: str):
+    """Picks a command from the command bar, which opens that action's dialog."""
+    control = _command_control(app, table_id, action)
+    assert control is not None, f"no command offered for {action}"
+    control.set_value(action).run()
+    return app
+
+
+_WIDGET_GROUPS = ("checkbox", "multiselect", "selectbox", "text_input", "number_input", "radio")
+
+
+def _widget_values(app) -> dict:
+    values = {}
+    for group in _WIDGET_GROUPS:
+        for widget in getattr(app, group):
+            if widget.key:
+                try:
+                    values[widget.key] = widget.value
+                except KeyError:
+                    pass
+    return values
+
+
+def _click_and_settle(app, key: str):
+    """Clicks a button that closes a dialog, then lets AppTest catch up.
+
+    Purely an AppTest quirk: when a dialog closes, Streamlit garbage-collects its
+    widgets' session_state entries, but AppTest's element tree still lists them, so the
+    next `.run()` raises on the orphans. Re-seeding each orphan with the value it had
+    before the click lets the tree refresh. A browser never hits this — the frontend
+    simply stops sending a closed dialog's widget states.
+    """
+    before = _widget_values(app)
+    app.button(key=key).click().run()
+
+    for _ in range(40):
+        try:
+            app.run()
+            return app
+        except KeyError as error:
+            orphan = re.search(r'no key "([^"]+)"', str(error))
+            if orphan is None or orphan.group(1) not in before:
+                raise
+            app.session_state[orphan.group(1)] = before[orphan.group(1)]
+    raise AssertionError("AppTest's element tree never settled after the dialog closed.")
 
 
 def _cleaned(table: session.TableState, payload: bytes) -> pd.DataFrame:
@@ -167,11 +242,10 @@ def test_removing_every_file_clears_the_working_set(tmp_path, monkeypatch):
 
 
 def _panel_rendered(app, table_id: str) -> bool:
-    try:
-        app.multiselect(key=f"dc_delete_columns_{table_id}")
-    except KeyError:
-        return False
-    return True
+    return any(
+        (control.key or "").startswith("dc_cmd_") and (control.key or "").endswith(table_id)
+        for control in app.segmented_control
+    )
 
 
 def test_only_the_open_tab_is_rendered_and_switching_works(tmp_path, monkeypatch):
@@ -192,6 +266,68 @@ def test_only_the_open_tab_is_rendered_and_switching_works(tmp_path, monkeypatch
 
 
 # --------------------------------------------------------------------------------------
+# Command bar and dialogs
+# --------------------------------------------------------------------------------------
+
+
+def test_the_command_bar_offers_every_registered_action(tmp_path, monkeypatch):
+    """Derived from STEP_REGISTRY rather than the page's own list, so adding a 13th
+    cleaning action without giving it a command fails here."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    table_id = _only_table(app).table_id
+
+    for action in [*STEP_REGISTRY, "reset"]:
+        assert _command_control(app, table_id, action) is not None, f"no command for {action}"
+
+
+def test_no_dialog_widgets_exist_until_a_command_is_picked(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    table_id = _only_table(app).table_id
+
+    with pytest.raises(KeyError):
+        app.checkbox(key=f"dc_trim_collapse_{table_id}")
+
+
+def test_picking_a_command_opens_its_dialog_with_that_action_s_inputs(tmp_path, monkeypatch):
+    """The dialog is rendered inside the tab fragment, alongside the button that opens
+    it — at page top level a fragment-scoped rerun would never reach it."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    table_id = _only_table(app).table_id
+
+    _open(app, table_id, "trim_whitespace")
+
+    assert not app.exception
+    assert app.session_state[session.DC_DIALOG_KEY] == {"table_id": table_id, "action": "trim_whitespace"}
+    assert app.checkbox(key=f"dc_trim_collapse_{table_id}")
+    assert app.button(key=f"dc_apply_trim_whitespace_{table_id}")
+
+
+def test_cancelling_a_dialog_records_nothing(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    table_id = _only_table(app).table_id
+    before = len(_only_table(app).steps)
+
+    _open(app, table_id, "trim_whitespace")
+    _click_and_settle(app, f"dc_cancel_trim_whitespace_{table_id}")
+
+    assert not app.exception
+    assert session.DC_DIALOG_KEY not in app.session_state
+    assert len(_only_table(app).steps) == before
+
+
+def test_reset_is_not_offered_while_a_table_has_no_steps(tmp_path, monkeypatch):
+    """A freshly uploaded table with no detectable types has an empty recipe, so there is
+    nothing to reset. Omitted rather than greyed out: a segmented control disables as a
+    whole, so a disabled option would have to take the whole Rows group with it."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("plain.csv", b"note\nhello\n"))
+    table_id = _only_table(app).table_id
+
+    assert _only_table(app).steps == []
+    assert _command_control(app, table_id, "reset") is None
+    assert _command_control(app, table_id, "drop_duplicates") is not None
+
+
+# --------------------------------------------------------------------------------------
 # Applying, undoing and resetting steps
 # --------------------------------------------------------------------------------------
 
@@ -202,8 +338,10 @@ def test_trimming_twice_leaves_a_single_log_entry(tmp_path, monkeypatch):
     app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
     table_id = _only_table(app).table_id
 
-    app.button(key=f"dc_apply_trim_{table_id}").click().run()
-    app.button(key=f"dc_apply_trim_{table_id}").click().run()
+    _open(app, table_id, "trim_whitespace")
+    _click_and_settle(app, f"dc_apply_trim_whitespace_{table_id}")
+    _open(app, table_id, "trim_whitespace")
+    _click_and_settle(app, f"dc_apply_trim_whitespace_{table_id}")
 
     assert not app.exception
     trims = [step for step in _only_table(app).steps if step["action"] == "trim_whitespace"]
@@ -213,7 +351,8 @@ def test_trimming_twice_leaves_a_single_log_entry(tmp_path, monkeypatch):
 def test_trimming_actually_cleans_the_values(tmp_path, monkeypatch):
     app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
     table = _only_table(app)
-    app.button(key=f"dc_apply_trim_{table.table_id}").click().run()
+    _open(app, table.table_id, "trim_whitespace")
+    _click_and_settle(app, f"dc_apply_trim_whitespace_{table.table_id}")
 
     cleaned = _cleaned(_only_table(app), SALARIES_CSV)
 
@@ -224,19 +363,75 @@ def test_removing_duplicates_through_the_ui(tmp_path, monkeypatch):
     app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
     table_id = _only_table(app).table_id
 
-    app.button(key=f"dc_apply_dupes_{table_id}").click().run()
+    _open(app, table_id, "drop_duplicates")
+    _click_and_settle(app, f"dc_apply_drop_duplicates_{table_id}")
     cleaned = _cleaned(_only_table(app), SALARIES_CSV)
 
     assert not app.exception
     assert len(cleaned) == 2
 
 
+def test_copying_a_value_down_through_the_ui(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("regions.csv", REGIONS_CSV))
+    table_id = _only_table(app).table_id
+
+    _open(app, table_id, "fill_missing")
+    app.multiselect(key=f"dc_fill_columns_{table_id}").set_value(["region"]).run()
+    app.selectbox(key=f"dc_fill_strategy_{table_id}").set_value("previous").run()
+    _click_and_settle(app, f"dc_apply_fill_missing_{table_id}")
+
+    assert not app.exception
+    cleaned = _cleaned(_only_table(app), REGIONS_CSV)
+    assert list(cleaned["region"]) == ["North", "North", "North", "South"]
+
+
+def test_filling_blanks_with_a_custom_value_through_the_ui(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("spaced.csv", SPACED_CSV))
+    table_id = _only_table(app).table_id
+
+    _open(app, table_id, "fill_missing")
+    app.multiselect(key=f"dc_fill_columns_{table_id}").set_value(["name"]).run()
+    app.selectbox(key=f"dc_fill_strategy_{table_id}").set_value("custom").run()
+    app.text_input(key=f"dc_fill_value_{table_id}").set_value("Not given").run()
+    _click_and_settle(app, f"dc_apply_fill_missing_{table_id}")
+
+    assert not app.exception
+    cleaned = _cleaned(_only_table(app), SPACED_CSV)
+    assert list(cleaned["name"]) == ["Ana", "Not given", "Not given", "Bo"]
+
+
+def test_a_cell_holding_only_spaces_is_reported_as_blank(tmp_path, monkeypatch):
+    """The reported bug: a Name column whose empty-looking cells hold a space showed as
+    fully filled in the column panel and in the Missing metric."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("spaced.csv", SPACED_CSV))
+    table = _only_table(app)
+    stats = profiling.column_stats(_cleaned(table, SPACED_CSV))
+
+    assert not app.exception
+    assert stats.set_index("column").loc["name", "missing"] == 2
+
+
+def test_every_fill_strategy_has_a_label_in_its_dialog(tmp_path, monkeypatch):
+    """The page keeps its own label map, so a strategy added to FILL_STRATEGIES without
+    a matching label would raise KeyError inside the selectbox's format_func."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("regions.csv", REGIONS_CSV))
+    table_id = _only_table(app).table_id
+
+    _open(app, table_id, "fill_missing")
+    labels = app.selectbox(key=f"dc_fill_strategy_{table_id}").options
+
+    assert not app.exception
+    assert len(labels) == len(FILL_STRATEGIES)
+    assert all(label and label not in FILL_STRATEGIES for label in labels)
+
+
 def test_apply_to_all_tables_records_the_step_everywhere(tmp_path, monkeypatch):
     app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV), ("other.csv", OTHER_CSV))
     first = _tables(app)[0]
 
+    _open(app, first.table_id, "trim_whitespace")
     app.checkbox(key=f"dc_trim_all_{first.table_id}").set_value(True).run()
-    app.button(key=f"dc_apply_trim_{first.table_id}").click().run()
+    _click_and_settle(app, f"dc_apply_trim_whitespace_{first.table_id}")
 
     assert not app.exception
     for table in _tables(app):
@@ -246,7 +441,8 @@ def test_apply_to_all_tables_records_the_step_everywhere(tmp_path, monkeypatch):
 def test_removing_one_log_entry_replays_the_rest(tmp_path, monkeypatch):
     app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
     table_id = _only_table(app).table_id
-    app.button(key=f"dc_apply_trim_{table_id}").click().run()
+    _open(app, table_id, "trim_whitespace")
+    _click_and_settle(app, f"dc_apply_trim_whitespace_{table_id}")
     assert len(_only_table(app).steps) == 2
 
     app.button(key=f"dc_remove_step_{table_id}_0").click().run()
@@ -259,25 +455,27 @@ def test_removing_one_log_entry_replays_the_rest(tmp_path, monkeypatch):
 def test_reset_to_raw_dialog_clears_every_step(tmp_path, monkeypatch):
     app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
     table_id = _only_table(app).table_id
-    app.button(key=f"dc_apply_trim_{table_id}").click().run()
+    _open(app, table_id, "trim_whitespace")
+    _click_and_settle(app, f"dc_apply_trim_whitespace_{table_id}")
 
-    app.button(key=f"dc_reset_{table_id}").click().run()
-    assert app.session_state[session.DC_RESET_DIALOG_KEY] == table_id
+    _open(app, table_id, "reset")
+    assert app.session_state[session.DC_DIALOG_KEY] == {"table_id": table_id, "action": "reset"}
 
-    app.button(key="dc_confirm_reset_button").click().run()
+    _click_and_settle(app, "dc_confirm_reset_button")
 
     assert not app.exception
     assert _only_table(app).steps == []
-    assert session.DC_RESET_DIALOG_KEY not in app.session_state
+    assert session.DC_DIALOG_KEY not in app.session_state
 
 
 def test_cancelling_the_reset_dialog_keeps_the_steps(tmp_path, monkeypatch):
     app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
     table_id = _only_table(app).table_id
-    app.button(key=f"dc_apply_trim_{table_id}").click().run()
+    _open(app, table_id, "trim_whitespace")
+    _click_and_settle(app, f"dc_apply_trim_whitespace_{table_id}")
 
-    app.button(key=f"dc_reset_{table_id}").click().run()
-    app.button(key="dc_cancel_reset_button").click().run()
+    _open(app, table_id, "reset")
+    _click_and_settle(app, "dc_cancel_reset_button")
 
     assert not app.exception
     assert len(_only_table(app).steps) == 2
@@ -290,9 +488,13 @@ def test_an_invalid_rename_is_rejected_without_entering_the_recipe(tmp_path, mon
     table_id = _only_table(app).table_id
     before = len(_only_table(app).steps)
 
+    _open(app, table_id, "rename_columns")
     app.selectbox(key=f"dc_rename_source_{table_id}").set_value("name").run()
     app.text_input(key=f"dc_rename_target_{table_id}").set_value("dept").run()
-    app.button(key=f"dc_apply_rename_{table_id}").click().run()
+    # A plain click, not _click_and_settle: a rejected step leaves the dialog open on
+    # purpose so the user can correct the input, and the extra run that helper performs
+    # would clear the transient warning being asserted below.
+    app.button(key=f"dc_apply_rename_columns_{table_id}").click().run()
 
     assert not app.exception
     assert len(_only_table(app).steps) == before
@@ -312,6 +514,40 @@ def test_the_output_sheet_name_is_sanitized(tmp_path, monkeypatch):
 
     assert not app.exception
     assert _only_table(app).output_sheet_name == "Q1_Q2 results"
+    assert any("Saved as worksheet 'Q1_Q2 results'." in caption.value for caption in app.caption)
+
+
+def _download_caption(app) -> str:
+    return next(caption.value for caption in app.caption if caption.value.startswith("One workbook"))
+
+
+def test_renaming_the_output_sheet_reaches_the_download(tmp_path, monkeypatch):
+    """The rename happens inside a tab fragment while the workbook is materialized at
+    page level, so without an app-scoped rerun the download would silently keep building
+    itself under the old sheet name."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    table_id = _only_table(app).table_id
+    assert "salaries" in _download_caption(app)
+
+    app.text_input(key=f"dc_output_sheet_name_{table_id}").set_value("Payroll").run()
+
+    assert not app.exception
+    assert session.export_sheet_names(_tables(app)) == ["Payroll"]
+    assert "Payroll" in _download_caption(app)
+    assert "salaries" not in _download_caption(app)
+
+
+def test_a_sanitized_sheet_name_settles_instead_of_rerunning_forever(tmp_path, monkeypatch):
+    """The stored name is the sanitized one, so the change check has to compare against
+    the sanitized input — comparing the raw text would differ on every rerun and loop."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    table_id = _only_table(app).table_id
+
+    app.text_input(key=f"dc_output_sheet_name_{table_id}").set_value("Q1/Q2").run()
+    app.run()
+
+    assert not app.exception
+    assert _only_table(app).output_sheet_name == "Q1_Q2"
 
 
 def test_a_download_is_offered_with_one_sheet_per_table(tmp_path, monkeypatch):
@@ -346,10 +582,36 @@ def test_an_action_button_below_its_panel_widgets_does_not_crash(tmp_path, monke
     app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
     table_id = _only_table(app).table_id
 
+    _open(app, table_id, "set_column_types")
     app.multiselect(key=f"dc_type_columns_{table_id}").set_value(["amount"]).run()
     app.selectbox(key=f"dc_type_target_{table_id}").set_value("numeric").run()
-    app.button(key=f"dc_apply_types_{table_id}").click().run()
+    _click_and_settle(app, f"dc_apply_set_column_types_{table_id}")
 
     assert not app.exception
     cleaned = _cleaned(_only_table(app), SALARIES_CSV)
     assert list(pd.to_numeric(cleaned["amount"]))[:2] == [1200.5, -300.0]
+
+
+def test_changing_a_column_type_shows_up_in_the_column_panel(tmp_path, monkeypatch):
+    """The reported bug: retyping a column left the panel showing the old type, because
+    it re-detected from the values instead of reading what the recipe set. `dept` holds
+    plain words, so detection alone would keep calling it text however often it is set."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    table_id = _only_table(app).table_id
+
+    def panel_type(column: str) -> str:
+        table = _only_table(app)
+        stats = profiling.column_stats(
+            _cleaned(table, SALARIES_CSV), declared_types=pipeline.declared_column_types(table.steps)
+        )
+        return stats.set_index("column").loc[column, "column_type"]
+
+    assert panel_type("dept") == "text"
+
+    _open(app, table_id, "set_column_types")
+    app.multiselect(key=f"dc_type_columns_{table_id}").set_value(["dept"]).run()
+    app.selectbox(key=f"dc_type_target_{table_id}").set_value("categorical").run()
+    _click_and_settle(app, f"dc_apply_set_column_types_{table_id}")
+
+    assert not app.exception
+    assert panel_type("dept") == "categorical"

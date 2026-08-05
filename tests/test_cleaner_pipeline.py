@@ -8,6 +8,7 @@ from cleaner.pipeline import (
     add_step,
     apply_steps,
     apply_steps_with_report,
+    declared_column_types,
     describe_step,
     describe_steps,
     make_step,
@@ -232,9 +233,25 @@ def test_a_recipe_round_trips_through_json_unchanged():
     steps = add_step([], make_step("skip_rows", {"top": 1, "bottom": 2, "promote_header": True}))
     steps = add_step(steps, make_step("set_column_types", {"by_column": {"amount": {"target_type": "numeric"}}}))
     steps = add_step(steps, replace_step("Delhi", "Mumbai"))
-    steps = add_step(steps, make_step("fill_missing", {"by_column": {"amount": "median"}}))
+    steps = add_step(steps, make_step("fill_missing", {"by_column": {"amount": {"strategy": "median"}}}))
 
     assert json.loads(json.dumps(steps)) == steps
+
+
+# --------------------------------------------------------------------------------------
+# Declared column types
+# --------------------------------------------------------------------------------------
+
+
+def test_declared_column_types_reports_what_the_recipe_set():
+    steps = add_step([], make_step("set_column_types", {"by_column": {"emp_id": {"target_type": "id"}}}))
+    steps = add_step(steps, make_step("set_column_types", {"by_column": {"amount": {"target_type": "numeric"}}}))
+
+    assert declared_column_types(steps) == {"emp_id": "id", "amount": "numeric"}
+
+
+def test_a_recipe_that_sets_no_types_declares_nothing():
+    assert declared_column_types([replace_step("Delhi", "Mumbai")]) == {}
 
 
 # --------------------------------------------------------------------------------------

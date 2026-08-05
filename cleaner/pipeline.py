@@ -200,6 +200,26 @@ def apply_steps(frame: pd.DataFrame, steps: list[Step]) -> pd.DataFrame:
     return cleaned
 
 
+def declared_column_types(steps: list[Step]) -> dict[str, str]:
+    """The column types the recipe explicitly sets, by column name.
+
+    Read back by the UI's column panel so it reports the type the user *chose*. pandas
+    stores text, categorical and id identically, so detection alone would keep re-guessing
+    `numeric` for an id column of plain digits however many times the user set it.
+
+    A column renamed after its type was set falls out of this mapping and the panel goes
+    back to detecting it — a weaker answer, never a wrong one.
+    """
+    declared: dict[str, str] = {}
+    for step in steps:
+        if step.get("action") != "set_column_types":
+            continue
+        for column, settings in step.get("params", {}).get("by_column", {}).items():
+            if isinstance(settings, dict) and settings.get("target_type"):
+                declared[str(column)] = settings["target_type"]
+    return declared
+
+
 def describe_step(step: Step) -> str:
     """Returns the human-readable log line for one step.
 

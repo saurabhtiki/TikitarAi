@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 DC_TABLES_KEY = "dc_tables"
 DC_UPLOADER_KEY = "dc_uploader"
 DC_TABS_KEY = "dc_tabs"
-DC_RESET_DIALOG_KEY = "dc_reset_dialog_table_id"
+DC_DIALOG_KEY = "dc_open_dialog"
 DC_START_OVER_KEY = "dc_start_over_pending"
 
 MAX_UPLOAD_SIZE_MB = 50
@@ -134,6 +134,33 @@ def set_output_sheet_name(table_id: str, name: str) -> None:
 def clear_tables() -> None:
     """Discards every loaded table and its recipe."""
     st.session_state[DC_TABLES_KEY] = {}
+
+
+def open_dialog(table_id: str, action: str) -> None:
+    """Marks which action dialog should be showing.
+
+    Which dialog is open lives in session state rather than in a button's return value.
+    `if st.button(...): _open_dialog()` looks equivalent but breaks as soon as the dialog
+    contains widgets: interacting with one triggers a rerun, on which the button reads
+    False, so the dialog closes and its inputs vanish. A flag survives those reruns.
+
+    One key holds the whole thing because Streamlit only ever shows one dialog at a time,
+    so a single value can't get out of sync with itself.
+    """
+    st.session_state[DC_DIALOG_KEY] = {"table_id": table_id, "action": action}
+
+
+def close_dialog() -> None:
+    """Dismisses whichever action dialog is open."""
+    st.session_state.pop(DC_DIALOG_KEY, None)
+
+
+def pending_dialog() -> tuple[str, str] | None:
+    """Returns the (table_id, action) of the open dialog, or None if none is open."""
+    pending = st.session_state.get(DC_DIALOG_KEY)
+    if not pending:
+        return None
+    return pending["table_id"], pending["action"]
 
 
 def queue_start_over() -> None:

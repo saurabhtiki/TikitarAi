@@ -34,6 +34,7 @@ from cleaner.profiling import (
     INVISIBLE_WHITESPACE,
     NUMERIC,
     TEXT,
+    blank_mask,
     parse_datetime_series,
     parse_numeric_series,
     text_columns,
@@ -45,7 +46,10 @@ MAX_REGEX_LENGTH = 500
 _WARNING_SAMPLE_SIZE = 5
 
 CASE_CHOICES = ["upper", "lower", "title"]
-FILL_STRATEGIES = ["zero", "mean", "median", "unknown", "drop_rows"]
+# "custom" absorbed what used to be a separate "unknown" strategy — that was a custom
+# fill with the word hardcoded, and two entries for one idea is one too many. The dialog
+# still pre-fills "Unknown", so it stays a zero-typing default.
+FILL_STRATEGIES = ["custom", "previous", "next", "zero", "mean", "median", "drop_rows"]
 DUPLICATE_KEEP_CHOICES = ["first", "last"]
 
 DEFAULT_KEEP_PATTERN = r"A-Za-z0-9 .,_@&()\-/"
@@ -289,10 +293,10 @@ def _apply_remove_empty_rows(frame: pd.DataFrame, params: dict) -> tuple[pd.Data
         return frame.copy(), warnings_out
 
     subset = frame[existing]
-    is_blank = subset.isna()
-    if blank_counts:
-        text_like = subset.apply(lambda series: series.astype("string").str.strip().eq(""))
-        is_blank = is_blank | text_like.fillna(False)
+    # `blank_mask` rather than a local strip-and-compare: it is the one definition of
+    # blank the stats panel and the fill step also use, and it catches the non-breaking
+    # space that `str.strip()` leaves behind.
+    is_blank = subset.apply(blank_mask) if blank_counts else subset.isna()
 
     result = frame.loc[~is_blank.all(axis=1)].reset_index(drop=True)
     return result, warnings_out
@@ -561,29 +565,69 @@ def _validate_find_replace(params: dict, columns: list[str]) -> None:
 # --------------------------------------------------------------------------------------
 
 
+def _fill_strategy(settings: dict) -> str:
+    return settings.get("strategy", "") if isinstance(settings, dict) else ""
+
+
+def _apply_custom_fill(column: str, series: pd.Series, value: str) -> tuple[pd.Series, list[str]]:
+    """Fills blanks with a literal the user typed, keeping a numeric column numeric where
+    the literal allows it and saying so plainly when it doesn't."""
+    if is_numeric_dtype(series):
+        as_number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+        if pd.notna(as_number):
+            return series.fillna(as_number), []
+        return series.astype("string").fillna(value), [
+            f"'{column}' was a numeric column, and filling it with '{value}' turned it into text."
+        ]
+    return series.astype("string").fillna(value), []
+
+
 def _apply_fill_missing(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, list[str]]:
     by_column = params.get("by_column", {})
     existing, missing = _present(frame, list(by_column))
     warnings_out = _missing_warning(missing)
     result = frame.copy()
 
+    # Text that only looks empty — a stray space, or the non-breaking space Excel exports
+    # are full of — counts as missing here. Otherwise a column that reads as blank on
+    # screen would report itself complete and quietly refuse every fill.
+    for column in existing:
+        result[column] = result[column].mask(blank_mask(result[column]))
+
     # Every drop_rows column is dropped together in one pass before any fill runs.
     # Otherwise "drop rows where A is blank, fill B with its mean" would compute a
     # different mean depending on which column happened to be processed first.
-    drop_columns = [column for column in existing if by_column[column] == "drop_rows"]
+    drop_columns = [column for column in existing if _fill_strategy(by_column[column]) == "drop_rows"]
     if drop_columns:
         result = result.dropna(subset=drop_columns).reset_index(drop=True)
 
     for column in existing:
-        strategy = by_column[column]
+        settings = by_column[column]
+        strategy = _fill_strategy(settings)
         if strategy == "drop_rows":
             continue
 
         series = result[column]
         if strategy == "zero":
             result[column] = series.fillna(0)
-        elif strategy == "unknown":
-            result[column] = series.astype("string").fillna("Unknown")
+        elif strategy == "custom":
+            filled, custom_warnings = _apply_custom_fill(column, series, settings.get("value", ""))
+            result[column] = filled
+            warnings_out.extend(custom_warnings)
+        elif strategy in ("previous", "next"):
+            # Row order carries the meaning here, which is why this runs on the frame as
+            # the earlier steps left it rather than on the raw file: skipped rows and
+            # removed duplicates change what "the row above" is.
+            filled = series.ffill() if strategy == "previous" else series.bfill()
+            still_blank = int(filled.isna().sum())
+            if still_blank:
+                edge = "top" if strategy == "previous" else "bottom"
+                neighbour = "earlier" if strategy == "previous" else "later"
+                warnings_out.append(
+                    f"'{column}': {still_blank:,} blank value(s) at the {edge} of the table had no "
+                    f"{neighbour} value to copy, so they are still blank."
+                )
+            result[column] = filled
         elif strategy in ("mean", "median"):
             if not is_numeric_dtype(series):
                 warnings_out.append(
@@ -605,12 +649,18 @@ def _describe_fill_missing(params: dict) -> str:
         "zero": "fill with 0",
         "mean": "fill with the mean",
         "median": "fill with the median",
-        "unknown": "fill with 'Unknown'",
+        "previous": "copy the value from the row above",
+        "next": "copy the value from the row below",
         "drop_rows": "drop affected rows",
     }
-    pairs = ", ".join(
-        f"{column}: {labels.get(strategy, strategy)}" for column, strategy in params.get("by_column", {}).items()
-    )
+
+    def phrase(settings: dict) -> str:
+        strategy = _fill_strategy(settings)
+        if strategy == "custom":
+            return f"fill with '{settings.get('value', '')}'"
+        return labels.get(strategy, strategy)
+
+    pairs = ", ".join(f"{column}: {phrase(settings)}" for column, settings in params.get("by_column", {}).items())
     return f"Handled missing values ({pairs})"
 
 
@@ -620,12 +670,18 @@ def _validate_fill_missing(params: dict, columns: list[str]) -> None:
     if not isinstance(by_column, dict) or not by_column:
         raise InvalidStepError("Missing values needs at least one column.")
     _require_columns_exist(list(by_column), columns, "Missing values")
-    for column, strategy in by_column.items():
+
+    for column, settings in by_column.items():
+        if not isinstance(settings, dict):
+            raise InvalidStepError(f"Missing values: settings for '{column}' must be a mapping.")
+        strategy = settings.get("strategy")
         if strategy not in FILL_STRATEGIES:
             raise InvalidStepError(
                 f"Missing values: '{strategy}' isn't valid for '{column}'. "
                 f"Choose one of {', '.join(FILL_STRATEGIES)}."
             )
+        if strategy == "custom" and not (isinstance(settings.get("value"), str) and settings["value"]):
+            raise InvalidStepError(f"Missing values: '{column}' needs a value to fill blanks with.")
 
 
 # --------------------------------------------------------------------------------------

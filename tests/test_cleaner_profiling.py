@@ -6,10 +6,13 @@ from cleaner.profiling import (
     ID,
     NUMERIC,
     TEXT,
+    blank_count,
+    blank_mask,
     column_stats,
     date_parse_rate,
     detect_column_type,
     detect_column_types,
+    effective_column_type,
     numeric_parse_rate,
     text_columns,
 )
@@ -100,6 +103,53 @@ def test_column_stats_reports_counts_and_samples():
     assert stats["missing_pct"] == 33.3
     assert stats["unique"] == 1
     assert "Delhi" in stats["sample_values"]
+
+
+def test_a_whitespace_only_cell_counts_as_blank():
+    """The reported bug: a Name column whose empty-looking cells hold a space was
+    reported as fully filled. The non-breaking space matters most — it survives
+    `str.strip()` and is what Excel exports are full of."""
+    values = pd.Series(["Ana", "", "   ", "\xa0", "​", None, "Bo"])
+
+    assert list(blank_mask(values)) == [False, True, True, True, True, True, False]
+
+
+def test_blank_mask_on_a_numeric_column_is_just_missingness():
+    assert list(blank_mask(pd.Series([1.0, None]))) == [False, True]
+
+
+def test_blank_count_spans_every_column():
+    assert blank_count(pd.DataFrame({"a": ["x", " "], "b": [None, "y"]})) == 2
+
+
+def test_column_stats_counts_blank_looking_cells_as_blank():
+    frame = pd.DataFrame({"name": ["Ana", "  ", None, "Bo"]})
+    stats = column_stats(frame).iloc[0]
+
+    assert stats["missing"] == 2
+    assert stats["non_null"] == 2
+    assert stats["sample_values"] == "Ana, Bo"
+
+
+def test_column_stats_reports_the_type_the_user_declared():
+    """The reported bug: setting a column of plain digits to `id` left the panel still
+    showing `numeric`, because it re-detected from the values every time. pandas stores
+    text, categorical and id identically, so only the recipe knows which was meant."""
+    frame = pd.DataFrame({"emp_id": ["12", "34", "56"]})
+
+    assert column_stats(frame).iloc[0]["column_type"] == NUMERIC
+    assert column_stats(frame, declared_types={"emp_id": ID}).iloc[0]["column_type"] == ID
+
+
+def test_the_dtype_outranks_a_declared_type_where_it_is_decisive():
+    """A declared type only settles what pandas cannot tell apart. A column that really
+    is numeric should never be reported as text just because a stale step says so."""
+    assert effective_column_type(pd.Series([1.0, 2.0]), declared=TEXT) == NUMERIC
+    assert effective_column_type(pd.to_datetime(pd.Series(["2024-01-01"])), declared=TEXT) == DATE
+
+
+def test_an_unknown_declared_type_falls_back_to_detection():
+    assert effective_column_type(pd.Series(["x", "y"]), declared="nonsense") == TEXT
 
 
 def test_column_stats_handles_an_empty_table():

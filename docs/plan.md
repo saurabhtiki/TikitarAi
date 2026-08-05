@@ -314,7 +314,9 @@ multi-sheet `.xlsx` download.
 Beyond the literal spec text: per-step undo (not just a wholesale reset),
 an "apply to all tables" option on the one-click text actions, an impact
 sentence before each commit, a `_Cleaning log` sheet in the downloaded
-workbook, and header promotion on `skip_rows` (see below).
+workbook, header promotion on `skip_rows` (see below), and copy-down /
+copy-up fills for the merged-cell export shape, where a label is written
+once and left blank down the rows it covers.
 
 **Out of scope** (still deferred): Data Engine/DuckDB, Chat with Data,
 Task Builder, Run a Task, plus per-session LLM selection (spec 3.3) and
@@ -514,8 +516,46 @@ private triples. Every `_apply_*` shares the signature
 | `remove_special_characters` | `{keep_pattern, replacement}` |
 | `change_case` | `{by_column: {col: upper\|lower\|title}}` |
 | `find_replace` | `{columns, find, replace, regex, case_sensitive}` |
-| `fill_missing` | `{by_column: {col: zero\|mean\|median\|unknown\|drop_rows}}` |
+| `fill_missing` | `{by_column: {col: {strategy: custom\|previous\|next\|zero\|mean\|median\|drop_rows, value}}}` |
 | `drop_duplicates` | `{columns \| None, keep}` |
+
+`fill_missing`'s per-column value is a **mapping**, like `set_column_types`'s,
+not a bare strategy string — `custom` carries the literal to fill with, and
+that literal has to be per column. A sibling param alongside `by_column`
+would not survive: `add_step`'s UPDATE_PER_COLUMN branch rebuilds the step as
+`{"by_column": merged}`, so any other key is silently dropped the second time
+the panel is applied.
+
+`previous` / `next` are `ffill` / `bfill`: the merged-cell export shape,
+where a label is written once and left blank down the rows it covers. They
+are the only fill strategies whose result depends on **row order**, which is
+why they run against the frame as earlier steps left it — skipping rows or
+removing duplicates changes what "the row above" is. Blanks at the top (for
+`previous`) or bottom (for `next`) have nothing to copy from and stay blank;
+the step says so in a warning rather than letting the user believe the column
+is now complete.
+
+`custom` absorbed what began as a separate `unknown` strategy — that was a
+custom fill with the word hardcoded, and two entries for one idea is one too
+many. The dialog pre-fills `Unknown`, so it stays a zero-typing default. A
+numeric column stays numeric when the literal parses as a number, and says
+plainly that it became text when it doesn't.
+
+### One definition of blank
+
+`profiling.blank_mask` treats a value as blank when it is missing **or holds
+nothing but whitespace**, and it is the single definition used by the stats
+panel, the missing-values metric, `fill_missing` and `remove_empty_rows`.
+
+This came out of a real report: a Name column of empty-looking cells showed
+as fully filled, because the cells held a space. They have to agree — a panel
+that calls a cell filled while the fill step refuses to touch it is just
+confusing. `str.strip()` alone is not enough either: it leaves the
+non-breaking space that Excel exports are full of, which is why the mask
+matches against `INVISIBLE_WHITESPACE` as well.
+
+`fill_missing` blanks those cells to NA in its targeted columns before it
+fills, so what the panel counts is exactly what the step reaches.
 
 The value parsers `parse_numeric_series` and `parse_datetime_series` live in
 `profiling.py` rather than here, so that "what counts as a number" is
@@ -542,12 +582,15 @@ and `StepOutcome` (`index`, `action`, `status: applied|skipped|warned`,
 - `apply_steps_with_report(df, steps) -> tuple[pd.DataFrame, list[StepOutcome]]` — strict list order; a step whose required columns are absent is skipped and flagged while the rest continue. Raises only `InvalidStepError`, never for data problems.
 - `apply_steps(df, steps) -> pd.DataFrame` — wrapper discarding the report.
 - `describe_step(step) -> str` / `describe_steps(steps) -> list[str]`
+- `declared_column_types(steps) -> dict[str, str]` — the types the recipe explicitly sets, read back by the UI's column panel so it reports what the user chose rather than what a fresh detection guesses.
 
 `cleaner/profiling.py`
 - `numeric_parse_rate(series, decimal_separator=".") -> float` and `date_parse_rate(series, date_format=None) -> float` — `0.0` for an all-null series.
 - `detect_column_type(series, *, numeric_threshold=0.95, date_threshold=0.90, categorical_max_unique=50, categorical_max_ratio=0.5, categorical_min_rows=20) -> DetectedType` — in order: near-unique and either non-numeric-alphanumeric or numeric-with-leading-zeros → `id`; at/above the numeric threshold → `numeric`; at/above the date threshold → `date`; low cardinality per spec 4.1 → `categorical`; else `text`. All-null → `text`. Never raises.
 - `detect_column_types(df, **kwargs) -> dict[str, DetectedType]`
-- `column_stats(df) -> pd.DataFrame` — column, detected type, non-null, missing, missing %, unique, sample values.
+- `blank_mask(series) -> pd.Series` / `blank_count(df) -> int` — the shared definition of blank (missing, or whitespace only). See "One definition of blank" above.
+- `effective_column_type(series, declared=None) -> str` — the type a column *has*, not a fresh guess at it. The dtype decides where it can (numeric, datetime); for the string-backed types it cannot, since pandas stores text, categorical and id identically, so a type the recipe explicitly set wins over detection. Without this, setting a column of plain digits to `id` leaves the panel reporting `numeric`, flatly contradicting the choice the user just made.
+- `column_stats(df, sample_size=3, declared_types=None) -> pd.DataFrame` — column, current type, filled, blank, blank %, unique, sample values. `declared_types` comes from `pipeline.declared_column_types(steps)`; a column renamed after its type was set drops out of that mapping and falls back to detection — a weaker answer, never a wrong one.
 
 `cleaner/naming.py`
 - `sanitize_sheet_name(name, *, fallback="Sheet") -> str` — replaces Excel's forbidden `[ ] : * ? / \`, strips surrounding whitespace and apostrophes, truncates to 31, falls back when empty or equal to Excel's reserved `History`. Never raises.
@@ -631,39 +674,82 @@ page preamble: `get_user_by_id(...)` → `render_sidebar(profile)` →
    editable output sheet name: that is widget-backed, so every keystroke
    would change the tab set's identity and reset the selection mid-edit.
 
-   Inside each tab, a metrics strip (`st.metric` for rows raw→now, columns
+   Inside each tab: a metrics strip (`st.metric` for rows raw→now, columns
    raw→now, missing %, duplicate count — the always-visible proof each
-   action did something), then `st.columns([2, 3])`:
+   action did something), then a **command bar**, then `st.columns([3, 2])`
+   holding the preview and the cleaning log.
 
-   *Left, action groups as `st.expander`s, ordered the way people clean:*
-   1. **Structure** — skip N rows top/bottom with header promotion, remove
-      empty rows (all columns or a subset), delete columns, rename columns.
-   2. **Column types** — a `st.multiselect` of columns plus one
-      target-type `st.selectbox` and Apply, inside a form. Deliberately
-      **not `st.data_editor`**: it has no `AppTest` accessor, and
-      synthesizing steps from a returned-frame diff fights the recipe
-      model. The auto-detected types stay reviewable at a glance as a
-      read-only `column_stats` table on the right, so the `categorical`
-      suggestions remain visible without an editable grid.
-   3. **Text cleanup** — trim whitespace, remove/replace special
-      characters, letter case per column, and find & replace with
-      regex/case toggles scoped to chosen columns. The one-click actions
-      carry an "Apply to all tables" checkbox.
-   4. **Missing values** — per-column strategy, plus the
-      numbers-stored-as-text fix.
-   5. **Duplicates** — choose the subset defining a duplicate, see the
-      count, remove them.
+   *Command bar.* One `st.segmented_control` per group, in the order people
+   actually clean: **Structure** (skip rows, empty rows, delete columns,
+   rename column), **Values** (column types, missing values, numbers stored
+   as text), **Text** (trim whitespace, special characters, letter case,
+   find & replace), **Rows** (duplicates, reset to raw). Picking an option
+   opens that action's own dialog holding its inputs, a live impact
+   sentence, and Apply/Cancel.
 
-   Each Apply shows its impact sentence before commit.
+   This went through two revisions. The original design gave each group an
+   `st.expander` full of stacked widgets in a narrow left column; dialogs
+   replaced it because they give the inputs real room, make the actions
+   scannable instead of hidden behind collapsed headings, and hand the
+   preview the width the expanders used to take. The dialog-opening control
+   then moved from a grid of `st.button`s to segmented controls, which read
+   as one toolbar of related choices rather than fourteen competing calls
+   to action.
 
-   *Right, live feedback:* the cleaned preview (`st.dataframe`, 500 rows,
-   `width="stretch"`) and the read-only `column_stats` table; the cleaning
-   log beneath it as numbered `describe_step` lines, each with a remove
-   button (`key=f"dc_remove_step_{table_id}_{index}"` — index-based keys
-   are safe because buttons are stateless and the whole log re-renders
-   after any mutation), plus "Reset to raw" behind a confirm dialog;
-   `StepOutcome` warnings (coercion counts, skipped steps); and the output
-   sheet name `st.text_input`, sanitized on save.
+   **The selection is cleared in the widget's own `on_change`.** A
+   segmented control fires `on_change` only when its value actually
+   changes, so leaving the last pick selected would make re-opening the
+   same dialog a dead click. Writing a widget's own key is legal from a
+   callback, which runs before the script re-executes — the same rule that
+   forces the deferred start-over reset below.
+
+   **Reset to raw is omitted, not greyed out, while a table has no steps.**
+   `disabled` applies to a segmented control as a whole, so a disabled
+   option would have to take the whole Rows group with it.
+
+   The column-type dialog is a `st.multiselect` of columns plus one
+   target-type `st.selectbox` — deliberately **not `st.data_editor`**,
+   which has no `AppTest` accessor and would require diffing a returned
+   frame to synthesize steps, fighting the recipe model. The auto-detected
+   types stay reviewable in the read-only `column_stats` table instead, so
+   the `categorical` suggestions remain visible without an editable grid.
+
+   The one-click text actions carry an "Apply to all loaded tables"
+   checkbox, shown only when more than one table is loaded.
+
+   *Preview and log.* The cleaned preview (`st.dataframe`, 500 rows,
+   `width="stretch"`), the read-only `column_stats` table, and the output
+   sheet name `st.text_input` sit on the left; the cleaning log on the
+   right as numbered `describe_step` lines carrying `StepOutcome` warnings
+   (coercion counts, skipped steps), each with a remove button
+   (`key=f"dc_remove_step_{table_id}_{index}"` — index-based keys are safe
+   because buttons are stateless and the whole log re-renders after any
+   mutation).
+
+   **Dialogs live in `session_state`, not in a button's return value.**
+   `if st.button(...): _open_dialog()` looks equivalent but breaks the
+   moment a dialog holds widgets: interacting with one reruns the script,
+   the button reads False, and the dialog closes mid-edit. A single
+   `dc_open_dialog` key holds `{table_id, action}` — one key, because
+   Streamlit only ever shows one dialog at a time, so the value cannot get
+   out of sync with itself.
+
+   **The dialog is rendered inside the tab's fragment**, next to the
+   command bar that opens it. Rendering it at the page's top level instead
+   silently never shows anything: a widget interaction inside a fragment
+   reruns only that fragment, so top-level code never re-executes to notice
+   the flag. This was caught by the page tests.
+
+   **Editing the output sheet name reruns app-scoped**, for the mirror
+   image of that reason. The `st.text_input` sits inside the tab fragment
+   while the workbook is materialized at page level — and
+   `st.download_button` must have its bytes ready *before* the click, so a
+   fragment-scoped rerun would leave the download quietly carrying the old
+   sheet name. The change check compares the **sanitized** input against
+   the stored name, because sanitizing is what gets stored: comparing raw
+   text would see a difference on every rerun and loop forever. A caption
+   states the worksheet name actually used, resolved through
+   `export_sheet_names` so it reflects de-duplication too.
 3. **Download** — one `st.download_button` producing the multi-sheet
    `.xlsx` including `_Cleaning log`, plus "Start over".
 
@@ -733,6 +819,21 @@ Python 3.12.12). Three of these overturn assumptions carried from Stages
   `pipeline.apply_steps` instead — same recipe, no cache.
 - **`AppTest`'s `session_state` proxy resolves attribute access as a key
   lookup**, so `.get(...)` and `.update(...)` raise. Use bracket access.
+- **`AppTest` keeps a closed dialog's widgets in its element tree** after
+  Streamlit has garbage-collected their `session_state` entries, so the
+  next `.run()` raises `KeyError` on the orphans. `_click_and_settle` in
+  `test_data_cleaner_page.py` re-seeds each orphan with the value it held
+  before the click. A browser never hits this — the frontend simply stops
+  sending a closed dialog's widget states.
+- **`st.segmented_control` is drivable via `at.segmented_control(key=...)`**,
+  which shares the `ButtonGroup` element with `st.pills`. `set_value` takes
+  the raw option value, but `.options` reports the **formatted** faces —
+  and Streamlit lifts a leading `:material/…:` directive out of an option
+  label into a separate icon field, so an option's reported content is the
+  face text without it. `_command_control` in `test_data_cleaner_page.py`
+  strips that prefix from `format_func`'s output before matching, which is
+  how the tests find an action's group without importing the page module
+  (importing it would execute the page outside a run context).
 - **pandas is 3.0.5, not 2.x.** The default string dtype is `StringDtype`,
   so `is_object_dtype(text_column)` returns **False** — type detection
   written from 2.x memory would classify every text column wrongly and
@@ -763,7 +864,13 @@ here can drive the real uploader and the real dialogs.
       NaN]` with one reported failure; `trim_whitespace` stripping
       non-breaking (U+00A0) and zero-width (U+200B) characters, not just
       ASCII; `find_replace` with `case_sensitive=False, regex=True`;
-      `fill_missing` mean/median on a text column warning rather than raising
+      `fill_missing` mean/median on a text column warning rather than
+      raising; `fill_missing` `previous`/`next` copying a label across the
+      rows it covers, warning about edge blanks they cannot reach, and
+      following the row order earlier steps left behind; a `custom` fill
+      keeping a numeric column numeric when the literal is a number and
+      saying it became text when it isn't; whitespace-only cells being
+      filled at all; `remove_empty_rows` catching a non-breaking space
 - [x] `test_cleaner_pipeline.py` — ADD grows the list; REPLACE keeps length
       1 **and preserves the original index**; UPDATE_PER_COLUMN updates only
       the named columns and drops the step when emptied; `skip_rows` and
@@ -771,22 +878,35 @@ here can drive the real uploader and the real dialogs.
       two `find_replace` steps in opposite orders give different frames; a
       step targeting a deleted column is `skipped` **and later steps still
       apply**; `validate_step` raises for unknown action, duplicate rename
-      target, uncompilable regex, negative `top`; and
+      target, uncompilable regex, negative `top`; `declared_column_types`
+      reporting what the recipe set; and
       `json.loads(json.dumps(steps)) == steps`
 - [x] `test_cleaner_profiling.py` — a 5-value/500-row column →
       `categorical`; near-unique zero-padded → `id`; 3% junk → `numeric`
-      and 20% junk → `text`; all-null → `text`
+      and 20% junk → `text`; all-null → `text`; `blank_mask` catching the
+      plain, non-breaking and zero-width space; `column_stats` counting
+      those as blank and reporting a **declared** type over a detected one,
+      while a decisive dtype still outranks a stale declaration
 - [x] `test_cleaner_export.py` — two tables round-trip back through
       `loaders` with matching content and order; NaN → empty cell;
       `_Cleaning log` contents; empty input → `ExportError`
-- [x] `test_data_cleaner_page.py` — any role reaches the page; no exception
-      with zero uploads; `at.file_uploader(key="dc_uploader").set_value(...)`
+- [x] `test_data_cleaner_page.py` — the command bar offers every action in
+      `STEP_REGISTRY` (so a 13th action can't be added without one); no
+      dialog widgets exist until a command is picked; picking one opens that
+      dialog and Cancel records nothing; reset is not offered while a table
+      has no steps; every `FILL_STRATEGIES` entry has a label in its dialog;
+      copy-down and a custom-value fill work end to end through the UI; a
+      cell holding only spaces is reported as blank, and changing a column
+      type shows up in the column panel; renaming the output sheet
+      reaches the **download**, and a name that sanitizes to something else
+      settles instead of rerunning forever; any role reaches the page; no
+      exception with zero uploads; `at.file_uploader(key="dc_uploader").set_value(...)`
       produces a tab, preview, and correct metrics; two identically-named
       files get deduped tab labels; multi-sheet upload shows the sheet
-      picker; setting `dc_tabs` switches tabs; clicking the trim button
-      twice leaves **one** log entry (the REPLACE rule through the real
-      UI); the reset-to-raw dialog empties `steps`; a download is offered
-      with the expected sheet names; plus a regression test mirroring
+      picker; setting `dc_tabs` switches tabs; trimming twice leaves **one**
+      log entry (the REPLACE rule through the real UI); the reset-to-raw
+      dialog empties `steps`; a download is offered with the expected sheet
+      names; plus a regression test mirroring
       `test_set_light_model_button_does_not_crash` for the deferred-reset
       trap, which applies here too
 - [x] `uv run pytest` passes
