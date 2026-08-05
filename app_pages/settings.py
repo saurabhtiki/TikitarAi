@@ -432,7 +432,7 @@ def _render_llm_section(current_profile: dict) -> None:
 if profile is not None:
     render_sidebar(profile)
 
-    st.title("Settings")
+    st.subheader("⚙️Settings")
 
     section = st.segmented_control(
         "Section",

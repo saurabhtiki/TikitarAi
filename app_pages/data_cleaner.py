@@ -938,7 +938,7 @@ def _render_download(tables: list[session.TableState]) -> None:
 if profile is not None:
     render_sidebar(profile)
 
-    st.title("Data Cleaner")
+    st.subheader("🧹Data Cleaner")
     st.write(":blue[**Upload files, clean each table, and download one multi-sheet workbook.**]")
 
     loaded_tables = _render_upload()

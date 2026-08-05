@@ -44,7 +44,7 @@ def _avatar_and_name_html(profile: dict) -> str:
 def render_sidebar(profile: dict) -> None:
     """Renders the app-wide sidebar: logo (via st.logo), a Log out button always at the
     top, then a round avatar + name (no email, per the app's sidebar spec)."""
-    st.logo(LOGO_PATH, size="medium")
+    #st.logo(LOGO_PATH, size="medium")
     with st.sidebar:
         col1,col2 = st.columns(2,vertical_alignment="center")
         with col1:

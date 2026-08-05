@@ -18,7 +18,7 @@ except AuthDatabaseError:
 if profile is not None:
     render_sidebar(profile)
 
-    st.title(f"Welcome, {profile['name']}")
+    st.subheader("🏠Home")
     st.caption(f"Role: {profile['role'].replace('_', ' ').title()}")
     st.info(
         "This is a placeholder home screen. LLM configuration, Data Cleaner, "

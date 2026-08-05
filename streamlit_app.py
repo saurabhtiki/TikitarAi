@@ -1,7 +1,7 @@
 import logging
-
+from pathlib import Path
 import streamlit as st
-
+from PIL import Image
 from auth.db import init_db, seed_default_admin
 from auth.exceptions import AuthDatabaseError
 from auth.service import is_authenticated
@@ -13,6 +13,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 st.set_page_config(page_title="TikitarAi", page_icon=LOGO_PATH, layout="wide")
+st.html(Path("style.css"))
+
+with st.container(horizontal=True):
+    st.image(Image.open("static/tikitar-logo.webp"), width=50)
+    st.header(":blue[Tikitar-AI]")
 
 
 @st.cache_resource
