@@ -245,6 +245,18 @@ class TestEnforceable:
         assert rel.enforceable(connection, [clean, dirty]) == [clean]
 
 
+class TestRelationshipLabels:
+    def test_label_is_the_bare_arrow(self):
+        relationship = rel.Relationship("sales", "cust_id", "customer", "id")
+        assert relationship.label == "sales.cust_id → customer.id"
+
+    def test_explained_label_names_both_roles(self):
+        relationship = rel.Relationship("sales", "cust_id", "customer", "id")
+        assert relationship.explained_label == (
+            "sales.cust_id (child / FK) → customer.id (parent / unique)"
+        )
+
+
 class TestDiagram:
     def test_dot_contains_a_node_per_table_and_an_edge_per_link(self):
         dot = rel.to_dot(
@@ -256,6 +268,8 @@ class TestDiagram:
         )
         assert dot.startswith("digraph")
         assert dot.count("->") == 2
+        assert "(FK)" in dot
+        assert "(unique)" in dot
         for table in ("sales", "customer", "stock"):
             assert f'"{table}"' in dot
 

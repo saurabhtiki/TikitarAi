@@ -69,6 +69,19 @@ class Relationship:
     def label(self) -> str:
         return f"{self.child_table}.{self.child_column} → {self.parent_table}.{self.parent_column}"
 
+    @property
+    def explained_label(self) -> str:
+        """`label` with which side is which spelled out.
+
+        The bare arrow reads as "left is primary" to most people, which is backwards —
+        it points from the referencing (child/FK) side to the referenced (parent/unique)
+        side. Spelling both roles out removes that ambiguity in the UI.
+        """
+        return (
+            f"{self.child_table}.{self.child_column} (child / FK) → "
+            f"{self.parent_table}.{self.parent_column} (parent / unique)"
+        )
+
 
 @dataclass
 class RelationshipCheck:
@@ -596,7 +609,7 @@ def to_dot(tables: list[str], relationships: list[Relationship]) -> str:
     for relationship in relationships:
         lines.append(
             f'  "{relationship.child_table}" -> "{relationship.parent_table}" '
-            f'[label="{relationship.child_column} → {relationship.parent_column}"];'
+            f'[label="{relationship.child_column} (FK) → {relationship.parent_column} (unique)"];'
         )
 
     lines.append("}")

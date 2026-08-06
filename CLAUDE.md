@@ -19,7 +19,8 @@ Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- update this line each time a phase is completed -->
-Stage 5: Data Engine core + LLM client — complete
+Stage 6: Agent execution (Agno + guarded DuckDbTools), output-type logic, working Chat,
+and requirement 5.4's update-column-values — complete
 
 # Library docs (Agno, Streamlit)
 
@@ -33,6 +34,7 @@ After writing Agno/Streamlit code, verify it against these sources and flag anyt
 
 - Naming: snake_case for functions/variables, PascalCase for classes, descriptive names (no `df1`, `temp`, `x`)
 - Streamlit: every widget must have a unique `key=` and a `help=` tooltip
+- streamlit: Use width property instead of old container_width property
 - Every function: wrap risky logic (I/O, parsing, API/model calls) in try/except with specific, user-facing error messages — no bare `except:`
 - Log errors before raising or displaying them
 - After finishing a phase, run `/code-review` or `/simplify` and check output against this list

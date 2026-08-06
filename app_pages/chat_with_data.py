@@ -1,9 +1,11 @@
-"""Chat with Data — upload files, confirm how they link up, describe the columns.
+"""Chat with Data — upload files, confirm how they link up, describe the columns, then ask.
 
-This page is the front half of requirements section 6, built on the shared Data Engine
-(section 5). The chat panel itself arrives in the next stage; everything below it —
-loading into DuckDB, confirming relationships as real foreign keys, and the column data
-dictionary — is what every later component depends on.
+This page is requirements section 6 built on the shared Data Engine (section 5): loading
+into DuckDB, confirming relationships as real foreign keys, the column data dictionary,
+and the chat panel where the agent (section 5.5) answers questions against all of it.
+
+Pinning outputs to a Dashboard (requirement 6.3) arrives next stage; the pin button is
+rendered disabled so the chat layout doesn't shift when it starts working.
 
 Open to every logged-in role (requirement 2.2 grants Chat with Data to all three), so
 this page follows `settings.py` and carries no `require_role` guard.
@@ -15,14 +17,17 @@ re-run its preview queries. Actions that need input open an `st.dialog`, driven 
 session-state flag rather than a button's return value, which breaks the moment a dialog
 holds widgets.
 
-A `st.segmented_control` (`de_view`) switches between "Setup" (steps 2 & 3, plus the
-column-editing actions) and "Chat" (the chat panel). Step 1 is the one exception — it
-stays visible on both, because its `st.file_uploader` must be instantiated on *every*
-rerun to keep reporting its files; the moment a run skips creating it (which switching
-tabs would do, same as a collapsed expander skipping it would), it comes back empty on
-the next run and silently drops every loaded table. Steps 2 and 3 don't have that
-problem — their state lives in plain `session_state` dicts, not a raw widget — so they
-can be hidden outright.
+A `st.segmented_control` (`de_view`) switches between "Setup" (steps 2 & 3) and "Chat"
+(the transcript, the chat input, and the Actions menu), rendered *above* Step 1 so it
+reads as the page's primary navigation rather than something below a full upload panel.
+Step 1 is the one exception to the toggle hiding a step outright — its
+`st.file_uploader` must be instantiated on *every* rerun regardless of which view is
+selected, to keep reporting its files; the moment a run skips creating it (which
+switching views would do, same as a collapsed expander skipping it would), it comes back
+empty on the next run and silently drops every loaded table. Once files are loaded it
+auto-collapses to one summary line, so in practice it costs a single line under the
+toggle rather than a panel. Steps 2 and 3 don't have that problem — their state lives in
+plain `session_state` dicts, not a raw widget — so they can be hidden outright.
 """
 
 import logging
@@ -30,11 +35,15 @@ import logging
 import pandas as pd
 import streamlit as st
 
+from analyst import charts, pipeline, routing
+from analyst import session as chat_session
+from analyst.exceptions import ChatStorageError
+from analyst.session import ChatMessage
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
 from engine import columns as engine_columns
 from engine import dictionary, duckdb_session, relationships, session
-from engine.exceptions import CalculatedColumnError, DataEngineError, UnsafeSqlError
+from engine.exceptions import CalculatedColumnError, DataEngineError
 from engine.relationships import Relationship
 from llm import session as llm_session
 from llm import suggestions as llm_suggestions
@@ -45,6 +54,18 @@ logger = logging.getLogger(__name__)
 # Above this many tables, the relationship list stops being scannable and the diagram
 # earns its place (requirement 5.2 asks for it "once more than two or three tables").
 DIAGRAM_MIN_TABLES = 3
+
+# What the Actions menu offers. None of requirement 5.4's column changes are here: adding,
+# updating and deleting all work by asking in chat, and a menu entry that duplicates a
+# sentence the user can already type is a second thing to maintain for no new capability.
+#
+# What belongs here is anything chat cannot do. "Show current data" is the first of those
+# — after a few conversational column changes, the question "what do my tables look like
+# now?" has no natural answer in a transcript. Send mail, add a reminder and add a task
+# will join it. Keys map a label to its entry in `DIALOGS`.
+MENU_ACTIONS = {
+    "Show current data": "show_data",
+}
 
 try:
     profile = get_user_by_id(st.session_state["user_id"])
@@ -328,7 +349,7 @@ def _render_offending_rows(check) -> None:
 def _dialog_offending_rows(payload: dict) -> None:
     relationship = payload["relationship"]
     check = relationships.check_relationship(session.connection(), relationship)
-    st.write(f"**{relationship.label}**")
+    st.write(f"**{relationship.explained_label}**")
     st.warning(check.message, icon=":material/error:")
     _render_offending_rows(check)
     if st.button("Close", key="de_offending_close_button", width="stretch", help="Go back to the list of links."):
@@ -351,7 +372,7 @@ def _render_candidates() -> None:
         check = relationships.check_relationship(session.connection(), relationship)
         text_column, action_column = st.columns([3, 2], vertical_alignment="center")
         with text_column:
-            st.markdown(f"**{relationship.label}**")
+            st.markdown(f"**{relationship.explained_label}**")
             st.caption(f"✅ {check.message}" if check.ok else f"⚠️ {check.message}")
         with action_column:
             if st.button(
@@ -383,7 +404,7 @@ def _render_candidates() -> None:
             text_column, action_column = st.columns([3, 2], vertical_alignment="center")
             with text_column:
                 icon = "✅" if check.ok else "⚠️"
-                text_column.markdown(f"{icon} {relationship.label}")
+                text_column.markdown(f"{icon} {relationship.explained_label}")
                 if not check.ok:
                     text_column.caption(f"{check.message} Used for queries, not enforced.")
             if action_column.button(
@@ -610,116 +631,61 @@ def _render_dictionary_step(user_id: int) -> None:
 
 
 # --------------------------------------------------------------------------------------
-# Calculated columns
+# Actions
 # --------------------------------------------------------------------------------------
+#
+# Requirement 5.4's three column changes are all conversational — the path in
+# `analyst/column_intent.py` reaches the same `engine/columns.py` functions a dialog would,
+# so a guided form for each was a second way to say the same sentence. What lives here
+# instead is what a sentence cannot do.
 
 
-@st.dialog("Add a calculated column", width="large", on_dismiss=_dismiss_dialog)
-def _dialog_add_column(payload: dict) -> None:
+@st.dialog("Current data", width="large", on_dismiss=_dismiss_dialog)
+def _dialog_show_data(payload: dict) -> None:
+    """The tables as they stand right now, after every change made so far.
+
+    A transcript records what was asked, not what the data became. Once a few columns have
+    been added and updated conversationally, "what do my tables look like now?" is a
+    reasonable question with no answer anywhere in the chat — this is that answer.
+    """
     tables = session.table_names()
     if not tables:
-        st.info("Load a table first.", icon=":material/info:")
+        st.info("No tables are loaded yet.", icon=":material/info:")
         return
 
     table = st.selectbox(
-        "Table", options=tables, key="de_calc_table", help="Which table the new column is added to."
-    )
-    new_column = st.text_input(
-        "New column name", key="de_calc_name", help="What to call it, e.g. tax or net_salary."
-    )
-    expression = st.text_input(
-        "Formula",
-        key="de_calc_expression",
-        help="A SQL expression over this table's columns, e.g. basic * 0.10 or basic - tax.",
-    )
-    st.caption(f"Columns available: {', '.join(_columns_of(table))}")
-
-    statements: list[str] = []
-    if new_column.strip() and expression.strip():
-        try:
-            column_type = engine_columns.expression_type(session.connection(), table, expression)
-            statements = [
-                f'ALTER TABLE "{table}" ADD COLUMN "{new_column.strip()}" {column_type}',
-                f'UPDATE "{table}" SET "{new_column.strip()}" = ({expression.strip()})',
-            ]
-            st.markdown("**This will run:**")
-            st.code(";\n".join(statements), language="sql")
-        except (CalculatedColumnError, UnsafeSqlError) as error:
-            st.warning(str(error), icon=":material/error:")
-
-    add_column_button, cancel_column = st.columns(2)
-    with add_column_button:
-        if st.button(
-            "Add column",
-            key="de_calc_add_button",
-            icon=":material/add:",
-            type="primary",
-            width="stretch",
-            disabled=not statements,
-            help="Add it to the table for the rest of this session.",
-        ):
-            try:
-                executed = engine_columns.add_calculated_column(
-                    session.connection(), table, new_column.strip(), expression
-                )
-            except (CalculatedColumnError, UnsafeSqlError) as error:
-                st.error(str(error))
-                return
-            session.add_statements(executed)
-            session.bump_rebuild()
-            session.refresh_dictionary()
-            session.close_dialog()
-            st.rerun(scope="app")
-    with cancel_column:
-        if st.button("Cancel", key="de_calc_cancel_button", width="stretch", help="Close without adding anything."):
-            session.close_dialog()
-            st.rerun(scope="app")
-
-
-@st.dialog("Remove a column", width="large", on_dismiss=_dismiss_dialog)
-def _dialog_remove_column(payload: dict) -> None:
-    tables = session.table_names()
-    table = st.selectbox(
-        "Table", options=tables, key="de_drop_table", help="Which table to remove a column from."
-    )
-    options = _columns_of(table)
-    column = st.selectbox(
-        "Column to remove", options=options, key="de_drop_column", help="This applies for the rest of the session."
+        "Table",
+        options=tables,
+        key="an_show_data_table",
+        help="Which loaded table to look at. Every change made this session is already in it.",
     )
 
-    remove_column_button, cancel_column = st.columns(2)
-    with remove_column_button:
-        if st.button(
-            "Remove column",
-            key="de_drop_go_button",
-            icon=":material/delete:",
-            type="primary",
-            width="stretch",
-            disabled=not column,
-            help="Drop the column from this table.",
-        ):
-            try:
-                executed = engine_columns.drop_column(session.connection(), table, column)
-            except CalculatedColumnError as error:
-                st.error(str(error))
-                return
-            session.add_statements(executed)
-            session.bump_rebuild()
-            session.refresh_dictionary()
-            session.close_dialog()
-            st.rerun(scope="app")
-    with cancel_column:
-        if st.button("Cancel", key="de_drop_cancel_button", width="stretch", help="Close without removing anything."):
-            session.close_dialog()
-            st.rerun(scope="app")
+    try:
+        # Counted live rather than read from `EngineTable.row_count`, which is the count
+        # at load time. Passing no condition makes this a plain `count(*)`.
+        rows = engine_columns.affected_row_count(session.connection(), table)
+        frame = session.preview(table)
+    except (CalculatedColumnError, DataEngineError) as error:
+        logger.exception("Could not preview '%s'.", table)
+        st.error(f"'{table}' couldn't be read ({error}).")
+        return
+
+    shown = f" — first {len(frame)} shown" if len(frame) < rows else ""
+    st.caption(f"{rows} row(s) x {len(frame.columns)} column(s){shown}.")
+    st.dataframe(frame, key="an_show_data_frame", width="stretch", hide_index=True)
+
+    if st.button(
+        "Close", key="an_show_data_close_button", width="stretch", help="Back to the chat."
+    ):
+        session.close_dialog()
+        st.rerun(scope="app")
 
 
 DIALOGS = {
     "edit_link": _dialog_edit_link,
     "offending": _dialog_offending_rows,
     "suggest": _dialog_suggest,
-    "add_column": _dialog_add_column,
-    "remove_column": _dialog_remove_column,
+    "show_data": _dialog_show_data,
 }
 
 
@@ -732,6 +698,512 @@ def _render_pending_dialog() -> None:
         session.close_dialog()
         return
     DIALOGS[action](payload)
+
+
+# --------------------------------------------------------------------------------------
+# Chat
+# --------------------------------------------------------------------------------------
+
+
+def _render_actions_bar() -> None:
+    """The Actions menu and Clear chat, on one row under the chat input.
+
+    A horizontal `st.container` rather than `st.columns`: the two sit together as one
+    toolbar and size to their own content, where fixed column widths would leave the menu
+    button stranded in an over-wide cell. Placed below the input so the controls stay put
+    as the transcript grows — in columns above it they drift further from the chat with
+    every answer.
+
+    The per-statement change log that used to sit alongside these was dropped: every
+    change already shows up in its own chat message (and, since Actions → Show current
+    data, so does the data it produced), so a second running log of the same statements
+    was redundant.
+    """
+    with st.container(horizontal=True, vertical_alignment="center", border=True, key="an_actions_bar"):
+        chosen = st.menu_button(
+            "Actions",
+            options=list(MENU_ACTIONS),
+            key="an_actions_menu",
+            icon=":material/build:",
+            help="Actions that need a form rather than a sentence. Adding, updating and deleting columns is done by asking in chat.",
+        )
+        if chosen is not None:
+            session.open_dialog(MENU_ACTIONS[chosen], {})
+            st.rerun(scope="app")
+
+        if st.button(
+            "Clear chat",
+            key="an_clear_chat_button",
+            icon=":material/delete_sweep:",
+            disabled=not chat_session.get_messages(),
+            help="Empty the transcript and the agent's memory of it. Your tables, links and column changes stay as they are.",
+        ):
+            chat_session.clear_messages()
+            st.rerun(scope="app")
+
+
+def _render_message(message: ChatMessage, index: int) -> None:
+    """Paints one turn of the transcript.
+
+    Everything rendered here comes from what was stored when the question was answered —
+    no SQL is re-run on a rerun, which is what keeps scrolling the chat free.
+    """
+    with st.chat_message(message.role):
+        if message.role == chat_session.ROLE_USER:
+            st.markdown(message.text)
+            return
+
+        if message.is_error:
+            st.error(message.text, icon=":material/error:")
+            return
+
+        if message.sql:
+            # Requirement 5.4 and 5.5: the statement that actually ran is always available,
+            # collapsed so it informs without dominating the answer.
+            with st.expander("SQL that ran", icon=":material/code:"):
+                st.code(message.sql, language="sql")
+
+        if message.figure is not None:
+            st.plotly_chart(message.figure, key=f"an_chart_{index}", width="stretch")
+            for warning in message.chart_warnings:
+                st.caption(f":orange[{warning}]")
+            _render_chart_controls(message, index)
+
+        if routing.OUTPUT_DATAFRAME in message.outputs and message.frame is not None:
+            st.dataframe(message.frame, key=f"an_frame_{index}", width="stretch", hide_index=True)
+
+        if message.text:
+            st.markdown(message.text)
+
+        for warning in message.warnings:
+            st.caption(f":orange[{warning}]")
+
+        if message.frame is not None or message.figure is not None:
+            st.button(
+                "Pin to Dashboard",
+                key=f"an_pin_{index}",
+                icon=":material/push_pin:",
+                disabled=True,
+                help="The Dashboard arrives in the next stage — this output will pin to it then.",
+            )
+
+
+# Every widget suffix the customize panel owns. "Reset to automatic" clears them all, and
+# keeping the list in one place stops it drifting out of step with the controls themselves.
+CHART_CONTROL_SUFFIXES = (
+    "kind",
+    "x",
+    "y",
+    "colour",
+    "title",
+    "palette",
+    "series",
+    "values",
+    "legend",
+    "sort",
+    "top",
+    "height",
+)
+
+
+def _render_chart_controls(message: ChatMessage, index: int) -> None:
+    """Lets the user redraw the chart from the rows already in hand.
+
+    Nothing here calls the model or re-runs any SQL: the frame behind this message is still
+    in session state, so changing a dropdown is a redraw of data that has already been
+    fetched. The controls open pre-filled with what was drawn automatically, so opening the
+    panel and closing it again changes nothing.
+
+    Split across two tabs because the two halves answer different questions — **Data** is
+    what the chart is of, **Style** is what it looks like — and they are stored as two
+    separate values for the same reason, so changing the chart type keeps the title and
+    colours the user picked.
+
+    Only offered while the message still holds its frame — `analyst.session` releases those
+    from older turns, and controls that can't redraw anything would be a dead end.
+    """
+    frame = message.frame
+    if frame is None or message.choices is None:
+        return
+
+    kinds = charts.available_chart_types(frame)
+    if not kinds:
+        return
+
+    current = message.choices
+    current_style = message.style or charts.ChartStyle()
+
+    with st.expander("Customize chart", icon=":material/tune:"):
+        data_tab, style_tab = st.tabs(["Data", "Style"], key=f"an_chart_tabs_{index}")
+        with data_tab:
+            chosen = _chart_data_controls(frame, current, kinds, index)
+        with style_tab:
+            # `chosen or current` because the style controls only need to know the shape of
+            # the chart to decide what to offer, and an empty Values box isn't a reason to
+            # empty the Style tab too.
+            chosen_style = _chart_style_controls(
+                message, frame, chosen or current, current_style, index
+            )
+
+    if chosen is None:
+        st.caption(":orange[Pick at least one value to plot — showing the last chart until you do.]")
+        return
+    if chosen == current and chosen_style == current_style:
+        return
+
+    figure, warnings = charts.render_chart(frame, chosen, chosen_style)
+    if figure is None:
+        # The previous chart stays on screen: a failed redraw should cost the change, not
+        # the chart the user already had.
+        st.caption(f":orange[{' '.join(warnings) or 'That combination cannot be charted.'}]")
+        return
+
+    message.figure = figure
+    message.choices = chosen
+    message.style = chosen_style
+    message.chart_warnings = warnings
+    st.rerun(scope="app")
+
+
+def _chart_data_controls(
+    frame: pd.DataFrame, current: charts.ChartChoices, kinds: list[str], index: int
+) -> charts.ChartChoices | None:
+    """The **Data** tab: what the chart is of. None when nothing is selected to plot."""
+    columns = list(frame.columns)
+    numeric = [name for name in columns if pd.api.types.is_numeric_dtype(frame[name])]
+
+    # Read from the widgets rather than from `current`, which is a run behind them: moving
+    # the x axis onto the column currently used as the legend would otherwise leave the
+    # legend holding a value its own option list no longer offers.
+    live_x = st.session_state.get(f"an_chart_x_{index}", current.x)
+    live_measures = st.session_state.get(f"an_chart_y_{index}", current.measures)
+    # A measure can't also be the thing it's split by, and neither can the x axis.
+    splits = ["None", *(name for name in columns if name != live_x and name not in live_measures)]
+
+    chosen_kind = st.selectbox(
+        "Chart type",
+        options=kinds,
+        index=kinds.index(current.kind) if current.kind in kinds else 0,
+        format_func=lambda kind: charts.CHART_LABELS.get(kind, kind),
+        key=f"an_chart_kind_{index}",
+        help="Only the types that suit this result are listed — a pie needs a few non-negative parts of one whole, a scatter needs two numeric columns.",
+    )
+    axis_column, value_column = st.columns(2)
+    with axis_column:
+        chosen_x = st.selectbox(
+            "X axis" if chosen_kind != charts.CHART_PIE else "Slices",
+            options=columns,
+            index=columns.index(current.x) if current.x in columns else 0,
+            key=f"an_chart_x_{index}",
+            help="The category or date the values are grouped along. On a horizontal bar this runs up the side instead.",
+        )
+    with value_column:
+        chosen_measures = st.multiselect(
+            "Values",
+            options=numeric,
+            default=[name for name in current.measures if name in numeric],
+            key=f"an_chart_y_{index}",
+            help="The numbers to plot. Pick several to compare them side by side — types that can only draw one will use the first.",
+        )
+
+    _drop_stale_selection(f"an_chart_colour_{index}", splits)
+    chosen_split = st.selectbox(
+        "Colour / legend",
+        options=splits,
+        index=splits.index(current.colour) if current.colour in splits else 0,
+        key=f"an_chart_colour_{index}",
+        help="Splits each value into one coloured series per value of this column — e.g. status, giving a legend of statuses.",
+    )
+
+    if not chosen_measures:
+        return None
+    return charts.ChartChoices(
+        kind=chosen_kind,
+        x=chosen_x,
+        measures=list(chosen_measures),
+        colour=None if chosen_split == "None" else chosen_split,
+    )
+
+
+def _chart_style_controls(
+    message: ChatMessage,
+    frame: pd.DataFrame,
+    chosen: charts.ChartChoices,
+    current: charts.ChartStyle,
+    index: int,
+) -> charts.ChartStyle:
+    """The **Style** tab: what the chart looks like.
+
+    Controls that this particular chart couldn't honour are left out rather than shown
+    doing nothing — there is no stacking to choose with one series, and no order to choose
+    along a time axis. What is left out keeps whatever it was, so switching a bar to a line
+    and back doesn't quietly discard the stacking that was set.
+    """
+    # An empty box means "use the title derived from the columns", so the automatic title
+    # keeps up as the data controls change. Showing the current one as a placeholder says
+    # what will be used without pinning it in place.
+    title = st.text_input(
+        "Title",
+        value=current.title or "",
+        placeholder=_current_chart_title(message),
+        key=f"an_chart_title_{index}",
+        help="Leave blank to keep the title built from the column names.",
+    )
+
+    palettes = charts.available_palettes(frame, chosen)
+    _drop_stale_selection(f"an_chart_palette_{index}", palettes)
+    left, right = st.columns(2)
+    with left:
+        palette = st.selectbox(
+            "Colours",
+            options=palettes,
+            index=palettes.index(current.palette) if current.palette in palettes else 0,
+            format_func=lambda name: charts.PALETTE_LABELS.get(name, name),
+            key=f"an_chart_palette_{index}",
+            help="The colour sequence the series are drawn in. 'Colour-blind safe' is the one to pick for a chart other people will read.",
+        )
+    with right:
+        series = current.series
+        if charts.supports_series_layout(frame, chosen):
+            layouts = list(charts.SERIES_LABELS)
+            series = st.selectbox(
+                "Series",
+                options=layouts,
+                index=layouts.index(current.series) if current.series in layouts else 0,
+                format_func=lambda name: charts.SERIES_LABELS.get(name, name),
+                key=f"an_chart_series_{index}",
+                help="How the series share the space: side by side to compare them, stacked for the total, 100% stacked to compare their shares.",
+            )
+
+    show_values = st.checkbox(
+        "Show values on the chart",
+        value=current.show_values,
+        key=f"an_chart_values_{index}",
+        help="Prints each point's own number on the chart. Best kept off when there are many bars, where the labels start to overlap.",
+    )
+    show_legend = st.checkbox(
+        "Show legend",
+        value=current.show_legend,
+        key=f"an_chart_legend_{index}",
+        help="Turn off when there is only one series and the legend is just naming it again.",
+    )
+
+    sort = current.sort
+    top_n = current.top_n
+    ceiling = charts.top_n_ceiling(frame, chosen)
+    order_column, top_column = st.columns(2)
+    with order_column:
+        if charts.supports_sorting(frame, chosen):
+            orders = list(charts.SORT_LABELS)
+            sort = st.selectbox(
+                "Sort",
+                options=orders,
+                index=orders.index(current.sort) if current.sort in orders else 0,
+                format_func=lambda name: charts.SORT_LABELS.get(name, name),
+                key=f"an_chart_sort_{index}",
+                help="'Automatic' is biggest-first for a single run of bars and chronological over time.",
+            )
+    with top_column:
+        if ceiling:
+            automatic = charts.default_top_n(frame, chosen)
+            picked = st.slider(
+                "Show top",
+                min_value=1,
+                max_value=ceiling,
+                value=min(current.top_n or automatic, ceiling),
+                key=f"an_chart_top_{index}",
+                help="How many categories to draw. The rest stay in the table below.",
+            )
+            # Left as None while it matches the automatic cap, so the cap can keep moving
+            # with the chart type instead of being frozen the moment this panel is opened.
+            top_n = None if picked == automatic else picked
+
+    height = st.slider(
+        "Height",
+        min_value=charts.MIN_CHART_HEIGHT,
+        max_value=charts.MAX_CHART_HEIGHT,
+        value=current.height,
+        step=30,
+        key=f"an_chart_height_{index}",
+        help="Taller is easier to read when there are many categories, especially on a horizontal bar.",
+    )
+
+    _render_chart_reset(message, index)
+
+    return charts.ChartStyle(
+        title=title.strip() or None,
+        palette=palette,
+        series=series,
+        show_values=show_values,
+        show_legend=show_legend,
+        sort=sort,
+        top_n=top_n,
+        height=height,
+    )
+
+
+def _current_chart_title(message: ChatMessage) -> str:
+    """The title on the chart right now, used as the Title box's placeholder."""
+    try:
+        return str(message.figure.layout.title.text or "")
+    except AttributeError:
+        # A figure without a title layout is not worth losing the whole panel over.
+        logger.debug("Chart figure had no readable title.", exc_info=True)
+        return ""
+
+
+def _render_chart_reset(message: ChatMessage, index: int) -> None:
+    """Puts the chart back to the one this question produced on its own.
+
+    Both halves have to go: clearing the stored choices without clearing the widgets would
+    leave the panel showing selections the chart no longer reflects.
+    """
+    if not st.button(
+        "Reset to automatic",
+        key=f"an_chart_reset_{index}",
+        icon=":material/restart_alt:",
+        help="Discards these customizations and rebuilds the chart this question produced on its own.",
+    ):
+        return
+
+    for suffix in CHART_CONTROL_SUFFIXES:
+        st.session_state.pop(f"an_chart_{suffix}_{index}", None)
+
+    automatic, warnings = charts.choose_chart(message.frame, message.question)
+    if automatic is not None:
+        figure, draw_warnings = charts.render_chart(message.frame, automatic)
+        if figure is not None:
+            message.figure = figure
+            message.choices = automatic
+            message.style = charts.ChartStyle()
+            message.chart_warnings = warnings + draw_warnings
+    st.rerun(scope="app")
+
+
+def _drop_stale_selection(key: str, options: list[str]) -> None:
+    """Forgets a stored selection the options no longer contain.
+
+    The panel's option lists depend on each other — the legend can't offer the column now
+    on the x axis, and the single-colour palette disappears the moment there are two series
+    — so a selection made a run ago can stop being offered. Dropping it lets the widget
+    fall back to its default instead of holding a value it can't show.
+    """
+    if key in st.session_state and st.session_state[key] not in options:
+        del st.session_state[key]
+
+
+def _render_transcript() -> None:
+    for index, message in enumerate(chat_session.get_messages()):
+        _render_message(message, index)
+
+
+def _answer_pending_question(active_profile: dict) -> None:
+    """Answers the question captured on the previous run, then reruns to paint it.
+
+    Split across two runs on purpose: the run that captures the input appends the user's
+    message and reruns immediately, so the question appears the instant it is sent and the
+    spinner sits underneath it — rather than the whole page hanging on a model call before
+    anything is drawn.
+    """
+    question = chat_session.pending_question()
+    if question is None:
+        return
+
+    # The agent's own record of this conversation, so "now break that down by month"
+    # resolves against the query it follows — and so the conversation can be listed back
+    # later. A store that won't open costs the history, never the answer.
+    #
+    # The failure travels with the answer rather than being written to the page here: this
+    # function always ends in a rerun, so anything painted directly is gone a moment later.
+    storage_warning: str | None = None
+    try:
+        chat_store = chat_session.agent_db()
+    except ChatStorageError as error:
+        chat_store = None
+        storage_warning = str(error)
+
+    with st.chat_message(chat_session.ROLE_ASSISTANT):
+        with st.spinner("Working through your data…"):
+            answer = pipeline.answer(
+                active_profile,
+                session.connection(),
+                session.schema_context(),
+                question,
+                # Lets a conversational "add" reach across a confirmed link into another
+                # table — see engine.columns.add_calculated_column's child-to-parent join.
+                relationships=session.get_relationships(),
+                db=chat_store,
+                session_id=chat_session.agent_session_id(),
+            )
+
+    chat_session.clear_pending_question()
+
+    if answer.statements:
+        # A conversational column change (requirement 5.4) is recorded in the same ordered
+        # list the dialogs write to, so the Task recipe can't tell which door was used.
+        session.add_statements(answer.statements)
+        session.bump_rebuild()
+        session.refresh_dictionary()
+
+    warnings = list(answer.warnings)
+    if storage_warning is not None:
+        warnings.append(storage_warning)
+
+    chat_session.append_message(
+        ChatMessage(
+            role=chat_session.ROLE_ASSISTANT,
+            text=answer.text,
+            question=answer.question,
+            sql=answer.sql,
+            frame=answer.frame,
+            figure=answer.figure,
+            choices=answer.choices,
+            style=answer.style,
+            outputs=answer.outputs,
+            warnings=warnings,
+            chart_warnings=answer.chart_warnings,
+            is_error=answer.is_error,
+        )
+    )
+    st.rerun(scope="app")
+
+
+def _render_chat(user_id: int) -> None:
+    """The whole chat panel: transcript, input, then the toolbar underneath both."""
+    _render_transcript()
+
+    active_profile = llm_session.active_profile(user_id)
+    if active_profile is None:
+        # Same gate the AI column-description button uses: disable the control and say
+        # exactly what is missing, rather than failing on the first question.
+        st.chat_input("Ask a question about your data", key="de_chat_input", disabled=True)
+        st.caption(
+            ":orange[Pick a session model in the sidebar first — that's the model that answers your questions.]"
+        )
+        _render_actions_bar()
+        return
+
+    # Ends in a rerun whenever there was a question to answer, so everything below this
+    # line only ever runs with the transcript already up to date.
+    _answer_pending_question(active_profile)
+
+    # No `help=` here: `st.chat_input` is the one widget in this app that has no tooltip
+    # parameter, so the guidance goes in the caption below it instead.
+    question = st.chat_input("Ask a question about your data", key="de_chat_input")
+    st.caption(
+        "Ask for a chart, a table or an explanation — or change a column, e.g. "
+        "*Add tax = 10% of basic*."
+    )
+
+    if question:
+        chat_session.append_message(ChatMessage(role=chat_session.ROLE_USER, text=question))
+        chat_session.set_pending_question(question)
+        st.rerun(scope="app")
+
+    # Last, so it always describes a settled transcript. Rendered before the line above, it
+    # would paint "Clear chat" as disabled on the run that received the very first
+    # question — the message is appended a moment later, and that run never gets repainted.
+    _render_actions_bar()
 
 
 # --------------------------------------------------------------------------------------
@@ -758,9 +1230,10 @@ if profile is not None:
     loaded_tables = list(session.get_tables().values())
     relationship_count = len(session.get_relationships())
     described, total_columns = dictionary.describe_progress(session.get_dictionary())
-    # Read here, not only inside the Chat-tab block below, so the key exists in
-    # session_state from the first run regardless of which tab is active.
-    statements = session.get_statements()
+    # Called here for the side effect, not the value: it puts the statements key in
+    # session_state from the very first run, regardless of which tab is active, rather
+    # than leaving its first read to wherever a column change happens to occur.
+    session.get_statements()
 
     upload_summary = (
         f"{len(loaded_tables)} table(s) — " + ", ".join(table.table_name for table in loaded_tables)
@@ -768,6 +1241,21 @@ if profile is not None:
         else ""
     )
     tables_before = set(session.get_tables())
+
+    # Rendered ahead of Step 1 so it reads as the page's primary navigation rather than
+    # something found after scrolling past the upload block. On a brand-new session this
+    # is a toggle with nothing loaded to switch to yet — a small price for Chat no longer
+    # sitting below a full upload panel on every later visit.
+    view = st.segmented_control(
+        "View",
+        options=["Setup", "Chat"],
+        key="de_view",
+        default="Setup",
+        required=True,
+        label_visibility="collapsed",
+        help="Setup: links and column descriptions. Chat: ask questions about your data.",
+        width="stretch",
+    )
 
     # Every `expanded=` on this page is a **constant**. Streamlit re-applies that
     # argument whenever its value changes, overriding the stored open state — so a
@@ -781,12 +1269,13 @@ if profile is not None:
         expanded=True,
         icon=":material/upload_file:",
     ) as upload_step:
-        # The uploader is instantiated on **every** run, open or collapsed. Gating it on
-        # `.open` looks like the same optimization applied to steps 2 and 3 and is not:
-        # a widget that stops being rendered stops reporting its value, so the moment
-        # this step auto-collapsed `st.file_uploader` returned nothing and `sync_tables`
-        # dutifully dropped every table the user had loaded. Only the per-table previews
-        # below are gated — they are the expensive part, and they hold no state.
+        # The uploader is instantiated on **every** run, open or collapsed, regardless of
+        # `view` — gating it on either looks like the same optimization applied to steps 2
+        # and 3 and is not: a widget that stops being rendered stops reporting its value,
+        # so the moment this step auto-collapsed `st.file_uploader` returned nothing and
+        # `sync_tables` dutifully dropped every table the user had loaded. Only the
+        # per-table previews below are gated — they are the expensive part, and they hold
+        # no state.
         loaded_tables = _render_upload()
         if upload_step.open:
             if loaded_tables:
@@ -801,16 +1290,6 @@ if profile is not None:
         if session.get_tables():
             session.collapse_once(session.STEP_UPLOAD)
         st.rerun(scope="app")
-
-    view = st.segmented_control(
-        "View",
-        options=["Setup", "Chat"],
-        key="de_view",
-        default="Setup",
-        required=True,
-        label_visibility="collapsed",
-        help="Setup: links and column descriptions. Chat: ask questions about your data.",
-    )
 
     if view == "Setup":
         if len(loaded_tables) >= 2:
@@ -831,7 +1310,7 @@ if profile is not None:
                 _step_label(3, "What the columns mean", dictionary_summary, described > 0),
                 key=session.STEP_DICTIONARY,
                 on_change="rerun",
-                expanded=False,
+                expanded=True,
                 icon=":material/menu_book:",
             ) as dictionary_step:
                 if dictionary_step.open:
@@ -842,47 +1321,17 @@ if profile is not None:
                 "Start over",
                 key="de_start_over_button",
                 icon=":material/refresh:",
-                help="Discard every loaded table, link and description.",
+                help="Discard every loaded table, link, description and chat message.",
             ):
                 session.queue_start_over()
+                # Cleared here rather than inside `reset_engine`, so `engine/` keeps no
+                # dependency on `analyst/`. A transcript about tables that no longer exist
+                # would otherwise read as if it described whatever is loaded next.
+                chat_session.reset_chat()
                 st.rerun(scope="app")
 
     _render_pending_dialog()
 
-    st.divider()
-
     if loaded_tables and view == "Chat":
-        # No `help=` here: `st.chat_input` is the one widget in this app that has no
-        # tooltip parameter, so the guidance goes in the caption below it instead.
-        st.chat_input(
-            "Ask a question about your data",
-            key="de_chat_input",
-            disabled=True,
-        )
-        st.caption("💬 Chat arrives in the next stage — your tables, links and descriptions are ready for it.")
-
-        add_column, remove_column = st.columns(2)
-        with add_column:
-            if st.button(
-                "Add a column",
-                key="de_add_column_button",
-                icon=":material/add:",
-                width="stretch",
-                help="Add a calculated column, e.g. tax = basic * 0.10.",
-            ):
-                session.open_dialog("add_column", {})
-                st.rerun(scope="app")
-        with remove_column:
-            if st.button(
-                "Remove a column",
-                key="de_remove_column_button",
-                icon=":material/delete:",
-                width="stretch",
-                help="Drop a column from one of your tables.",
-            ):
-                session.open_dialog("remove_column", {})
-                st.rerun(scope="app")
-
-        if statements:
-            with st.expander("Column changes so far", icon=":material/history:"):
-                st.code(";\n".join(engine_columns.describe_statements(statements)), language="sql")
+        with st.container(border=True, key="an_chat_container1",):
+            _render_chat(user_id)

@@ -269,7 +269,7 @@ The shared, in-memory DuckDB foundation used by both Chat with Data
   signature (Section 7.5) so they don't need re-entering every time the
   Task is reused.
 
-### 5.4 Calculated & Deleted Columns
+### 5.4 Calculated & Deleted Columns , Update Column values
 - The user can add or remove columns conversationally during chat, e.g.:
   - *"Add tax = 10% of basic"* → executes an `ALTER TABLE ... ADD COLUMN
     tax AS basic * 0.10` statement against the working table.
@@ -279,6 +279,16 @@ The shared, in-memory DuckDB foundation used by both Chat with Data
     statements can reference anything added earlier — chained calculated
     columns work with no special handling required.
   - *"Delete tax"* → executes `ALTER TABLE ... DROP COLUMN tax`.
+  - A formula may also read a column from one other, already-linked table,
+    e.g. *"Add performance_bonus = 10% of basic if Department is HR, else
+    1%"* where `Department` lives on a related table, not `salary` itself.
+    This only works from the "many" side of a confirmed relationship
+    (Section 5.2) into the "one" side — `salary` reading `employee_master`,
+    not the reverse, since combining several rows into one would need an
+    aggregate. The join used is always one already confirmed in Setup,
+    never a condition the model supplies.
+- The user can update column values conversationally during chat, e.g.:
+  - Mark *status* as Over due if Due date is less than Today
 - All calculated/delete actions apply to the working table (Section 5.1),
   never the immutable base table.
 - The actual SQL statement executed is shown in the chat for transparency.
@@ -303,31 +313,47 @@ The shared, in-memory DuckDB foundation used by both Chat with Data
      (Section 6.2) to handle.
   4. Handles calculated/delete-column requests (Section 5.4) as DDL/DML
      rather than `SELECT` statements.
+  5. Handels update Column values request (section 5.4)
 - **Guardrails:** agent-written SQL is scoped strictly to the current
   session's own DuckDB tables — no filesystem access, no
   dropping/renaming tables outside the session's own working tables, and
   nothing is persisted to disk unless the user explicitly exports.
 - The agent runs against whichever provider/model is set as the active
   session model (Section 3.3).
+- **Session storage:** the agent's own conversation history (questions,
+  answers, the SQL it ran) is persisted via Agno's session storage, in its
+  own SQLite database separate from the app's user/profile database. This
+  is what a future chat-history view is built from. It is the one part of
+  Chat with Data written to disk — see Section 6's note on this.
 
 ---
 
 ## 6. Chat with Data
 
-Open to all users. Everything in this component is session-only — nothing
-here is written to the database, by design; it's a fast, disposable
-exploration tool.
+Open to all users. The uploaded data itself is session-only — nothing about
+the tables, links or column dictionary is written to the database; it's a
+fast, disposable exploration tool. The chat conversation is the one
+exception: questions and answers (not the underlying data) are persisted so
+a chat history can be shown to the user, per requirement 5.5's agent
+session storage.
 
 ### 6.1 Flow
 1. Upload one or more files. The Data Engine (Section 5) loads them into
    DuckDB, and — if more than one file was uploaded — the relationship
    confirmation step runs before proceeding.
 2. Chat in natural language: ask questions to get dataframes, charts, or
-   written commentary; add or remove calculated columns conversationally.
+   written commentary; add, remove or update the values of a calculated
+   column conversationally.
 3. Every chat output has a **"📌 Pin to Dashboard"** button — a single
    click, with no additional prompts, so the chat flow stays uninterrupted.
 4. Pinned items accumulate in an unplaced pool held in `st.session_state`,
    visible on the Dashboard page.
+5. The agent's own record of the conversation (questions, answers, the SQL
+   run) is stored in its session database, separate from the app's own
+   SQLite file, so past conversations can be listed back to the user later.
+   A stored conversation is a record of what was asked, not something that
+   can be re-run — the DuckDB tables it was asked about no longer exist
+   once the session ends.
 
 ### 6.2 Output Type Logic
 
@@ -337,7 +363,7 @@ exploration tool.
 | Keyword: table / dataframe / list / "show me the data" | Dataframe |
 | Keyword: why / explain / summar[yi] / insight | Written commentary |
 | Keyword: all / everything / full breakdown | All three |
-| No keyword, result has multiple rows | Dataframe (default) |
+| No keyword, result has multiple rows | Dataframe with Written commentary(default) |
 | No keyword, result is a single value | Written commentary (default) |
 
 - Written commentary is produced via a separate, narrow LLM call, distinct
@@ -350,10 +376,11 @@ exploration tool.
 - Starts blank, aside from an optional title.
 - Displays the pool of pinned-but-unplaced items alongside a lightweight
   structure builder: add a title, add sections, add subsections.
-- The user assigns each pinned item into a section/subsection.
+- For each pinned item,The user can add Heading & Comments(both optional & added manually)
+- The user assigns each pinned item (alongwith Heading & Comments)into a section/subsection.
 - Items, subsections, and sections can each be reordered among their
   siblings via up/down controls and a position-jump input; an item can also
-  be moved to a different subsection.
+  be moved to a different subsection / section.
 - This page and its contents exist only for the current session — closing
   or refreshing without downloading loses the dashboard. There is no
   database persistence for this component.

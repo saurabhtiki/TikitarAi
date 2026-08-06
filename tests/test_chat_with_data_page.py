@@ -11,13 +11,20 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import streamlit as st
+from agno.db.sqlite import SqliteDb
 from streamlit.testing.v1 import AppTest
 
+from analyst import charts, pipeline
+from analyst import session as chat_session
+from analyst.exceptions import ChatStorageError
+from analyst.pipeline import Answer
 from auth.db import init_db, seed_default_admin
 from cleaner import session as cleaner_session
+from engine import columns as engine_columns
 from engine import session as engine_session
 from engine.relationships import Relationship
-from llm.db import init_llm_table
+from llm.db import create_profile, init_llm_table
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PAGE_PATH = str(PROJECT_ROOT / "app_pages" / "chat_with_data.py")
@@ -254,35 +261,6 @@ class TestRelationships:
         connection.execute("INSERT INTO sales VALUES ('nope', 's1', 1.0)")
 
 
-class TestCalculatedColumns:
-    def test_the_dialog_adds_a_column_and_records_its_sql(self, tmp_path, monkeypatch):
-        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
-        app.session_state[engine_session.DE_DIALOG_KEY] = {"action": "add_column", "payload": {}}
-        app.run()
-
-        app.text_input(key="de_calc_name").set_value("tax").run()
-        app.text_input(key="de_calc_expression").set_value("basic * 0.10").run()
-        next(button for button in app.button if button.key == "de_calc_add_button").click().run()
-
-        assert not app.exception
-        statements = app.session_state[engine_session.DE_STATEMENTS_KEY]
-        assert any("ADD COLUMN" in statement for statement in statements)
-
-        connection = app.session_state[engine_session.DE_CONNECTION_KEY]
-        assert connection.execute("SELECT tax FROM sales ORDER BY tax").fetchall()[0][0] == 5.0
-
-    def test_a_bad_formula_is_reported_and_adds_nothing(self, tmp_path, monkeypatch):
-        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
-        app.session_state[engine_session.DE_DIALOG_KEY] = {"action": "add_column", "payload": {}}
-        app.run()
-
-        app.text_input(key="de_calc_name").set_value("tax").run()
-        app.text_input(key="de_calc_expression").set_value("bsic * 0.10").run()
-
-        assert app.warning
-        assert not app.session_state[engine_session.DE_STATEMENTS_KEY]
-
-
 class TestCleanerHandoff:
     def test_no_button_when_the_cleaner_is_empty(self, tmp_path, monkeypatch):
         app = _make_app(tmp_path, monkeypatch)
@@ -362,6 +340,492 @@ class TestCleanerHandoff:
         assert len(app.session_state[engine_session.DE_TABLES_KEY]) == 1
 
 
+class TestShowCurrentData:
+    """A transcript records what was asked, not what the data became."""
+
+    def _open(self, tmp_path, monkeypatch):
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        app.session_state[engine_session.DE_DIALOG_KEY] = {"action": "show_data", "payload": {}}
+        app.run()
+        return app
+
+    def test_the_table_is_shown_with_its_shape(self, tmp_path, monkeypatch):
+        app = self._open(tmp_path, monkeypatch)
+
+        assert not app.exception
+        assert app.dataframe
+        assert any("3 row(s) x 3 column(s)" in caption.value for caption in app.caption)
+
+    def test_a_column_added_after_loading_is_already_there(self, tmp_path, monkeypatch):
+        """The point of the dialog: it reflects the conversational changes, not the upload."""
+        app = self._open(tmp_path, monkeypatch)
+        connection = app.session_state[engine_session.DE_CONNECTION_KEY]
+        engine_columns.add_calculated_column(connection, "sales", "tax", "basic * 0.10")
+        # What `bump_rebuild` does, done from outside a script run: the preview is cached
+        # on this counter, so without it the dialog would show the pre-change schema.
+        app.session_state[engine_session.DE_REBUILD_KEY] = (
+            app.session_state[engine_session.DE_REBUILD_KEY] + 1
+        )
+        # `_cached_preview` is `scope="session"`, which partitions per Streamlit session in
+        # production but not across `AppTest`s in one pytest process — so an earlier test's
+        # `("sales", 1, 100)` entry would be served here.
+        st.cache_data.clear()
+        app.run()
+
+        # Any dataframe will do: the only other one on the page is step 1's file list,
+        # which has no column called `tax` to be confused with.
+        assert any("tax" in list(frame.value.columns) for frame in app.dataframe)
+
+
+DEFAULT_STUB_ANSWER = Answer(question="stub", text="A stubbed answer.")
+
+
+class TestChatPanel:
+    def _in_chat(self, tmp_path, monkeypatch, with_model=True, answer=DEFAULT_STUB_ANSWER):
+        """Opens the Chat view with the pipeline stubbed.
+
+        Stubbed by default, not per test: an unpatched page test reaches
+        `pipeline.answer`, which builds a real client and opens a real socket to whatever
+        base URL the profile names. It fails fast here, but a test suite must not depend
+        on a connection being refused — so no test in this class can reach the network.
+        """
+        monkeypatch.setattr(pipeline, "answer", lambda *args, **kwargs: answer)
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        if with_model:
+            create_profile(1, "Stub", "local", "http://localhost:1234/v1", None, "stub-model")
+        app.session_state["de_view"] = "Chat"
+        app.run()
+        return app
+
+    def test_the_actions_menu_holds_only_what_chat_cannot_do(self, tmp_path, monkeypatch):
+        """Adding and updating columns are conversational, so a menu entry for either
+        would be a second way to say the same sentence. Deleting keeps its form because
+        picking the column from a list is safer than naming it in prose."""
+        app = self._in_chat(tmp_path, monkeypatch)
+        menu = next(item for item in app.menu_button if item.key == "an_actions_menu")
+        assert set(menu.options) == {"Show current data"}
+
+    def test_the_input_is_disabled_until_a_session_model_is_picked(self, tmp_path, monkeypatch):
+        """Requirement 3.3: the agent runs on the active session model. Saying so up front
+        beats failing on the user's first question."""
+        app = self._in_chat(tmp_path, monkeypatch, with_model=False)
+        assert app.chat_input[0].disabled
+        assert any("session model" in caption.value for caption in app.caption)
+
+    def test_the_input_is_live_once_a_model_is_configured(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch)
+        assert not app.chat_input[0].disabled
+
+    def test_a_question_and_its_answer_both_land_in_the_transcript(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch)
+        app.chat_input[0].set_value("total basic by sku").run()
+
+        messages = app.session_state[chat_session.AN_MESSAGES_KEY]
+        assert [message.role for message in messages] == [
+            chat_session.ROLE_USER,
+            chat_session.ROLE_ASSISTANT,
+        ]
+        assert messages[0].text == "total basic by sku"
+
+    def test_an_answer_renders_its_table_sql_and_commentary(self, tmp_path, monkeypatch):
+        answer = Answer(
+            question="total basic by sku",
+            text="s1 carries most of the value.",
+            sql="SELECT sku, sum(basic) AS total FROM sales GROUP BY sku",
+            frame=pd.DataFrame({"sku": ["s1", "s2"], "total": [350.0, 50.0]}),
+            outputs={"dataframe", "commentary"},
+        )
+        app = self._in_chat(tmp_path, monkeypatch, answer=answer)
+        app.chat_input[0].set_value("total basic by sku").run()
+
+        assert not app.exception
+        assert len(app.chat_message) == 2
+        assert any("s1 carries most" in markdown.value for markdown in app.markdown)
+        assert app.dataframe
+        assert any("GROUP BY sku" in code.value for code in app.code)
+
+    def test_the_transcript_survives_a_rerun_without_re_answering(self, tmp_path, monkeypatch):
+        """Everything rendered comes from what was stored when the question was answered,
+        so scrolling the chat costs nothing."""
+        calls = []
+
+        def counting_answer(*args, **kwargs):
+            calls.append(args)
+            return DEFAULT_STUB_ANSWER
+
+        app = self._in_chat(tmp_path, monkeypatch)
+        monkeypatch.setattr(pipeline, "answer", counting_answer)
+        app.chat_input[0].set_value("anything").run()
+        app.run()
+        app.run()
+
+        assert len(calls) == 1
+        assert len(app.chat_message) == 2
+
+    def test_a_failure_renders_as_an_error_message_not_a_broken_page(self, tmp_path, monkeypatch):
+        answer = Answer(question="x", text="The model couldn't be reached.", is_error=True)
+        app = self._in_chat(tmp_path, monkeypatch, answer=answer)
+        app.chat_input[0].set_value("anything").run()
+
+        assert not app.exception
+        assert any("couldn't be reached" in error.value for error in app.error)
+
+    def _chart_answer(self) -> Answer:
+        """A charted answer carrying the choices behind it, as the pipeline builds it."""
+        frame = pd.DataFrame({"sku": ["s1", "s2"], "total": [350.0, 50.0]})
+        choices, _ = charts.choose_chart(frame, "total basic by sku as a chart")
+        figure, _ = charts.render_chart(frame, choices)
+        return Answer(
+            question="total basic by sku as a chart",
+            text="s1 carries most of the value.",
+            sql="SELECT sku, sum(basic) AS total FROM sales GROUP BY sku",
+            frame=frame,
+            figure=figure,
+            choices=choices,
+            style=charts.ChartStyle(),
+            outputs={"chart", "commentary"},
+        )
+
+    def _split_chart_answer(self) -> Answer:
+        """A chart with a legend split, so it has two series to lay out."""
+        frame = pd.DataFrame(
+            {
+                "sku": ["s1", "s1", "s2", "s2"],
+                "status": ["open", "shut", "open", "shut"],
+                "total": [10.0, 20.0, 30.0, 40.0],
+            }
+        )
+        choices, _ = charts.choose_chart(frame, "total by sku as a chart")
+        figure, _ = charts.render_chart(frame, choices)
+        return Answer(
+            question="total by sku as a chart",
+            text="Here.",
+            frame=frame,
+            figure=figure,
+            choices=choices,
+            style=charts.ChartStyle(),
+            outputs={"chart"},
+        )
+
+    def test_a_charted_answer_offers_controls_to_redraw_it(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        assert not app.exception
+        assert [box.key for box in app.selectbox if box.key == "an_chart_kind_1"]
+        assert [box.key for box in app.multiselect if box.key == "an_chart_y_1"]
+
+    def test_the_controls_open_showing_the_chart_that_was_drawn(self, tmp_path, monkeypatch):
+        """Opening the panel and closing it again must not change anything, so the widgets
+        start on the automatic choices rather than on a guess of their own."""
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        kind = next(box for box in app.selectbox if box.key == "an_chart_kind_1")
+        axis = next(box for box in app.selectbox if box.key == "an_chart_x_1")
+        assert kind.value == charts.CHART_BAR
+        assert axis.value == "sku"
+
+    def test_only_the_types_this_result_supports_are_offered(self, tmp_path, monkeypatch):
+        """One numeric column can't make a scatter, and the picker must not offer one."""
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        # AppTest reports the labels the user sees, not the values behind them.
+        kind = next(box for box in app.selectbox if box.key == "an_chart_kind_1")
+        assert charts.CHART_LABELS[charts.CHART_SCATTER] not in kind.options
+        assert charts.CHART_LABELS[charts.CHART_BAR_HORIZONTAL] in kind.options
+
+    def test_choosing_a_new_type_redraws_the_stored_chart(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        kind = next(box for box in app.selectbox if box.key == "an_chart_kind_1")
+        kind.set_value(charts.CHART_BAR_HORIZONTAL).run()
+
+        assert not app.exception
+        message = app.session_state[chat_session.AN_MESSAGES_KEY][1]
+        assert message.choices.kind == charts.CHART_BAR_HORIZONTAL
+        assert message.figure.data[0].orientation == "h"
+
+    def test_redrawing_does_not_ask_the_model_again(self, tmp_path, monkeypatch):
+        """The rows are already in session state — a redraw is a redraw, not a new question."""
+        calls = []
+
+        def counting_answer(*args, **kwargs):
+            calls.append(args)
+            return self._chart_answer()
+
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        monkeypatch.setattr(pipeline, "answer", counting_answer)
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+        assert len(calls) == 1
+
+        next(box for box in app.selectbox if box.key == "an_chart_kind_1").set_value(
+            charts.CHART_LINE
+        ).run()
+        assert len(calls) == 1
+
+    def test_moving_the_axis_onto_the_legend_column_does_not_break(self, tmp_path, monkeypatch):
+        """The legend's options depend on the axis, so the two must not be able to collide."""
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._split_chart_answer())
+        app.chat_input[0].set_value("total by sku as a chart").run()
+
+        next(box for box in app.selectbox if box.key == "an_chart_x_1").set_value("status").run()
+
+        assert not app.exception
+        assert app.session_state[chat_session.AN_MESSAGES_KEY][1].figure is not None
+
+    def test_clearing_every_value_keeps_the_last_chart(self, tmp_path, monkeypatch):
+        """An empty pick can't be drawn, and must not blank the chart that was there."""
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        next(box for box in app.multiselect if box.key == "an_chart_y_1").set_value([]).run()
+
+        assert not app.exception
+        assert app.session_state[chat_session.AN_MESSAGES_KEY][1].figure is not None
+        assert any("at least one value" in caption.value for caption in app.caption)
+
+    def test_the_style_tab_offers_its_controls(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        assert not app.exception
+        assert [box for box in app.text_input if box.key == "an_chart_title_1"]
+        assert [box for box in app.selectbox if box.key == "an_chart_palette_1"]
+        assert [box for box in app.checkbox if box.key == "an_chart_values_1"]
+        assert [box for box in app.slider if box.key == "an_chart_height_1"]
+
+    def test_a_typed_title_replaces_the_derived_one(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        next(box for box in app.text_input if box.key == "an_chart_title_1").set_value(
+            "Q3 sales by SKU"
+        ).run()
+
+        assert not app.exception
+        message = app.session_state[chat_session.AN_MESSAGES_KEY][1]
+        assert message.style.title == "Q3 sales by SKU"
+        assert message.figure.layout.title.text == "Q3 sales by SKU"
+
+    def test_style_survives_a_change_of_chart_type(self, tmp_path, monkeypatch):
+        """Style and data are stored apart precisely so this holds."""
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        next(box for box in app.text_input if box.key == "an_chart_title_1").set_value("Mine").run()
+        next(box for box in app.selectbox if box.key == "an_chart_kind_1").set_value(
+            charts.CHART_LINE
+        ).run()
+
+        message = app.session_state[chat_session.AN_MESSAGES_KEY][1]
+        assert message.choices.kind == charts.CHART_LINE
+        assert message.figure.layout.title.text == "Mine"
+
+    def test_showing_values_labels_the_chart(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        next(box for box in app.checkbox if box.key == "an_chart_values_1").set_value(True).run()
+
+        assert not app.exception
+        message = app.session_state[chat_session.AN_MESSAGES_KEY][1]
+        assert message.style.show_values is True
+        assert message.figure.data[0].texttemplate
+
+    def test_the_stacking_control_appears_only_with_series_to_stack(self, tmp_path, monkeypatch):
+        """One series has nothing to stack against, so the control would do nothing."""
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+        assert not [box for box in app.selectbox if box.key == "an_chart_series_1"]
+
+        split = self._in_chat(tmp_path, monkeypatch, answer=self._split_chart_answer())
+        split.chat_input[0].set_value("total by sku as a chart").run()
+        assert [box for box in split.selectbox if box.key == "an_chart_series_1"]
+
+    def test_stacking_a_split_chart_redraws_it_stacked(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._split_chart_answer())
+        app.chat_input[0].set_value("total by sku as a chart").run()
+
+        next(box for box in app.selectbox if box.key == "an_chart_series_1").set_value(
+            charts.SERIES_PERCENT
+        ).run()
+
+        assert not app.exception
+        message = app.session_state[chat_session.AN_MESSAGES_KEY][1]
+        assert message.figure.layout.barnorm == "percent"
+
+    def test_restyling_does_not_ask_the_model_again(self, tmp_path, monkeypatch):
+        calls = []
+
+        def counting_answer(*args, **kwargs):
+            calls.append(args)
+            return self._chart_answer()
+
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        monkeypatch.setattr(pipeline, "answer", counting_answer)
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+        assert len(calls) == 1
+
+        next(box for box in app.checkbox if box.key == "an_chart_legend_1").set_value(False).run()
+        assert len(calls) == 1
+        assert app.session_state[chat_session.AN_MESSAGES_KEY][1].figure.layout.showlegend is False
+
+    def test_reset_puts_the_automatic_chart_back(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        next(box for box in app.text_input if box.key == "an_chart_title_1").set_value("Mine").run()
+        next(box for box in app.selectbox if box.key == "an_chart_kind_1").set_value(
+            charts.CHART_LINE
+        ).run()
+        next(button for button in app.button if button.key == "an_chart_reset_1").click().run()
+
+        assert not app.exception
+        message = app.session_state[chat_session.AN_MESSAGES_KEY][1]
+        assert message.style == charts.ChartStyle()
+        assert message.choices.kind == charts.CHART_BAR
+        assert message.figure.layout.title.text != "Mine"
+
+    def test_reset_clears_the_controls_as_well_as_the_chart(self, tmp_path, monkeypatch):
+        """Controls left showing selections the chart no longer reflects would be worse
+        than not resetting at all."""
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        next(box for box in app.text_input if box.key == "an_chart_title_1").set_value("Mine").run()
+        next(button for button in app.button if button.key == "an_chart_reset_1").click().run()
+
+        assert next(box for box in app.text_input if box.key == "an_chart_title_1").value == ""
+
+    def test_a_message_without_a_chart_offers_no_controls(self, tmp_path, monkeypatch):
+        answer = Answer(
+            question="list the rows",
+            text="Here they are.",
+            frame=pd.DataFrame({"sku": ["s1"], "total": [1.0]}),
+            outputs={"dataframe"},
+        )
+        app = self._in_chat(tmp_path, monkeypatch, answer=answer)
+        app.chat_input[0].set_value("list the rows").run()
+
+        assert not [box for box in app.selectbox if box.key == "an_chart_kind_1"]
+
+    def test_a_conversational_column_change_is_recorded_like_a_dialog_one(self, tmp_path, monkeypatch):
+        """Requirement 7.5 replays one ordered statement list, so it must not matter which
+        door the change came through."""
+        answer = Answer(
+            question="Add tax = 10% of basic",
+            text="Added `tax` to `sales`.",
+            sql='ALTER TABLE "sales" ADD COLUMN "tax" DOUBLE',
+            statements=['ALTER TABLE "sales" ADD COLUMN "tax" DOUBLE'],
+        )
+        app = self._in_chat(tmp_path, monkeypatch, answer=answer)
+        app.chat_input[0].set_value("Add tax = 10% of basic").run()
+
+        assert any("ADD COLUMN" in statement for statement in app.session_state[engine_session.DE_STATEMENTS_KEY])
+
+    def test_clearing_the_chat_keeps_the_tables(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch)
+        app.chat_input[0].set_value("anything").run()
+        next(button for button in app.button if button.key == "an_clear_chat_button").click().run()
+
+        assert not app.session_state[chat_session.AN_MESSAGES_KEY]
+        assert app.session_state[engine_session.DE_TABLES_KEY]
+
+
+class TestAgentSessionStorage:
+    """The agent keeps its own record of the conversation, on disk.
+
+    Two jobs: follow-up questions resolve against what came before, and the stored runs
+    are what a chat-history screen will later be built from.
+    """
+
+    def _ask(self, tmp_path, monkeypatch, question="anything"):
+        received: dict = {}
+
+        def capturing_answer(*args, **kwargs):
+            received.update(kwargs)
+            return DEFAULT_STUB_ANSWER
+
+        monkeypatch.setattr(pipeline, "answer", capturing_answer)
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        create_profile(1, "Stub", "local", "http://localhost:1234/v1", None, "stub-model")
+        app.session_state["de_view"] = "Chat"
+        app.run()
+        app.chat_input[0].set_value(question).run()
+        return app, received
+
+    def test_the_question_carries_a_store_and_a_session_id(self, tmp_path, monkeypatch):
+        _, received = self._ask(tmp_path, monkeypatch)
+        assert isinstance(received["db"], SqliteDb)
+        assert received["session_id"].startswith("chat-")
+
+    def test_the_store_is_a_real_file_on_disk(self, tmp_path, monkeypatch):
+        """History that only exists in memory can't be listed back in a later session.
+
+        The file is created lazily on first use, so this reads from the store to prove it
+        is genuinely backed by the path it names.
+        """
+        _, received = self._ask(tmp_path, monkeypatch)
+        expected = tmp_path / chat_session.CHAT_DB_PATH
+
+        assert Path(received["db"].db_file) == expected
+        received["db"].get_sessions()
+        assert expected.exists()
+
+    def test_the_same_store_is_reused_across_questions(self, tmp_path, monkeypatch):
+        """Rebuilding it per run would reopen the file on every keystroke, and hand the
+        agent an empty memory each time."""
+        app, received = self._ask(tmp_path, monkeypatch, "first")
+        first_db, first_session = received["db"], received["session_id"]
+        app.chat_input[0].set_value("second").run()
+
+        assert received["db"] is first_db
+        assert received["session_id"] == first_session
+
+    def test_clearing_the_chat_starts_a_new_agent_session(self, tmp_path, monkeypatch):
+        """A cleared transcript the model still remembers is worse than no clear button:
+        the next answer would refer back to questions the user can no longer see. The
+        conversation just cleared stays in the store — clearing the screen is not deleting
+        the record."""
+        app, received = self._ask(tmp_path, monkeypatch)
+        first_session = received["session_id"]
+        next(button for button in app.button if button.key == "an_clear_chat_button").click().run()
+        app.chat_input[0].set_value("after clearing").run()
+
+        assert received["session_id"] != first_session
+        # Same store, new conversation in it — clearing the screen is not deleting a record.
+        assert received["db"] is not None
+
+    def test_confirmed_relationships_reach_the_pipeline(self, tmp_path, monkeypatch):
+        """What makes a cross-table conversational add ('bonus = ... if department is HR')
+        possible at all: the links confirmed in Setup have to actually reach the call that
+        can use them, not just exist in session state."""
+        app, received = self._ask(tmp_path, monkeypatch)
+        link = Relationship("sales", "sku", "stock", "sku")
+        app.session_state[engine_session.DE_RELATIONSHIPS_KEY] = [link]
+        app.chat_input[0].set_value("second").run()
+
+        assert received["relationships"] == [link]
+
+    def test_a_store_that_will_not_open_costs_the_history_not_the_answer(self, tmp_path, monkeypatch):
+        def refuse(*args, **kwargs):
+            raise ChatStorageError("Chat history couldn't be opened.")
+
+        monkeypatch.setattr(chat_session, "agent_db", refuse)
+        app, received = self._ask(tmp_path, monkeypatch)
+
+        assert not app.exception
+        assert received["db"] is None
+        # The question was still answered, and the failure rides along with the answer —
+        # written to the page directly it would be discarded by the rerun that follows.
+        messages = app.session_state[chat_session.AN_MESSAGES_KEY]
+        assert len(messages) == 2
+        assert any("couldn't be opened" in warning for warning in messages[-1].warnings)
+
+
 class TestReset:
     def test_start_over_clears_everything(self, tmp_path, monkeypatch):
         app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
@@ -369,3 +833,27 @@ class TestReset:
 
         assert not app.session_state[engine_session.DE_TABLES_KEY]
         assert any("Upload a CSV or Excel file" in info.value for info in app.info)
+
+    def test_start_over_clears_the_transcript_too(self, tmp_path, monkeypatch):
+        """A chat about tables that no longer exist would read as if it described whatever
+        is loaded next."""
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        app.session_state[chat_session.AN_MESSAGES_KEY] = [
+            chat_session.ChatMessage(role=chat_session.ROLE_USER, text="old question")
+        ]
+        app.run()
+        next(button for button in app.button if button.key == "de_start_over_button").click().run()
+
+        assert chat_session.AN_MESSAGES_KEY not in app.session_state
+
+    def test_start_over_begins_a_new_stored_conversation(self, tmp_path, monkeypatch):
+        """Start-over releases the handle and the session id, so the next question opens a
+        new conversation. It does not delete anything: the store is the chat history, and
+        loading different files is not a reason to erase what was asked about the old ones."""
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        app.session_state[chat_session.AN_AGENT_SESSION_KEY] = "chat-old"
+        app.run()
+        next(button for button in app.button if button.key == "de_start_over_button").click().run()
+
+        assert chat_session.AN_AGENT_DB_KEY not in app.session_state
+        assert chat_session.AN_AGENT_SESSION_KEY not in app.session_state
