@@ -9,6 +9,12 @@ dependencies = [
     "bcrypt>=5.0.0",
     "cryptography>=50.0.0",
     "duckdb>=1.4",
+    # Declared rather than relied on transitively: `dashboard/` renders the exported
+    # report through it, so it is a direct dependency now.
+    "jinja2>=3.1.6",
+    # Rasterizes Plotly charts for the HTML and Excel exports, which have to be
+    # self-contained and so cannot ship plotly.js.
+    "kaleido>=1.2.0",
     "openai>=2.53.0",
     "openpyxl>=3.1.5",
     "pandas>=3.0.5",

@@ -1,4 +1,11 @@
-"""Building the downloadable multi-sheet workbook."""
+"""Building the downloadable multi-sheet workbook.
+
+`check_limits`, `column_width` and `write_sheet` are public rather than private because
+`dashboard.excel_export` writes its own workbook — one sheet per report subsection — and
+must obey the same Excel limits and produce the same frozen, filtered, correctly-sized
+sheets. Two implementations of "what Excel will accept" is one more than can be kept in
+agreement, so there is one, here.
+"""
 
 import io
 import logging
@@ -20,7 +27,7 @@ _MIN_COLUMN_WIDTH = 8
 _MAX_COLUMN_WIDTH = 60
 
 
-def _check_limits(sheet_name: str, frame: pd.DataFrame) -> None:
+def check_limits(sheet_name: str, frame: pd.DataFrame) -> None:
     """Raises ExportError before writing rather than letting xlsxwriter fail opaquely
     part-way through a large workbook."""
     if len(frame) + 1 > MAX_EXCEL_ROWS:
@@ -46,7 +53,7 @@ def _check_limits(sheet_name: str, frame: pd.DataFrame) -> None:
             )
 
 
-def _column_width(series: pd.Series, header: str) -> int:
+def column_width(series: pd.Series, header: str) -> int:
     try:
         widest_value = series.astype("string").str.len().max()
     except (ValueError, TypeError):
@@ -55,7 +62,7 @@ def _column_width(series: pd.Series, header: str) -> int:
     return min(max(widest + 2, _MIN_COLUMN_WIDTH), _MAX_COLUMN_WIDTH)
 
 
-def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, frame: pd.DataFrame) -> None:
+def write_sheet(writer: pd.ExcelWriter, sheet_name: str, frame: pd.DataFrame) -> None:
     frame.to_excel(writer, sheet_name=sheet_name, index=False, na_rep="")
     worksheet = writer.sheets[sheet_name]
 
@@ -63,7 +70,7 @@ def _write_sheet(writer: pd.ExcelWriter, sheet_name: str, frame: pd.DataFrame) -
         worksheet.freeze_panes(1, 0)
         worksheet.autofilter(0, 0, max(len(frame), 1), len(frame.columns) - 1)
         for position, column in enumerate(frame.columns):
-            worksheet.set_column(position, position, _column_width(frame[column], column))
+            worksheet.set_column(position, position, column_width(frame[column], column))
 
 
 def _log_frame(log: Mapping[str, Sequence[str]]) -> pd.DataFrame:
@@ -96,14 +103,14 @@ def build_workbook(
         raise ExportError("There's nothing to export yet — upload and clean a file first.")
 
     for sheet_name, frame in tables:
-        _check_limits(sheet_name, frame)
+        check_limits(sheet_name, frame)
 
     buffer = io.BytesIO()
     try:
         with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
             for sheet_name, frame in tables:
-                _write_sheet(writer, sheet_name, frame)
-            _write_sheet(writer, CLEANING_LOG_SHEET_NAME, _log_frame(log or {}))
+                write_sheet(writer, sheet_name, frame)
+            write_sheet(writer, CLEANING_LOG_SHEET_NAME, _log_frame(log or {}))
     except (ValueError, OSError, KeyError) as error:
         logger.exception("Failed to build the cleaned workbook for %d table(s).", len(tables))
         raise ExportError("The cleaned workbook couldn't be created. Please try again.") from error

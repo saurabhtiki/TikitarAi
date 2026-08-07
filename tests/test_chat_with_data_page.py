@@ -21,6 +21,7 @@ from analyst.exceptions import ChatStorageError
 from analyst.pipeline import Answer
 from auth.db import init_db, seed_default_admin
 from cleaner import session as cleaner_session
+from dashboard import session as dashboard_session
 from engine import columns as engine_columns
 from engine import session as engine_session
 from engine.relationships import Relationship
@@ -826,6 +827,95 @@ class TestAgentSessionStorage:
         assert any("couldn't be opened" in warning for warning in messages[-1].warnings)
 
 
+class TestPinToDashboard:
+    """Requirement 6.1 steps 3 and 4: one click, no prompts, into the unplaced pool."""
+
+    def _answered(self, tmp_path, monkeypatch, answer=None, question="anything"):
+        monkeypatch.setattr(pipeline, "answer", lambda *args, **kwargs: answer or DEFAULT_STUB_ANSWER)
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        create_profile(1, "Stub", "local", "http://localhost:1234/v1", None, "stub-model")
+        app.session_state["de_view"] = "Chat"
+        app.run()
+        app.chat_input[0].set_value(question).run()
+        return app
+
+    def _pool(self, app):
+        return app.session_state[dashboard_session.DB_REPORT_KEY].pool
+
+    def test_the_button_is_live(self, tmp_path, monkeypatch):
+        app = self._answered(tmp_path, monkeypatch)
+        assert not next(button for button in app.button if button.key == "an_pin_1").disabled
+
+    def test_a_commentary_only_answer_can_be_pinned_too(self, tmp_path, monkeypatch):
+        """Written commentary is one of requirement 6.2's three output types, so gating the
+        button on a chart or a table would put a third of the outputs out of reach."""
+        answer = Answer(question="why?", text="Because volumes fell.", outputs={"commentary"})
+        app = self._answered(tmp_path, monkeypatch, answer=answer, question="why?")
+        assert any(button.key == "an_pin_1" for button in app.button)
+
+    def test_a_failed_answer_offers_no_pin(self, tmp_path, monkeypatch):
+        answer = Answer(question="x", text="The model couldn't be reached.", is_error=True)
+        app = self._answered(tmp_path, monkeypatch, answer=answer)
+        assert not any(button.key == "an_pin_1" for button in app.button)
+
+    def test_a_question_offers_no_pin(self, tmp_path, monkeypatch):
+        """The user's own message is not an output."""
+        app = self._answered(tmp_path, monkeypatch)
+        assert not any(button.key == "an_pin_0" for button in app.button)
+
+    def test_one_click_adds_exactly_one_pool_entry(self, tmp_path, monkeypatch):
+        answer = Answer(
+            question="total basic by sku",
+            text="s1 carries most of the value.",
+            sql="SELECT sku FROM sales",
+            frame=pd.DataFrame({"sku": ["s1"], "total": [350.0]}),
+            outputs={"dataframe", "commentary"},
+        )
+        app = self._answered(tmp_path, monkeypatch, answer=answer, question="total basic by sku")
+        next(button for button in app.button if button.key == "an_pin_1").click().run()
+
+        pool = self._pool(app)
+        assert len(pool) == 1
+        assert pool[0].heading == "total basic by sku"
+        assert pool[0].comment == "s1 carries most of the value."
+        assert pool[0].sql == "SELECT sku FROM sales"
+        assert list(pool[0].frame["sku"]) == ["s1"]
+
+    def test_a_pinned_frame_is_a_copy_not_the_transcripts_own(self, tmp_path, monkeypatch):
+        """`analyst.session` releases the payload of older transcript messages, so a pinned
+        item that referenced one would empty itself a dozen questions later."""
+        answer = Answer(
+            question="q",
+            text="t",
+            frame=pd.DataFrame({"sku": ["s1"], "total": [350.0]}),
+            outputs={"dataframe"},
+        )
+        app = self._answered(tmp_path, monkeypatch, answer=answer)
+        next(button for button in app.button if button.key == "an_pin_1").click().run()
+
+        message = app.session_state[chat_session.AN_MESSAGES_KEY][1]
+        message.release_payload()
+        app.run()
+
+        assert self._pool(app)[0].frame is not None
+        assert list(self._pool(app)[0].frame["sku"]) == ["s1"]
+
+    def test_pinning_does_not_re_answer_the_question(self, tmp_path, monkeypatch):
+        """Requirement 6.1 step 3: a single click that costs nothing."""
+        calls = []
+
+        def counting_answer(*args, **kwargs):
+            calls.append(args)
+            return DEFAULT_STUB_ANSWER
+
+        app = self._answered(tmp_path, monkeypatch)
+        monkeypatch.setattr(pipeline, "answer", counting_answer)
+        next(button for button in app.button if button.key == "an_pin_1").click().run()
+
+        assert calls == []
+        assert len(self._pool(app)) == 1
+
+
 class TestReset:
     def test_start_over_clears_everything(self, tmp_path, monkeypatch):
         app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
@@ -845,6 +935,16 @@ class TestReset:
         next(button for button in app.button if button.key == "de_start_over_button").click().run()
 
         assert chat_session.AN_MESSAGES_KEY not in app.session_state
+
+    def test_start_over_clears_the_dashboard_too(self, tmp_path, monkeypatch):
+        """A report built on tables that no longer exist would read as if it described
+        whatever is loaded next, exactly as a stale transcript would."""
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        app.session_state[dashboard_session.DB_REPORT_KEY] = dashboard_session.Report(title="Old")
+        app.run()
+        next(button for button in app.button if button.key == "de_start_over_button").click().run()
+
+        assert dashboard_session.DB_REPORT_KEY not in app.session_state
 
     def test_start_over_begins_a_new_stored_conversation(self, tmp_path, monkeypatch):
         """Start-over releases the handle and the session id, so the next question opens a

@@ -19,8 +19,10 @@ Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- update this line each time a phase is completed -->
-Stage 6: Agent execution (Agno + guarded DuckDbTools), output-type logic, working Chat,
-and requirement 5.4's update-column-values — complete
+Stage 7: Pin to Dashboard (6.1), the Dashboard page (6.3) and HTML + Excel export
+(6.4) — complete. Build-order item 6 is done; Chat with Data now runs end to end.
+
+Next: Stage 8 — Task Builder (requirement 7), build-order item 7.
 
 # Library docs (Agno, Streamlit)
 

@@ -4,8 +4,10 @@ This page is requirements section 6 built on the shared Data Engine (section 5):
 into DuckDB, confirming relationships as real foreign keys, the column data dictionary,
 and the chat panel where the agent (section 5.5) answers questions against all of it.
 
-Pinning outputs to a Dashboard (requirement 6.3) arrives next stage; the pin button is
-rendered disabled so the chat layout doesn't shift when it starts working.
+Every answer carries a "Pin to Dashboard" button (requirement 6.1 step 3). It copies the
+answer into `dashboard.session`'s pool and returns immediately — no dialog, no question
+about where it should go — because pinning happens mid-conversation and anything that
+interrupts the chat to ask defeats the point. Arranging happens on the Dashboard page.
 
 Open to every logged-in role (requirement 2.2 grants Chat with Data to all three), so
 this page follows `settings.py` and carries no `require_role` guard.
@@ -41,6 +43,7 @@ from analyst.exceptions import ChatStorageError
 from analyst.session import ChatMessage
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
+from dashboard import session as dashboard_session
 from engine import columns as engine_columns
 from engine import dictionary, duckdb_session, relationships, session
 from engine.exceptions import CalculatedColumnError, DataEngineError
@@ -778,13 +781,20 @@ def _render_message(message: ChatMessage, index: int) -> None:
         for warning in message.warnings:
             st.caption(f":orange[{warning}]")
 
-        if message.frame is not None or message.figure is not None:
-            st.button(
-                "Pin to Dashboard",
-                key=f"an_pin_{index}",
+        # Requirement 6.1 step 3: *every* chat output can be pinned, so this is gated on
+        # the message being an answer rather than on it carrying a chart or a table —
+        # written commentary is one of requirement 6.2's three output types and belongs in
+        # a report as much as the other two.
+        if st.button(
+            "Pin to Dashboard",
+            key=f"an_pin_{index}",
+            icon=":material/push_pin:",
+            help="Copy this answer to your Dashboard. Nothing is asked for here — you title and arrange it on the Dashboard page.",
+        ):
+            dashboard_session.pin(message)
+            st.toast(
+                f"Pinned — {dashboard_session.pool_count()} waiting on the Dashboard.",
                 icon=":material/push_pin:",
-                disabled=True,
-                help="The Dashboard arrives in the next stage — this output will pin to it then.",
             )
 
 
@@ -1321,13 +1331,15 @@ if profile is not None:
                 "Start over",
                 key="de_start_over_button",
                 icon=":material/refresh:",
-                help="Discard every loaded table, link, description and chat message.",
+                help="Discard every loaded table, link, description, chat message and pinned dashboard item.",
             ):
                 session.queue_start_over()
-                # Cleared here rather than inside `reset_engine`, so `engine/` keeps no
-                # dependency on `analyst/`. A transcript about tables that no longer exist
-                # would otherwise read as if it described whatever is loaded next.
+                # Both cleared here rather than inside `reset_engine`, so `engine/` keeps
+                # no dependency on `analyst/` or `dashboard/`. A transcript — or a report —
+                # about tables that no longer exist would otherwise read as if it described
+                # whatever is loaded next.
                 chat_session.reset_chat()
+                dashboard_session.reset_dashboard()
                 st.rerun(scope="app")
 
     _render_pending_dialog()

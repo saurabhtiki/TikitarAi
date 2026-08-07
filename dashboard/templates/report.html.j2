@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+{# The one deliberately unescaped value in this template. It is the reason
+   `css_presets.validate_css` screens for `<script`, `<style` and `@import` — nothing
+   else reaches the page unescaped. #}
+<style>{{ css | safe }}</style>
+</head>
+<body>
+<div class="report">
+  <h1>{{ title }}</h1>
+  <p class="subtitle">{{ generated_at }}</p>
+
+  {% if not sections %}
+  <p class="empty">This report has no placed items yet.</p>
+  {% endif %}
+
+  {% for section in sections %}
+  <h2>{{ section.number }}. {{ section.name }}</h2>
+
+    {% for subsection in section.subsections %}
+    <h3>{{ subsection.number }} {{ subsection.name }}</h3>
+
+      {# `entries`, not `items`: these subsections are dicts, and Jinja resolves
+         `.items` on a dict to `dict.items` before it looks at the key. #}
+      {% for item in subsection.entries %}
+      <div class="item">
+        <h4>{{ item.heading }}</h4>
+
+        {% if item.image %}
+        <img src="data:image/png;base64,{{ item.image }}" alt="{{ item.heading }}">
+        {% elif item.chart_failed %}
+        <p class="note">This chart couldn't be included as a picture. Its data is below.</p>
+        {% endif %}
+
+        {% if item.table %}
+        <div class="table-wrap">{{ item.table | safe }}</div>
+        {% endif %}
+
+        {% if item.comment %}
+        <p class="comment">{{ item.comment }}</p>
+        {% endif %}
+      </div>
+      {% endfor %}
+
+    {% endfor %}
+  {% endfor %}
+</div>
+</body>
+</html>

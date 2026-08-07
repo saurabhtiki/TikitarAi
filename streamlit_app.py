@@ -47,7 +47,10 @@ else:
     pages = {
         "": [st.Page("app_pages/home.py", title="Home", icon=":material/home:", default=True)],
         "Explore": [
-            st.Page("app_pages/chat_with_data.py", title="Chat with data", icon=":material/forum:")
+            st.Page("app_pages/chat_with_data.py", title="Chat with data", icon=":material/forum:"),
+            # Directly after the chat, because pinning an answer there is the only way
+            # anything gets here — the two pages are one workflow (requirement 6.1–6.3).
+            st.Page("app_pages/dashboard.py", title="Dashboard", icon=":material/dashboard:"),
         ],
         "Utilities": [
             st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon=":material/cleaning_services:")
