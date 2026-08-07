@@ -50,23 +50,17 @@ class PinnedItem:
 
     Attributes:
         item_id: stable across reruns; forms the widget keys for this item's controls.
-        question: what was asked to produce it, kept so "Generate comment" can be re-run
-            later without the transcript still being around.
+        question: what was asked to produce it, shown as context when the item is opened.
         heading: what the report calls it. Defaults to the question, so a pinned item is
             already labelled before the user opens the Dashboard.
-        comment: the written note under the output — the chat's own commentary at pin
-            time, then whatever the user edits or regenerates it into.
-        sql: the statement behind it, carried for the commentary call's context.
+        comment: the written note under the output. It arrives as the chat's own commentary
+            on this answer and is the user's to edit from then on.
+        sql: the statement behind it, shown when the item is opened.
         frame: a *copy* of the rows, or None.
         figure: the Plotly figure, or None.
         outputs: which of requirement 6.2's output types this item renders.
         png: the rasterized chart, cached after the first export so HTML and Excel
             downloads of the same report don't rasterize it twice.
-        comment_revision: bumped whenever `comment` is replaced by something other than
-            the user typing. The page folds it into the comment box's widget key, so a
-            regenerated comment actually appears: a text area keyed on the item alone
-            would keep showing what was in it before, since Streamlit widgets remember
-            their own value rather than re-reading the `value=` they were given.
     """
 
     item_id: str = field(default_factory=new_id)
@@ -78,13 +72,6 @@ class PinnedItem:
     figure: Any = None
     outputs: set[str] = field(default_factory=set)
     png: bytes | None = None
-    comment_revision: int = 0
-
-    def set_comment(self, comment: str) -> None:
-        """Replaces the comment from outside the editor — currently only "Generate
-        comment" — and marks it so the editor picks the new text up."""
-        self.comment = comment
-        self.comment_revision += 1
 
     def display_heading(self) -> str:
         """What to print above this item. Never empty."""

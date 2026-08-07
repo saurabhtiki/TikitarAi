@@ -327,6 +327,41 @@ class TestCleanerHandoff:
         assert tables
         assert all(table.from_cleaner for table in tables.values())
 
+    def test_a_saved_summary_adopts_as_its_own_table(self, tmp_path, monkeypatch):
+        """A summary is an ordinary cleaner table with a `derived_from`, which is what
+        lets it reach the engine without any handoff code of its own. Its recipe lives on
+        its parent, so this also pins that `effective_steps` — not `.steps` — is what
+        adoption resolves."""
+        cleaner_app = self._with_cleaner_tables(tmp_path, monkeypatch)
+        source_id = next(iter(cleaner_app.session_state[cleaner_session.DC_TABLES_KEY]))
+
+        control = next(
+            widget
+            for widget in cleaner_app.segmented_control
+            if (widget.key or "").startswith("dc_cmd_summarise_")
+        )
+        control.set_value("group_summarise").run()
+        cleaner_app.multiselect(key=f"dc_summarise_groupby_{source_id}").set_value(["cust_id"]).run()
+        cleaner_app.multiselect(key=f"dc_summarise_values_{source_id}").set_value(["basic"]).run()
+        cleaner_app.button(key=f"dc_save_summary_group_summarise_{source_id}").click().run()
+
+        cleaner_tables = cleaner_app.session_state[cleaner_session.DC_TABLES_KEY]
+        assert len(cleaner_tables) == 2
+
+        app = AppTest.from_file(PAGE_PATH, default_timeout=60)
+        for key, value in cleaner_app.session_state.filtered_state.items():
+            app.session_state[key] = value
+        app.run()
+        next(button for button in app.button if button.key == "de_adopt_cleaner_button").click().run()
+
+        assert not app.exception
+        tables = app.session_state[engine_session.DE_TABLES_KEY]
+        assert len(tables) == 2
+        assert all(table.from_cleaner for table in tables.values())
+        assert len({table.table_name for table in tables.values()}) == 2
+        summary = next(table for table in tables.values() if "summary" in table.table_id)
+        assert "sum_of_basic" in summary.semantic_types
+
     def test_adopting_twice_re_snapshots_rather_than_duplicating(self, tmp_path, monkeypatch):
         cleaner_app = self._with_cleaner_tables(tmp_path, monkeypatch)
 
@@ -914,6 +949,179 @@ class TestPinToDashboard:
 
         assert calls == []
         assert len(self._pool(app)) == 1
+
+    def test_the_button_says_so_once_the_answer_is_pinned(self, tmp_path, monkeypatch):
+        """A button that stays live after pinning reads as "press me again", which is
+        exactly what produced duplicate tiles."""
+        app = self._answered(tmp_path, monkeypatch)
+        next(button for button in app.button if button.key == "an_pin_1").click().run()
+
+        button = next(button for button in app.button if button.key == "an_pin_1")
+        assert button.disabled
+        assert button.label == "Pinned to Dashboard"
+
+    def test_pressing_it_twice_still_pins_once(self, tmp_path, monkeypatch):
+        """The disabled state is what the user sees; this is the guarantee underneath it,
+        so a double-click landing two presses on one run can't make two copies either."""
+        app = self._answered(tmp_path, monkeypatch)
+        next(button for button in app.button if button.key == "an_pin_1").click().run()
+        next(button for button in app.button if button.key == "an_pin_1").click().run()
+
+        assert len(self._pool(app)) == 1
+
+    def test_discarding_the_pinned_copy_offers_the_button_again(self, tmp_path, monkeypatch):
+        """The state is the item being in the report, not a flag on the message — so
+        throwing it away on the Dashboard genuinely un-pins the answer."""
+        app = self._answered(tmp_path, monkeypatch)
+        next(button for button in app.button if button.key == "an_pin_1").click().run()
+
+        app.session_state[dashboard_session.DB_REPORT_KEY].pool.clear()
+        app.run()
+
+        button = next(button for button in app.button if button.key == "an_pin_1")
+        assert not button.disabled
+        assert button.label == "Pin to Dashboard"
+
+
+class TestSurvivingNavigation:
+    """Leaving the page and coming back must not cost the session.
+
+    Streamlit drops a keyed widget's value once that widget stops being rendered, and
+    `st.file_uploader` is the one widget with no `persist_state` to opt out. Deleting the
+    uploader's key before a run *is* what a page switch does, so that is how it is
+    simulated here — there is no other mechanism involved.
+    """
+
+    def _navigate_away_and_back(self, app):
+        del app.session_state[engine_session.DE_UPLOADER_KEY]
+        app.run()
+        return app
+
+    def test_coming_back_keeps_the_loaded_tables(self, tmp_path, monkeypatch):
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        assert len(app.session_state[engine_session.DE_TABLES_KEY]) == 1
+
+        self._navigate_away_and_back(app)
+        assert not app.exception
+        assert [table.table_name for table in app.session_state[engine_session.DE_TABLES_KEY].values()] == ["sales"]
+
+    def test_it_keeps_them_on_every_later_run_too(self, tmp_path, monkeypatch):
+        """The uploader is rebuilt empty on the return run, so from the next run onward it
+        reports an empty list quite legitimately. Detaching once is what stops that
+        reading as "the user removed everything" a moment later."""
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        self._navigate_away_and_back(app)
+        app.run()
+        app.run()
+
+        assert app.session_state[engine_session.DE_TABLES_KEY]
+
+    def test_the_chat_transcript_survives_with_them(self, tmp_path, monkeypatch):
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        app.session_state[chat_session.AN_MESSAGES_KEY] = [
+            chat_session.ChatMessage(role=chat_session.ROLE_USER, text="what sold most?")
+        ]
+        self._navigate_away_and_back(app)
+
+        assert len(app.session_state[chat_session.AN_MESSAGES_KEY]) == 1
+
+    def test_a_later_upload_adds_rather_than_replaces(self, tmp_path, monkeypatch):
+        """The uploader knows nothing about the detached tables, so its next file has to
+        join them rather than reconcile them away."""
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        self._navigate_away_and_back(app)
+        _upload(app, ("customer.csv", CUSTOMER_CSV))
+
+        names = {table.table_name for table in app.session_state[engine_session.DE_TABLES_KEY].values()}
+        assert names == {"sales", "customer"}
+
+    def test_the_page_explains_the_empty_looking_uploader(self, tmp_path, monkeypatch):
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        self._navigate_away_and_back(app)
+
+        assert any("still here and still queryable" in caption.value for caption in app.caption)
+
+    def test_removing_a_file_still_drops_its_table_while_the_uploader_owns_it(
+        self, tmp_path, monkeypatch
+    ):
+        """The fix must not cost the normal case: while the uploader is reporting, taking
+        a file out of it still takes the table with it."""
+        app = _upload(
+            _make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV), ("customer.csv", CUSTOMER_CSV)
+        )
+        assert len(app.session_state[engine_session.DE_TABLES_KEY]) == 2
+
+        _upload(app, ("sales.csv", SALES_CSV))
+        names = {table.table_name for table in app.session_state[engine_session.DE_TABLES_KEY].values()}
+        assert names == {"sales"}
+
+
+class TestRemoveTable:
+    """The buttons live under the loaded-tables summary, so Step 1 has to be open — which
+    it is whenever someone is actually managing their files."""
+
+    def test_it_drops_one_table_and_leaves_the_others(self, tmp_path, monkeypatch):
+        app = _upload(
+            _make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV), ("customer.csv", CUSTOMER_CSV)
+        )
+        _open_step(app, engine_session.STEP_UPLOAD)
+        tables = app.session_state[engine_session.DE_TABLES_KEY]
+        sales_id = next(table_id for table_id, table in tables.items() if table.table_name == "sales")
+
+        next(button for button in app.button if button.key == f"de_remove_table_{sales_id}").click().run()
+
+        names = {table.table_name for table in app.session_state[engine_session.DE_TABLES_KEY].values()}
+        assert names == {"customer"}
+
+    def test_the_uploader_does_not_load_it_straight_back(self, tmp_path, monkeypatch):
+        """The widget has no API for taking a file out of it, so its entry is still there
+        after Remove — and would reconcile the table back in on the very next run."""
+        app = _upload(
+            _make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV), ("customer.csv", CUSTOMER_CSV)
+        )
+        _open_step(app, engine_session.STEP_UPLOAD)
+        tables = app.session_state[engine_session.DE_TABLES_KEY]
+        sales_id = next(table_id for table_id, table in tables.items() if table.table_name == "sales")
+
+        next(button for button in app.button if button.key == f"de_remove_table_{sales_id}").click().run()
+        app.run()
+        app.run()
+
+        names = {table.table_name for table in app.session_state[engine_session.DE_TABLES_KEY].values()}
+        assert names == {"customer"}
+
+    def test_it_reaches_a_table_the_uploader_no_longer_holds(self, tmp_path, monkeypatch):
+        """The reason the button exists: a detached table has no entry in the uploader, so
+        without this the only way to drop it was Start over."""
+        app = _upload(
+            _make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV), ("customer.csv", CUSTOMER_CSV)
+        )
+        del app.session_state[engine_session.DE_UPLOADER_KEY]
+        app.run()
+        _open_step(app, engine_session.STEP_UPLOAD)
+
+        tables = app.session_state[engine_session.DE_TABLES_KEY]
+        sales_id = next(table_id for table_id, table in tables.items() if table.table_name == "sales")
+        next(button for button in app.button if button.key == f"de_remove_table_{sales_id}").click().run()
+
+        names = {table.table_name for table in app.session_state[engine_session.DE_TABLES_KEY].values()}
+        assert names == {"customer"}
+
+    def test_it_takes_any_link_that_used_the_table_with_it(self, tmp_path, monkeypatch):
+        """A relationship naming a table that is gone would break the next rebuild."""
+        app = _upload(
+            _make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV), ("customer.csv", CUSTOMER_CSV)
+        )
+        app.session_state[engine_session.DE_RELATIONSHIPS_KEY] = [
+            Relationship("sales", "cust_id", "customer", "id")
+        ]
+        _open_step(app, engine_session.STEP_UPLOAD)
+
+        tables = app.session_state[engine_session.DE_TABLES_KEY]
+        customer_id = next(table_id for table_id, table in tables.items() if table.table_name == "customer")
+        next(button for button in app.button if button.key == f"de_remove_table_{customer_id}").click().run()
+
+        assert app.session_state[engine_session.DE_RELATIONSHIPS_KEY] == []
 
 
 class TestReset:

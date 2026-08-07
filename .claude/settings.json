@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_chat_with_data_page.py -q)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_chat_with_data_page.py -q -p no:randomly)",
+      "Bash(.venv/Scripts/python.exe -m pytest \"tests/test_chat_with_data_page.py::TestRemoveTable::test_it_drops_one_table_and_leaves_the_others\" -q -p no:randomly)",
+      "Bash(.venv/Scripts/python.exe -m pytest -q)",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -m ruff check app_pages/ dashboard/ engine/ analyst/ tests/)",
+      "Bash(git stash *)",
+      "Bash(python -c \"import streamlit,os;print\\(os.path.dirname\\(streamlit.__file__\\)\\);print\\(streamlit.__version__\\)\")",
+      "Bash(git diff *)",
+      "Bash(git log *)"
+    ]
+  }
+}

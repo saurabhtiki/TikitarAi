@@ -12,6 +12,7 @@ a cache eviction costs a recompute rather than losing the user's work.
 
 import logging
 from dataclasses import dataclass, field
+from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
@@ -36,7 +37,15 @@ LARGE_TABLE_ROWS = 250_000
 
 @dataclass
 class TableState:
-    """One cleanable table: where it came from, what to call it, and its recipe."""
+    """One cleanable table: where it came from, what to call it, and its recipe.
+
+    A summary (a group-and-total, pivot or unpivot saved from another table) is the same
+    type rather than a type of its own, which is what lets it ride the download, the
+    sheet-name dedupe and the Chat with Data handoff with no code of its own in any of
+    them. It sets `derived_from` to its parent's `table_id` and holds its reshape in
+    `reshape`; its own `steps` stay empty, because its recipe is resolved live from the
+    parent by `effective_steps`.
+    """
 
     table_id: str
     file_id: str
@@ -46,6 +55,8 @@ class TableState:
     output_sheet_name: str
     steps: list[Step] = field(default_factory=list)
     recipe_version: int = CLEANING_RECIPE_VERSION
+    derived_from: str | None = None
+    reshape: Step | None = None
 
 
 def make_table_id(file_id: str, sheet_name: str | None) -> str:
@@ -94,6 +105,22 @@ def raw_table(table: TableState, file_bytes: bytes) -> pd.DataFrame:
     return _cached_raw_table(table.file_id, table.file_name, table.sheet_name, file_bytes)
 
 
+def effective_steps(table: TableState) -> list[Step]:
+    """The recipe that actually runs for this table.
+
+    For an uploaded table that is simply its own steps. For a summary it is the parent's
+    *current* steps followed by the reshape — resolved on every call rather than frozen at
+    save time, which is what keeps a summary honest when its source is cleaned further.
+    A summary whose parent has gone returns just the reshape; in practice `sync_tables`
+    has already dropped it by then.
+    """
+    if table.derived_from is None:
+        return table.steps
+    parent = get_table(table.derived_from)
+    inherited = list(parent.steps) if parent is not None else []
+    return inherited + ([table.reshape] if table.reshape is not None else [])
+
+
 def cleaned_table(table: TableState, file_bytes: bytes) -> tuple[pd.DataFrame, list[StepOutcome]]:
     """Returns the cleaned table and the per-step report.
 
@@ -101,7 +128,9 @@ def cleaned_table(table: TableState, file_bytes: bytes) -> tuple[pd.DataFrame, l
         DataCleanerError: if the file can no longer be read, or a recorded step names an
             unknown action.
     """
-    return _cached_cleaned_table(table.table_id, table.steps, raw_table(table, file_bytes))
+    # The parent's steps are part of the key for a summary, so cleaning the parent
+    # invalidates the summary's cache entry on its own — no explicit invalidation needed.
+    return _cached_cleaned_table(table.table_id, effective_steps(table), raw_table(table, file_bytes))
 
 
 def get_tables() -> dict[str, TableState]:
@@ -133,6 +162,61 @@ def set_steps(table_id: str, steps: list[Step]) -> None:
         logger.warning("Tried to set steps on table %s, which is no longer loaded.", table_id)
         return
     table.steps = steps
+
+
+def set_reshape(table_id: str, step: Step) -> None:
+    """Replaces a summary's reshape, for the Edit path."""
+    table = get_table(table_id)
+    if table is None:
+        logger.warning("Tried to set the reshape on table %s, which is no longer loaded.", table_id)
+        return
+    if table.derived_from is None:
+        logger.warning("Refused to set a reshape on table %s, which isn't a summary.", table_id)
+        return
+    table.reshape = step
+
+
+def add_summary_table(parent_table_id: str, step: Step, name: str) -> TableState | None:
+    """Saves a reshape of `parent_table_id` as a new derived table.
+
+    Returns the new table, or None if the parent is no longer loaded.
+    """
+    parent = get_table(parent_table_id)
+    if parent is None:
+        logger.warning("Tried to summarise table %s, which is no longer loaded.", parent_table_id)
+        return None
+
+    tables = get_tables()
+    taken = {table.output_sheet_name.lower() for table in tables.values()}
+    output_sheet_name = naming.sanitize_sheet_name(name)
+    if output_sheet_name.lower() in taken:
+        output_sheet_name = naming.deduplicate_sheet_names([*sorted(taken), output_sheet_name])[-1]
+
+    summary = TableState(
+        # Random rather than derived from the name, so renaming a summary can't collide
+        # with a sibling and can't orphan the recipe that is already keyed on this id.
+        table_id=f"{parent.table_id}::summary::{uuid4().hex[:8]}",
+        file_id=parent.file_id,
+        file_name=parent.file_name,
+        sheet_name=parent.sheet_name,
+        source_label=f"{parent.source_label} — {name}",
+        output_sheet_name=output_sheet_name,
+        derived_from=parent.table_id,
+        reshape=step,
+    )
+    tables[summary.table_id] = summary
+    logger.info("Saved summary %s of table %s.", summary.table_id, parent.table_id)
+    return summary
+
+
+def remove_table(table_id: str) -> None:
+    """Discards one table and every summary derived from it."""
+    tables = get_tables()
+    if tables.pop(table_id, None) is None:
+        logger.warning("Tried to remove table %s, which is no longer loaded.", table_id)
+        return
+    for summary_id in [key for key, table in tables.items() if table.derived_from == table_id]:
+        del tables[summary_id]
 
 
 def set_output_sheet_name(table_id: str, name: str) -> None:
@@ -249,12 +333,21 @@ def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[T
     along with its recipe. Only registering additions would silently keep exporting
     tables the user believes they removed.
 
+    Summaries have no file of their own, so they can't be rebuilt from the uploader and
+    are carried over explicitly — each one placed straight after its parent, so the tab
+    strip reads source, its summaries, next source. A summary whose parent is gone is
+    simply not carried over, which is the cascade delete the page relies on.
+
     Raises:
         DataCleanerError: if a newly added file can't be read.
     """
     existing = get_tables()
     reconciled: dict[str, TableState] = {}
     taken_sheet_names: set[str] = set()
+    summaries_by_parent: dict[str, list[TableState]] = {}
+    for table in existing.values():
+        if table.derived_from is not None:
+            summaries_by_parent.setdefault(table.derived_from, []).append(table)
 
     for uploaded_file in uploaded_files or []:
         if loaders.is_csv(uploaded_file.name):
@@ -269,6 +362,10 @@ def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[T
                 table = _new_table_state(uploaded_file, sheet_name, taken_sheet_names)
             reconciled[table_id] = table
             taken_sheet_names.add(table.output_sheet_name.lower())
+
+            for summary in summaries_by_parent.get(table_id, []):
+                reconciled[summary.table_id] = summary
+                taken_sheet_names.add(summary.output_sheet_name.lower())
 
     dropped = set(existing) - set(reconciled)
     if dropped:
@@ -316,6 +413,6 @@ def build_download(tables: list[TableState], file_bytes_by_id: dict[str, bytes])
             raise DataCleanerError(f"'{table.source_label}' is no longer available. Please re-upload it.")
         frame, _ = cleaned_table(table, file_bytes)
         payload.append((sheet_name, frame))
-        log[sheet_name] = pipeline.describe_steps(table.steps)
+        log[sheet_name] = pipeline.describe_steps(effective_steps(table))
 
     return export.build_workbook(payload, log)

@@ -5,9 +5,8 @@ the chat page — pinning is covered where it lives, in `test_chat_with_data_pag
 a test that has to drive a whole conversation before it can check a reorder button is
 testing the wrong thing.
 
-No test here reaches the network: the only model call the page can make is
-`analyst.commentary.write_commentary`, patched at that seam the way
-`test_llm_suggestions.py` does.
+No test here reaches the network, and none can: the page makes no model calls at all. It
+arranges what the chat already produced.
 """
 
 from pathlib import Path
@@ -16,7 +15,6 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from analyst import commentary
 from auth.db import init_db, seed_default_admin
 from dashboard import session as dashboard_session
 from dashboard.css_presets import DEFAULT_PRESET
@@ -178,8 +176,25 @@ class TestPlacing:
         item = PinnedItem(item_id="a", question="Sales", frame=FRAME)
         app = _make_app(tmp_path, monkeypatch, report=_placed_report(item))
 
-        app.text_area(key=f"db_item_comment_a_{item.comment_revision}").set_value("Steady quarter.").run()
+        app.text_area(key="db_item_comment_a").set_value("Steady quarter.").run()
         assert _report(app).sections[0].subsections[0].items[0].comment == "Steady quarter."
+
+    def test_a_comment_arrives_carrying_the_chats_own_answer(self, tmp_path, monkeypatch):
+        """The comment is not generated here — the box opens holding what the chat already
+        wrote about this answer, and the user edits it from there."""
+        item = PinnedItem(item_id="a", question="Sales", frame=FRAME, comment="The North leads.")
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(item))
+
+        assert app.text_area(key="db_item_comment_a").value == "The North leads."
+
+    def test_there_is_no_generate_button(self, tmp_path, monkeypatch):
+        """Removed on the user's instruction. The page now makes no model calls at all,
+        which is also why nothing here needs an LLM profile."""
+        report = _placed_report(PinnedItem(item_id="a", question="Sales", frame=FRAME))
+        app = _make_app(tmp_path, monkeypatch, report=report, with_model=True)
+
+        assert not _has_button(app, "db_item_generate_a")
+        assert not any("Generate" in button.label for button in app.button)
 
 
 class TestReordering:
@@ -229,58 +244,27 @@ class TestReordering:
         assert [item.item_id for item in placed] == ["i1", "i2", "i0"]
 
 
-class TestGenerateComment:
-    def test_it_is_disabled_without_a_session_model(self, tmp_path, monkeypatch):
-        """Same gate the chat input uses: say what's missing rather than fail on click."""
-        report = _placed_report(PinnedItem(item_id="a", question="Sales", frame=FRAME))
+class TestLookDialog:
+    def test_looking_at_an_item_opens_the_dialog(self, tmp_path, monkeypatch):
+        report = _pooled_report(PinnedItem(item_id="a", question="Sales", frame=FRAME))
         app = _make_app(tmp_path, monkeypatch, report=report)
-        assert _button(app, "db_item_generate_a").disabled
 
-    def test_it_is_disabled_when_there_are_no_rows_to_comment_on(self, tmp_path, monkeypatch):
-        report = _placed_report(PinnedItem(item_id="a", question="Why?"))
-        app = _make_app(tmp_path, monkeypatch, report=report, with_model=True)
-        assert _button(app, "db_item_generate_a").disabled
+        app.button(key="db_pool_preview_a").click().run()
+        assert app.session_state[dashboard_session.DB_DIALOG_KEY]["payload"] == {"item_id": "a"}
 
-    def test_it_writes_the_comment_into_the_box(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            commentary, "write_commentary", lambda *args, **kwargs: ("The North leads.", [])
-        )
-        report = _placed_report(PinnedItem(item_id="a", question="Sales", frame=FRAME))
-        app = _make_app(tmp_path, monkeypatch, report=report, with_model=True)
+    def test_closing_it_does_not_leave_it_armed_to_reopen(self, tmp_path, monkeypatch):
+        """The flag lives in session state, so anything that leaves it set reopens the
+        dialog on the next unrelated rerun — which is what pressing any other button is."""
+        report = _pooled_report(PinnedItem(item_id="a", question="Sales", frame=FRAME))
+        app = _make_app(tmp_path, monkeypatch, report=report)
 
-        app.button(key="db_item_generate_a").click().run()
-        item = _report(app).sections[0].subsections[0].items[0]
-        assert item.comment == "The North leads."
-        assert app.text_area(key=f"db_item_comment_a_{item.comment_revision}").value == "The North leads."
+        app.button(key="db_pool_preview_a").click().run()
+        app.button(key="db_dialog_close").click().run()
+        assert dashboard_session.DB_DIALOG_KEY not in app.session_state
 
-    def test_a_failed_call_warns_and_leaves_the_comment_alone(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(
-            commentary, "write_commentary", lambda *args, **kwargs: ("", ["The model couldn't be reached."])
-        )
-        report = _placed_report(PinnedItem(item_id="a", question="Sales", frame=FRAME, comment="Mine."))
-        app = _make_app(tmp_path, monkeypatch, report=report, with_model=True)
-
-        app.button(key="db_item_generate_a").click().run()
-        assert not app.exception
-        assert any("couldn't be reached" in warning.value for warning in app.warning)
-        assert _report(app).sections[0].subsections[0].items[0].comment == "Mine."
-
-    def test_a_plain_rerun_never_calls_the_model(self, tmp_path, monkeypatch):
-        """Requirement 6.3's comment is generated on demand, so scrolling the page or
-        renaming a section must not cost a model call."""
-        calls = []
-        monkeypatch.setattr(
-            commentary,
-            "write_commentary",
-            lambda *args, **kwargs: (calls.append(args), ("x", []))[1],
-        )
-        report = _placed_report(PinnedItem(item_id="a", question="Sales", frame=FRAME))
-        app = _make_app(tmp_path, monkeypatch, report=report, with_model=True)
-        app.run()
-        app.run()
-
-        assert calls == []
-
+        # The rerun any other button would cause.
+        app.button(key="db_add_section").click().run()
+        assert dashboard_session.DB_DIALOG_KEY not in app.session_state
 
 class TestPreview:
     def test_an_empty_report_says_what_to_do(self, tmp_path, monkeypatch):
@@ -310,6 +294,21 @@ class TestDownload:
         assert not app.exception
         keys = {button.key for button in app.get("download_button")}
         assert keys == {"db_download_html", "db_download_excel"}
+
+    def test_a_placed_report_previews_the_html_it_would_download(self, tmp_path, monkeypatch):
+        """The preview is the point of the presets: Preview shows whether the report is
+        right, this shows whether the stylesheet is. `st.iframe` has no typed AppTest
+        element, so what is asserted is that the page renders it without blowing up and
+        says what it is — the bytes themselves are covered in `test_dashboard_html_export`."""
+        report = _placed_report(PinnedItem(item_id="a", heading="Sales", frame=FRAME))
+        app = _set_view(_make_app(tmp_path, monkeypatch, report=report), "Download")
+
+        assert not app.exception
+        assert any("This is the file itself" in caption.value for caption in app.caption)
+
+    def test_an_empty_report_previews_nothing(self, tmp_path, monkeypatch):
+        app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
+        assert not any("This is the file itself" in caption.value for caption in app.caption)
 
     def test_the_three_presets_are_offered(self, tmp_path, monkeypatch):
         app = _set_view(_make_app(tmp_path, monkeypatch), "Download")

@@ -22,7 +22,7 @@ import logging
 import streamlit as st
 
 from analyst.session import ChatMessage
-from dashboard.model import PinnedItem, Report
+from dashboard.model import PinnedItem, Report, find_item
 
 logger = logging.getLogger(__name__)
 
@@ -47,18 +47,29 @@ def set_title(title: str) -> None:
 
 
 def pin(message: ChatMessage) -> PinnedItem:
-    """Copies a chat answer into the unplaced pool.
+    """Copies a chat answer into the unplaced pool, once.
 
     Nothing is asked of the user here — requirement 6.1 step 3 puts pinning in the middle
     of a conversation, and a dialog asking "which subsection?" before the user has built
     any would stop the chat dead. The item lands in the pool with its heading already set
     to the question, and is arranged on the Dashboard page afterwards.
 
+    An answer that is already in the report returns the item it was pinned as rather than
+    making a second copy of it. Pressing the button twice is the natural reading of a
+    control that stays clickable, and it used to mean two identical tiles to find and
+    discard on the Dashboard — so the id is recorded on the message and the page renders
+    the button as already-pinned from then on.
+
     The frame is copied rather than referenced: see this module's docstring. The figure is
     not copied — the customize controls in the chat *reassign* `message.figure` rather than
     mutating it, so the object pinned here is a snapshot of the chart as it looked at pin
     time, which is what the user pressed the button on.
     """
+    already = pinned_item(message)
+    if already is not None:
+        logger.info("Ignoring a repeat pin of an answer already on the dashboard (item %s).", already.item_id)
+        return already
+
     item = PinnedItem(
         question=message.question or message.text,
         heading=(message.question or "").strip(),
@@ -69,8 +80,21 @@ def pin(message: ChatMessage) -> PinnedItem:
         outputs=set(message.outputs),
     )
     get_report().pool.append(item)
+    message.pinned_item_id = item.item_id
     logger.info("Pinned an answer to the dashboard (item %s).", item.item_id)
     return item
+
+
+def pinned_item(message: ChatMessage) -> PinnedItem | None:
+    """The dashboard item this answer is currently pinned as, or None.
+
+    Looked up in the report rather than trusted from the message, so discarding the pinned
+    copy on the Dashboard — or pressing Start over — offers the chat's button again instead
+    of leaving it permanently claiming the answer is already there.
+    """
+    if not message.pinned_item_id:
+        return None
+    return find_item(get_report(), message.pinned_item_id)
 
 
 def pool_count() -> int:

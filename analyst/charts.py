@@ -804,13 +804,13 @@ def _styled(figure: go.Figure, title: str, style: ChartStyle) -> go.Figure:
         # leaving it floating outside a box.
         legend={
             "orientation": "h",
-            "yanchor": "top",
-            "y": 0.99,
+            "yanchor": "bottom",
+            "y": 1.02,
             "xanchor": "right",
             "x": 0.99,
             "bgcolor": "rgba(0,0,0,0)",
         },
-        margin={"l": 10, "r": 10, "t": 55, "b": 10},
+        margin={"l": 10, "r": 10, "t": 80, "b": 10},
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )

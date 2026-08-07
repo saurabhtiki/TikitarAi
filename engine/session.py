@@ -38,6 +38,7 @@ DE_PENDING_STEPS_KEY = "de_pending_step_state"
 DE_AUTOCOLLAPSED_KEY = "de_autocollapsed_steps"
 DE_REBUILD_KEY = "de_rebuild_count"
 DE_START_OVER_KEY = "de_start_over_pending"
+DE_DISMISSED_KEY = "de_dismissed_tables"
 
 STEP_UPLOAD = "de_step_upload"
 STEP_LINKS = "de_step_links"
@@ -49,7 +50,16 @@ PREVIEW_ROWS = 100
 
 @dataclass
 class EngineTable:
-    """One table loaded into the engine."""
+    """One table loaded into the engine.
+
+    Attributes:
+        from_cleaner: adopted from the Data Cleaner rather than uploaded here. Decides
+            whether `adopt_cleaner_tables` rebuilds it.
+        uploader_managed: whether the file uploader still decides this table's fate.
+            True for a fresh upload, so removing its file removes the table; False for
+            anything adopted from the Data Cleaner, and False from the moment the uploader
+            loses the file behind it — see `detach_uploader_tables`.
+    """
 
     table_id: str
     table_name: str
@@ -59,6 +69,7 @@ class EngineTable:
     semantic_types: dict[str, str] = field(default_factory=dict)
     row_count: int = 0
     from_cleaner: bool = False
+    uploader_managed: bool = True
 
 
 # --------------------------------------------------------------------------------------
@@ -239,7 +250,45 @@ def _register(
         semantic_types=semantic_types,
         row_count=len(frame),
         from_cleaner=from_cleaner,
+        # A cleaner table has no entry in the uploader at all, so it must never be part of
+        # the uploader's reconciliation.
+        uploader_managed=not from_cleaner,
     )
+
+
+def detach_uploader_tables() -> int:
+    """Stops the uploader deciding the fate of tables it can no longer see.
+
+    Call **before** the uploader widget is created, and only from the page that owns it.
+
+    Streamlit drops a keyed widget's value the moment that widget stops being rendered,
+    and `st.file_uploader` is the one widget with no `persist_state` to opt out of it. So
+    a trip to the Dashboard and back left the uploader reporting nothing, `sync_tables`
+    read that as "the user removed every file", and the whole session — tables, links,
+    descriptions, the lot — went with it. That is what this exists to stop.
+
+    The signal is the uploader's key being absent from session state before the widget is
+    built: present means it survived the last run and is telling the truth about what is
+    in it, absent means either a brand-new session (nothing loaded, so this is a no-op) or
+    a return from another page. Tables detached this way stay loaded and queryable and are
+    removed with the per-table Remove button or Start over instead.
+
+    Returns:
+        How many tables were detached, so the page can explain the uploader looking empty.
+    """
+    if DE_UPLOADER_KEY in st.session_state:
+        return 0
+
+    detached = [table for table in get_tables().values() if table.uploader_managed]
+    for table in detached:
+        table.uploader_managed = False
+
+    if detached:
+        logger.info(
+            "Detached %d table(s) from the uploader after its state was dropped; they stay loaded.",
+            len(detached),
+        )
+    return len(detached)
 
 
 def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[EngineTable]:
@@ -250,17 +299,20 @@ def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[E
     longer selected is dropped. Registering only additions would leave the user querying
     tables they believe they removed.
 
-    Tables adopted from the Data Cleaner are left alone — they have no uploader entry
-    here, so a one-directional read of the uploader would wrongly delete them.
+    Reconciliation only ever covers tables the uploader still manages. Tables adopted from
+    the Data Cleaner have no uploader entry at all, and tables detached by
+    `detach_uploader_tables` no longer have one either — a one-directional read of the
+    uploader would wrongly delete both. Those are removed with `remove_table` instead.
 
     Returns the loaded tables. Never raises: a file that can't be read is skipped with an
     error on screen, and the others still load.
     """
     existing = get_tables()
     reconciled: dict[str, EngineTable] = {
-        table_id: table for table_id, table in existing.items() if table.from_cleaner
+        table_id: table for table_id, table in existing.items() if not table.uploader_managed
     }
     taken = {table.table_name for table in reconciled.values()}
+    dismissed = dismissed_table_ids()
 
     for uploaded_file in uploaded_files or []:
         if loaders.is_csv(uploaded_file.name):
@@ -270,6 +322,8 @@ def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[E
 
         for sheet_name in sheets:
             table_id = f"{uploaded_file.file_id}::{sheet_name or ''}"
+            if table_id in dismissed:
+                continue
             source_label = f"{uploaded_file.name} — {sheet_name}" if sheet_name else uploaded_file.name
 
             already = existing.get(table_id)
@@ -301,6 +355,42 @@ def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[E
     _drop_removed(existing, reconciled)
     st.session_state[DE_TABLES_KEY] = reconciled
     return list(reconciled.values())
+
+
+def dismissed_table_ids() -> set[str]:
+    """Tables removed by hand, which `sync_tables` must not load again.
+
+    The uploader is still holding the file behind a table removed with `remove_table` —
+    the widget has no API to take an entry out of it — so without this the very next run
+    would reconcile the table straight back in and Remove would appear to do nothing.
+    Re-uploading the same file works: Streamlit issues a new `file_id`, so it arrives with
+    a table_id this set has never seen.
+    """
+    return st.session_state.setdefault(DE_DISMISSED_KEY, set())
+
+
+def remove_table(table_id: str) -> str | None:
+    """Removes one loaded table by hand, whatever loaded it.
+
+    The uploader can only take back files it still holds, which is nothing at all for a
+    table adopted from the Data Cleaner or detached by `detach_uploader_tables`. Without
+    this, removing one of those meant Start over — discarding every other table, every
+    link and the whole chat to get rid of one file. It works on uploaded tables too, so
+    Remove means the same thing wherever a table came from.
+
+    Returns the removed table's name, or None if the id is unknown.
+    """
+    existing = get_tables()
+    table = existing.get(table_id)
+    if table is None:
+        return None
+
+    reconciled = {other_id: other for other_id, other in existing.items() if other_id != table_id}
+    _drop_removed(existing, reconciled)
+    st.session_state[DE_TABLES_KEY] = reconciled
+    dismissed_table_ids().add(table_id)
+    logger.info("Removed table '%s' by hand.", table.table_name)
+    return table.table_name
 
 
 def _drop_removed(existing: dict[str, EngineTable], reconciled: dict[str, EngineTable]) -> None:
@@ -390,8 +480,10 @@ def adopt_cleaner_tables() -> tuple[list[EngineTable], list[str]]:
 
         try:
             frame, _ = cleaner_session.cleaned_table(cleaner_table, file_bytes)
+            # `effective_steps`, not `.steps`: a summary's own step list is empty and its
+            # typing lives on the parent it was derived from.
             frame, semantic_types = loading.prepare_cleaned_frame(
-                frame, pipeline.declared_column_types(cleaner_table.steps)
+                frame, pipeline.declared_column_types(cleaner_session.effective_steps(cleaner_table))
             )
             table_name = duckdb_session.slugify_table_name(cleaner_table.output_sheet_name, taken)
             adopted[table_id] = _register(
@@ -500,6 +592,7 @@ def reset_engine() -> None:
         DE_DIALOG_KEY,
         DE_PENDING_STEPS_KEY,
         DE_AUTOCOLLAPSED_KEY,
+        DE_DISMISSED_KEY,
     ):
         st.session_state.pop(key, None)
 

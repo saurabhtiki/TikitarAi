@@ -52,6 +52,27 @@ CASE_CHOICES = ["upper", "lower", "title"]
 FILL_STRATEGIES = ["custom", "previous", "next", "zero", "mean", "median", "drop_rows"]
 DUPLICATE_KEEP_CHOICES = ["first", "last"]
 
+# Aggregations offered by the three reshape actions. `count` counts filled values rather
+# than rows, matching every other blank-aware count on this page.
+AGGREGATION_FUNCTIONS = ["sum", "mean", "median", "min", "max", "count", "count_distinct", "first"]
+PANDAS_AGGREGATIONS = {
+    "sum": "sum",
+    "mean": "mean",
+    "median": "median",
+    "min": "min",
+    "max": "max",
+    "count": "count",
+    "count_distinct": "nunique",
+    "first": "first",
+}
+# The three that need a numeric column. min/max/first order text perfectly sensibly, so
+# they are deliberately not in here.
+NUMERIC_ONLY_AGGREGATIONS = {"sum", "mean", "median"}
+
+MAX_PIVOT_COLUMNS = 200
+DEFAULT_VARIABLE_NAME = "Attribute"
+DEFAULT_VALUE_NAME = "Value"
+
 DEFAULT_KEEP_PATTERN = r"A-Za-z0-9 .,_@&()\-/"
 
 _ALL_WHITESPACE = re.compile(rf"[\s{INVISIBLE_WHITESPACE}]+")
@@ -719,6 +740,275 @@ def _validate_drop_duplicates(params: dict, columns: list[str]) -> None:
 
 
 # --------------------------------------------------------------------------------------
+# Reshape actions — the three that change a table's grain rather than its contents
+#
+# These are the only actions whose output has a different meaning per row than their
+# input, which is why the page never records them onto the table being cleaned: it saves
+# each as a separate derived table instead. They are ordinary registry entries all the
+# same, so the log line, the validator and the missing-column tolerance all come free.
+# --------------------------------------------------------------------------------------
+
+
+def _flatten_label(label) -> str:
+    """Turns a pivot's MultiIndex column label into one plain string.
+
+    Not cosmetic: DuckDB registration in the Chat with Data handoff rejects a frame whose
+    column labels aren't unique strings, so a tuple label would break the export rather
+    than merely look untidy.
+    """
+    if isinstance(label, tuple):
+        return " / ".join(str(part) for part in label if str(part) != "")
+    return str(label)
+
+
+def _coerce_fill_value(value):
+    """Reads a typed-in fill value as a number when it looks like one, else as text."""
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _aggregation_label(column: str, function: str) -> str:
+    return f"{function}_of_{column}"
+
+
+def _apply_group_summarise(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    group_by = list(params.get("group_by") or [])
+    aggregations = list(params.get("aggregations") or [])
+
+    existing_keys, missing_keys = _present(frame, group_by)
+    warnings_out = _missing_warning(missing_keys)
+
+    requested: list[tuple[str, str]] = []
+    for aggregation in aggregations:
+        column = aggregation.get("column")
+        function = aggregation.get("function")
+        if column not in frame.columns:
+            warnings_out.append(f"Skipped the {function} of '{column}': it isn't in the table any more.")
+            continue
+        if function in NUMERIC_ONLY_AGGREGATIONS and not is_numeric_dtype(frame[column]):
+            warnings_out.append(
+                f"'{column}' isn't a numeric column, so its {function} was skipped. Set it to numeric first."
+            )
+            continue
+        requested.append((column, function))
+
+    if not requested:
+        warnings_out.append("None of the chosen aggregations could be applied, so the table is unchanged.")
+        return frame, warnings_out
+
+    # Deduped against the group keys as well as each other, because the aggregated columns
+    # sit alongside those keys in the result and two identical labels would be unusable.
+    labels = _dedupe_columns(existing_keys + [_aggregation_label(column, function) for column, function in requested])
+    named = {
+        label: (column, PANDAS_AGGREGATIONS[function])
+        for label, (column, function) in zip(labels[len(existing_keys) :], requested)
+    }
+
+    if existing_keys:
+        result = frame.groupby(existing_keys, dropna=False, observed=True).agg(**named).reset_index()
+    else:
+        # No group keys means one totals row. Grouping on a constant rather than calling
+        # the aggregations directly keeps this on the identical pandas path to the keyed
+        # case, so "sum of Amount" can never quietly mean two different things.
+        constant = pd.Series(0, index=frame.index)
+        result = frame.groupby(constant, observed=True).agg(**named).reset_index(drop=True)
+
+    return result, warnings_out
+
+
+def _describe_group_summarise(params: dict) -> str:
+    pairs = ", ".join(
+        f"{aggregation.get('function')} of {aggregation.get('column')}"
+        for aggregation in params.get("aggregations") or []
+    )
+    keys = ", ".join(params.get("group_by") or [])
+    scope = f" by {keys}" if keys else " across the whole table"
+    return f"Summarised{scope}: {pairs}"
+
+
+def _validate_group_summarise(params: dict, columns: list[str]) -> None:
+    _require_keys(params, {"group_by", "aggregations"}, "Summarise")
+
+    group_by = params.get("group_by") or []
+    if group_by:
+        _require_columns_exist(group_by, columns, "Summarise")
+
+    aggregations = params.get("aggregations")
+    if not isinstance(aggregations, list) or not aggregations:
+        raise InvalidStepError("Summarise needs at least one column to total up.")
+
+    for aggregation in aggregations:
+        if not isinstance(aggregation, dict):
+            raise InvalidStepError("Summarise: every aggregation must be a mapping.")
+        column = aggregation.get("column")
+        function = aggregation.get("function")
+        if column not in columns:
+            raise InvalidStepError(f"Summarise: no such column: {column}.")
+        if function not in AGGREGATION_FUNCTIONS:
+            raise InvalidStepError(
+                f"Summarise: '{function}' isn't a valid function for '{column}'. "
+                f"Choose one of {', '.join(AGGREGATION_FUNCTIONS)}."
+            )
+        if column in group_by:
+            raise InvalidStepError(
+                f"Summarise: '{column}' is one of the group columns, so it can't also be totalled up."
+            )
+
+
+def _summarise_columns(params: dict) -> list[str]:
+    aggregated = [aggregation.get("column") for aggregation in params.get("aggregations") or []]
+    return list(params.get("group_by") or []) + [column for column in aggregated if isinstance(column, str)]
+
+
+def _apply_pivot(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    index = list(params.get("index") or [])
+    pivot_column = params.get("columns")
+    value_column = params.get("values")
+    function = params.get("function", "sum")
+
+    existing_index, missing_index = _present(frame, index)
+    warnings_out = _missing_warning(missing_index)
+
+    absent = [column for column in (pivot_column, value_column) if column not in frame.columns]
+    if absent or not existing_index:
+        warnings_out.append("Pivot needs its row, column and value columns, so the table is unchanged.")
+        return frame, warnings_out
+    if function in NUMERIC_ONLY_AGGREGATIONS and not is_numeric_dtype(frame[value_column]):
+        warnings_out.append(
+            f"'{value_column}' isn't a numeric column, so it can't be pivoted with {function}. "
+            f"Set it to numeric first, or pivot with count."
+        )
+        return frame, warnings_out
+
+    result = pd.pivot_table(
+        frame,
+        index=existing_index,
+        columns=pivot_column,
+        values=value_column,
+        aggfunc=PANDAS_AGGREGATIONS[function],
+        fill_value=_coerce_fill_value(params.get("fill_value")),
+        dropna=False,
+        observed=True,
+    ).reset_index()
+    result.columns = _dedupe_columns([_flatten_label(label) for label in result.columns])
+
+    if len(result.columns) > MAX_PIVOT_COLUMNS:
+        warnings_out.append(
+            f"This pivot produced {len(result.columns):,} columns. Anything past about "
+            f"{MAX_PIVOT_COLUMNS:,} is hard to read and slow to export — pick a column with fewer "
+            f"distinct values to spread across."
+        )
+    return result, warnings_out
+
+
+def _describe_pivot(params: dict) -> str:
+    return (
+        f"Pivoted {params.get('function')} of {params.get('values')} with "
+        f"{', '.join(params.get('index') or [])} down the side and {params.get('columns')} across the top"
+    )
+
+
+def _validate_pivot(params: dict, columns: list[str]) -> None:
+    _require_keys(params, {"index", "columns", "values", "function", "fill_value"}, "Pivot")
+    _require_columns_exist(params.get("index") or [], columns, "Pivot")
+
+    index = params["index"]
+    pivot_column = params.get("columns")
+    value_column = params.get("values")
+
+    for role, column in (("column to spread across the top", pivot_column), ("value column", value_column)):
+        if column not in columns:
+            raise InvalidStepError(f"Pivot: no such {role}: {column}.")
+    if pivot_column == value_column:
+        raise InvalidStepError("Pivot: the column spread across the top can't also be the value column.")
+    if pivot_column in index or value_column in index:
+        raise InvalidStepError("Pivot: a row column can't also be the column spread across the top or the value.")
+    if params.get("function") not in AGGREGATION_FUNCTIONS:
+        raise InvalidStepError(
+            f"Pivot: '{params.get('function')}' isn't a valid function. Choose one of {', '.join(AGGREGATION_FUNCTIONS)}."
+        )
+
+
+def _pivot_columns(params: dict) -> list[str]:
+    named = [params.get("columns"), params.get("values")]
+    return list(params.get("index") or []) + [column for column in named if isinstance(column, str)]
+
+
+def _apply_unpivot(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    variable_name = params.get("variable_name") or DEFAULT_VARIABLE_NAME
+    value_name = params.get("value_name") or DEFAULT_VALUE_NAME
+
+    existing_ids, missing_ids = _present(frame, list(params.get("id_columns") or []))
+    warnings_out = _missing_warning(missing_ids)
+
+    requested_values = list(params.get("value_columns") or [])
+    if requested_values:
+        existing_values, missing_values = _present(frame, requested_values)
+        warnings_out.extend(_missing_warning(missing_values))
+    else:
+        existing_values = [column for column in frame.columns if column not in existing_ids]
+
+    if not existing_values:
+        warnings_out.append("Unpivot had no value columns left to stack up, so the table is unchanged.")
+        return frame, warnings_out
+
+    result = frame.melt(
+        id_vars=existing_ids,
+        value_vars=existing_values,
+        var_name=variable_name,
+        value_name=value_name,
+    ).reset_index(drop=True)
+
+    # Stacking columns of different types lands them in one object column, which has no
+    # meaningful type downstream and which DuckDB can't register. Text is the honest
+    # answer there; a single-type stack keeps whatever type it already had.
+    if result[value_name].dtype == "object":
+        result[value_name] = result[value_name].astype("string")
+    return result, warnings_out
+
+
+def _describe_unpivot(params: dict) -> str:
+    stacked = ", ".join(params.get("value_columns") or []) or "every other column"
+    return (
+        f"Unpivoted {stacked} into '{params.get('variable_name') or DEFAULT_VARIABLE_NAME}' and "
+        f"'{params.get('value_name') or DEFAULT_VALUE_NAME}', keyed by {', '.join(params.get('id_columns') or [])}"
+    )
+
+
+def _validate_unpivot(params: dict, columns: list[str]) -> None:
+    _require_keys(params, {"id_columns", "value_columns", "variable_name", "value_name"}, "Unpivot")
+    _require_columns_exist(params.get("id_columns") or [], columns, "Unpivot")
+
+    id_columns = params["id_columns"]
+    value_columns = params.get("value_columns") or []
+    if value_columns:
+        _require_columns_exist(value_columns, columns, "Unpivot")
+        overlap = sorted(set(id_columns) & set(value_columns))
+        if overlap:
+            raise InvalidStepError(
+                f"Unpivot: {', '.join(overlap)} can't be both a column to keep and a column to stack up."
+            )
+    elif not [column for column in columns if column not in id_columns]:
+        raise InvalidStepError("Unpivot: every column was kept as-is, so there is nothing left to stack up.")
+
+    variable_name = params.get("variable_name") or DEFAULT_VARIABLE_NAME
+    value_name = params.get("value_name") or DEFAULT_VALUE_NAME
+    if variable_name == value_name:
+        raise InvalidStepError("Unpivot: the name and value columns need different names.")
+    clashing = sorted({variable_name, value_name} & set(id_columns))
+    if clashing:
+        raise InvalidStepError(f"Unpivot: {', '.join(clashing)} is already a column you're keeping — pick another name.")
+
+
+def _unpivot_columns(params: dict) -> list[str]:
+    return list(params.get("id_columns") or []) + list(params.get("value_columns") or [])
+
+
+# --------------------------------------------------------------------------------------
 # Registry
 # --------------------------------------------------------------------------------------
 
@@ -836,7 +1126,35 @@ STEP_REGISTRY: dict[str, StepSpec] = {
         validate=_validate_drop_duplicates,
         required_columns=_columns_param,
     ),
+    "group_summarise": StepSpec(
+        action="group_summarise",
+        label="Group & total",
+        apply=_apply_group_summarise,
+        describe=_describe_group_summarise,
+        validate=_validate_group_summarise,
+        required_columns=_summarise_columns,
+    ),
+    "pivot": StepSpec(
+        action="pivot",
+        label="Pivot",
+        apply=_apply_pivot,
+        describe=_describe_pivot,
+        validate=_validate_pivot,
+        required_columns=_pivot_columns,
+    ),
+    "unpivot": StepSpec(
+        action="unpivot",
+        label="Unpivot",
+        apply=_apply_unpivot,
+        describe=_describe_unpivot,
+        validate=_validate_unpivot,
+        required_columns=_unpivot_columns,
+    ),
 }
+
+# The actions that produce a new table rather than editing one in place. The Data Cleaner
+# page saves these as derived tables; nothing else may record them onto a table's recipe.
+RESHAPE_ACTIONS = ["group_summarise", "pivot", "unpivot"]
 
 
 def get_spec(action: str) -> StepSpec:

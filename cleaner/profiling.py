@@ -279,3 +279,13 @@ def text_columns(frame: pd.DataFrame) -> list[str]:
     them — applying a text action there would look like it worked and change nothing.
     """
     return [str(column) for column in frame.columns if is_string_dtype(frame[column])]
+
+
+def numeric_columns(frame: pd.DataFrame) -> list[str]:
+    """Columns that can be summed or averaged.
+
+    The mirror of `text_columns`, and used the same way: to steer a picker towards the
+    columns an action can actually work on, rather than letting someone choose a column
+    whose sum would come back blank.
+    """
+    return [str(column) for column in frame.columns if is_numeric_dtype(frame[column])]

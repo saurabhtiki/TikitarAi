@@ -12,7 +12,9 @@ they are three different jobs rather than three parts of one screen:
   levels requirement 6.3 asks to be reorderable.
 - **Preview** — the report read top to bottom, walked through `dashboard.model.walk`,
   which is the same function both exporters use. What is previewed is what downloads.
-- **Download** — the CSS preset, the optional hand-edit, and the two buttons.
+- **Download** — the CSS preset, the optional hand-edit, the two buttons, and the finished
+  HTML shown in an iframe beneath them. The two previews answer different questions:
+  Preview says whether the *report* is right, Download says whether the *stylesheet* is.
 
 Nothing here is saved. Requirement 6.3 is explicit that the dashboard exists for the
 session only, which is why the page says so plainly rather than leaving the user to find
@@ -23,7 +25,6 @@ import logging
 
 import streamlit as st
 
-from analyst.commentary import write_commentary
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
 from dashboard import session as dashboard_session
@@ -55,12 +56,16 @@ from dashboard.model import (
     unassign_item,
     walk,
 )
-from llm import session as llm_session
 from sidebar import render_sidebar
 
 logger = logging.getLogger(__name__)
 
 VIEWS = ["Build", "Preview", "Download"]
+
+# The HTML preview scrolls inside this rather than sizing to its content: a report is as
+# long as it is, and letting the iframe grow to match would push the download buttons off
+# the top of the screen on anything past a couple of items.
+HTML_PREVIEW_HEIGHT = 700
 
 # Where pinned items come from. The two pages are one workflow, so an empty Dashboard
 # offers the way back rather than just saying there is nothing here.
@@ -255,7 +260,7 @@ def _render_pool(report: Report) -> None:
 # --------------------------------------------------------------------------------------
 
 
-def _render_tree(report: Report, active_llm: dict | None) -> None:
+def _render_tree(report: Report) -> None:
     with st.container(horizontal=True, vertical_alignment="center", key="db_tree_header"):
         st.markdown("##### Report structure")
         if st.button(
@@ -283,10 +288,10 @@ def _render_tree(report: Report, active_llm: dict | None) -> None:
             expanded=True,
             icon=":material/folder:",
         ):
-            _render_section_body(report, section, number, index, active_llm)
+            _render_section_body(report, section, number, index)
 
 
-def _render_section_body(report: Report, section, number: str, index: int, active_llm: dict | None) -> None:
+def _render_section_body(report: Report, section, number: str, index: int) -> None:
     with st.container(horizontal=True, vertical_alignment="bottom", key=f"db_section_bar_{section.node_id}"):
         section.name = st.text_input(
             "Section name",
@@ -319,12 +324,10 @@ def _render_section_body(report: Report, section, number: str, index: int, activ
 
     for sub_index, (sub_number, subsection) in enumerate(numbered_subsections(section, number)):
         with st.container(border=True, key=f"db_subsection_{subsection.node_id}"):
-            _render_subsection_body(report, section, subsection, sub_number, sub_index, active_llm)
+            _render_subsection_body(report, section, subsection, sub_number, sub_index)
 
 
-def _render_subsection_body(
-    report: Report, section, subsection, number: str, index: int, active_llm: dict | None
-) -> None:
+def _render_subsection_body(report: Report, section, subsection, number: str, index: int) -> None:
     with st.container(horizontal=True, vertical_alignment="bottom", key=f"db_sub_bar_{subsection.node_id}"):
         st.markdown(f"**{number}**")
         subsection.name = st.text_input(
@@ -353,10 +356,10 @@ def _render_subsection_body(
 
     for item_index, item in enumerate(subsection.items):
         with st.container(border=True, key=f"db_item_{item.item_id}"):
-            _render_item_body(report, subsection, item, item_index, active_llm)
+            _render_item_body(report, subsection, item, item_index)
 
 
-def _render_item_body(report: Report, subsection, item: PinnedItem, index: int, active_llm: dict | None) -> None:
+def _render_item_body(report: Report, subsection, item: PinnedItem, index: int) -> None:
     """One placed item: its heading, its comment, and where it goes next.
 
     The output itself is not drawn here — a tree of a dozen full-size Plotly charts is
@@ -380,26 +383,24 @@ def _render_item_body(report: Report, subsection, item: PinnedItem, index: int, 
     item.comment = st.text_area(
         "Comment",
         value=item.comment,
-        key=f"db_item_comment_{item.item_id}_{item.comment_revision}",
+        key=f"db_item_comment_{item.item_id}",
         height=90,
         label_visibility="collapsed",
-        placeholder="A note printed under this item. Write your own, or generate one.",
-        help="Printed under the chart and table in both exports. Edit it freely — generating replaces whatever is here.",
+        placeholder="A note printed under this item.",
+        help="Printed under the chart and table in both exports. It starts as the answer's own commentary from the chat — edit it freely.",
     )
 
     with st.container(horizontal=True, key=f"db_item_actions_{item.item_id}"):
-        _render_generate_comment(item, active_llm)
-
         choices = [pair for pair in subsection_choices(report) if pair[0] != subsection.node_id]
         if choices:
             labels = dict(choices)
             destination = st.selectbox(
-                "Move to",
+                "Move to Follwoing Subsection",
                 options=[node_id for node_id, _ in choices],
                 format_func=lambda node_id: labels[node_id],
                 key=f"db_item_move_target_{item.item_id}",
-                label_visibility="collapsed",
-                help="Send this item to a different subsection.",
+                label_visibility="visible",
+                help="Click on Move to send this item to the chosen subsection.",
             )
             if st.button(
                 "Move",
@@ -429,52 +430,6 @@ def _render_item_body(report: Report, subsection, item: PinnedItem, index: int, 
             st.rerun(scope="app")
 
 
-def _render_generate_comment(item: PinnedItem, active_llm: dict | None) -> None:
-    """The AI comment button (requirement 6.3).
-
-    On demand rather than at pin time: pinning is meant to be a single click that costs
-    nothing, and a model call behind every pin would make a burst of pinning slow and
-    expensive for comments the user may well rewrite anyway.
-    """
-    if not item.has_table():
-        st.button(
-            "Generate comment",
-            key=f"db_item_generate_{item.item_id}",
-            icon=":material/auto_awesome:",
-            disabled=True,
-            help="There are no rows behind this item to comment on — type your own note instead.",
-        )
-        return
-
-    if active_llm is None:
-        st.button(
-            "Generate comment",
-            key=f"db_item_generate_{item.item_id}",
-            icon=":material/auto_awesome:",
-            disabled=True,
-            help="Pick a session model in the sidebar first — that's the model that writes the comment.",
-        )
-        return
-
-    if st.button(
-        "Generate comment",
-        key=f"db_item_generate_{item.item_id}",
-        icon=":material/auto_awesome:",
-        help="Write a short comment on this item's rows. Replaces whatever is in the box.",
-    ):
-        with st.spinner("Writing a comment…"):
-            comment, warnings = write_commentary(active_llm, item.question, item.frame, item.sql)
-
-        if comment:
-            item.set_comment(comment)
-            st.rerun(scope="app")
-
-        # No rerun on failure: the warning has to survive to be read, and there is nothing
-        # new to paint anyway.
-        for warning in warnings:
-            st.warning(warning, icon=":material/error:")
-
-
 # --------------------------------------------------------------------------------------
 # Preview
 # --------------------------------------------------------------------------------------
@@ -496,8 +451,8 @@ def _render_preview(report: Report) -> None:
         return
 
     st.caption(
-        ":grey[Order, numbering and content are exactly what downloads. The chosen style "
-        "is applied to the file itself, not to this preview.]"
+        ":grey[Order, numbering and content are exactly what downloads, rendered in the "
+        "app's own theme. To see the chosen style, use the preview under **Download**.]"
     )
 
     for section in sections:
@@ -550,7 +505,9 @@ def _render_download(report: Report) -> None:
         )
         return
 
-    _render_download_buttons(report, css)
+    html, workbook = _build_exports(report, css)
+    _render_download_buttons(report, html, workbook)
+    _render_html_preview(html)
 
 
 def _render_css_editor(preset: str, css: str) -> None:
@@ -601,12 +558,17 @@ def _render_css_editor(preset: str, css: str) -> None:
             st.success(f"Applied — {rule_count(edited)} rule(s).", icon=":material/check_circle:")
 
 
-def _render_download_buttons(report: Report, css: str) -> None:
-    """Both exports, built before their buttons.
+def _build_exports(report: Report, css: str) -> tuple[str | None, bytes | None]:
+    """Both exports, built before anything that needs them.
 
-    `st.download_button` needs the bytes up front, so the work happens here rather than in
-    a callback — the same shape `data_cleaner.py` uses. Charts are rasterized once and
-    cached on the item, so the second format and every later rerun are cheap.
+    `st.download_button` needs its bytes up front, so the work happens here rather than in
+    a callback — the same shape `data_cleaner.py` uses — and the HTML string is handed back
+    so the preview below the buttons shows the very file that downloads rather than a
+    second rendering of it. Charts are rasterized once and cached on the item, so the
+    second format and every later rerun are cheap.
+
+    Either half can come back None. One export failing is not a reason to withhold the
+    other, so each is caught on its own and its button simply isn't drawn.
     """
     with st.spinner("Building your report…"):
         try:
@@ -623,6 +585,34 @@ def _render_download_buttons(report: Report, css: str) -> None:
             st.error(str(error), icon=":material/error:")
             workbook = None
 
+    return html, workbook
+
+
+def _render_html_preview(html: str | None) -> None:
+    """The finished HTML, shown as itself (requirement 6.4's presets are the point of it).
+
+    An iframe rather than `st.html`: the report carries a whole page's stylesheet — `body`,
+    `table`, `h1` — which injected into the app would restyle the app itself. An iframe
+    gives it its own document, which is exactly the context it was written for, so what is
+    shown here is the downloaded file rendering rather than an impression of it.
+
+    `st.iframe` warns against untrusted HTML, and this is not untrusted: every user string
+    in it is escaped by the template, and the one value that isn't — the stylesheet — is
+    the string `validate_css` exists to screen. Nothing else reaches the page unescaped.
+    """
+    if html is None:
+        return
+
+    with st.expander("Preview the HTML", icon=":material/preview:", expanded=True):
+        st.caption(
+            ":grey[This is the file itself, styling and all. Scroll it here, then press "
+            "Download HTML above to keep it.]"
+        )
+        st.iframe(html, height=HTML_PREVIEW_HEIGHT)
+
+
+def _render_download_buttons(report: Report, html: str | None, workbook: bytes | None) -> None:
+    """The two download buttons, named after the report."""
     file_stem = (report.title or "dashboard").strip() or "dashboard"
 
     with st.container(horizontal=True, key="db_download_buttons"):
@@ -657,7 +647,19 @@ def _render_download_buttons(report: Report, css: str) -> None:
 # --------------------------------------------------------------------------------------
 
 
-@st.dialog("Pinned item", width="large")
+def _dismiss_dialog() -> None:
+    """Clears the open-dialog flag when a dialog is closed without our Close button.
+
+    An `st.dialog` can be dismissed by clicking outside it, pressing its "X" or hitting
+    `ESC`, none of which run the Close button's code. Left unhandled, the flag stays set
+    and the *next* rerun for any reason — pressing Place, switching view, editing a
+    heading — reopens the same preview, because `on_dismiss` defaults to "ignore" and
+    never reruns at all. The chat page's `_dismiss_dialog` exists for the same reason.
+    """
+    dashboard_session.close_dialog()
+
+
+@st.dialog("Pinned item", width="large", on_dismiss=_dismiss_dialog)
 def _preview_item_dialog(payload: dict) -> None:
     item = find_item(dashboard_session.get_report(), payload.get("item_id", ""))
     if item is None:
@@ -720,12 +722,14 @@ if profile is not None:
         required=True,
         key=dashboard_session.DB_VIEW_KEY,
         label_visibility="collapsed",
+        # Widget values are dropped when the widget stops being rendered, which a trip to
+        # Chat with data does — so without this, coming back to check one more answer lands
+        # the user on Build again rather than where they left off.
+        persist_state="session",
         help="Build the structure, preview the finished report, then download it.",
     )
 
     _render_pending_dialog()
-
-    session_llm = llm_session.active_profile(st.session_state["user_id"])
 
     if view == "Preview":
         _render_preview(current_report)
@@ -736,4 +740,4 @@ if profile is not None:
         with pool_column:
             _render_pool(current_report)
         with tree_column:
-            _render_tree(current_report, session_llm)
+            _render_tree(current_report)

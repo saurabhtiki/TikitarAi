@@ -4,7 +4,7 @@ import pytest
 
 from cleaner.exceptions import InvalidStepError
 from cleaner.profiling import parse_numeric_series
-from cleaner.steps import DEFAULT_KEEP_PATTERN, STEP_REGISTRY, get_spec
+from cleaner.steps import DEFAULT_KEEP_PATTERN, MAX_PIVOT_COLUMNS, STEP_REGISTRY, get_spec
 
 
 def run(action: str, frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, list[str]]:
@@ -390,6 +390,245 @@ def test_duplicates_can_keep_the_last_occurrence():
 
 
 # --------------------------------------------------------------------------------------
+# group_summarise / pivot / unpivot
+# --------------------------------------------------------------------------------------
+
+
+def sales_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "region": ["N", "S", "N", "S", "N"],
+            "month": ["Jan", "Jan", "Feb", "Feb", "Jan"],
+            "amount": [10.0, 20.0, 30.0, 40.0, 5.0],
+            "order": ["a", "b", "c", "d", "a"],
+        }
+    )
+
+
+def test_summarise_groups_and_totals():
+    result, warnings_out = run(
+        "group_summarise",
+        sales_frame(),
+        {
+            "group_by": ["region"],
+            "aggregations": [
+                {"column": "amount", "function": "sum"},
+                {"column": "order", "function": "count_distinct"},
+            ],
+        },
+    )
+
+    assert list(result.columns) == ["region", "sum_of_amount", "count_distinct_of_order"]
+    assert list(result["sum_of_amount"]) == [45.0, 60.0]
+    assert list(result["count_distinct_of_order"]) == [2, 2]
+    assert warnings_out == []
+
+
+def test_summarise_without_group_columns_gives_one_totals_row():
+    result, _ = run(
+        "group_summarise",
+        sales_frame(),
+        {"group_by": [], "aggregations": [{"column": "amount", "function": "sum"}]},
+    )
+
+    assert len(result) == 1
+    assert result.loc[0, "sum_of_amount"] == 105.0
+
+
+def test_summarise_skips_a_numeric_only_function_on_text_and_warns():
+    """Never raises: one impossible aggregation must not cost the user the whole summary."""
+    result, warnings_out = run(
+        "group_summarise",
+        sales_frame(),
+        {
+            "group_by": ["region"],
+            "aggregations": [
+                {"column": "order", "function": "sum"},
+                {"column": "amount", "function": "mean"},
+            ],
+        },
+    )
+
+    assert list(result.columns) == ["region", "mean_of_amount"]
+    assert "isn't a numeric column" in warnings_out[0]
+
+
+def test_summarise_leaves_the_table_alone_when_nothing_can_be_applied():
+    frame = sales_frame()
+    result, warnings_out = run(
+        "group_summarise",
+        frame,
+        {"group_by": ["region"], "aggregations": [{"column": "order", "function": "sum"}]},
+    )
+
+    pd.testing.assert_frame_equal(result, frame)
+    assert "None of the chosen aggregations" in warnings_out[-1]
+
+
+def test_summarise_names_stay_unique_when_a_column_is_aggregated_twice():
+    result, _ = run(
+        "group_summarise",
+        sales_frame(),
+        {
+            "group_by": ["region"],
+            "aggregations": [
+                {"column": "amount", "function": "sum"},
+                {"column": "amount", "function": "sum"},
+            ],
+        },
+    )
+
+    assert list(result.columns) == ["region", "sum_of_amount", "sum_of_amount.1"]
+
+
+def test_summarise_rejects_aggregating_a_group_column():
+    with pytest.raises(InvalidStepError, match="group columns"):
+        get_spec("group_summarise").validate(
+            {"group_by": ["region"], "aggregations": [{"column": "region", "function": "count"}]},
+            ["region", "amount"],
+        )
+
+
+def test_summarise_rejects_an_unknown_function():
+    with pytest.raises(InvalidStepError, match="isn't a valid function"):
+        get_spec("group_summarise").validate(
+            {"group_by": [], "aggregations": [{"column": "amount", "function": "total"}]}, ["amount"]
+        )
+
+
+def test_summarise_needs_at_least_one_aggregation():
+    with pytest.raises(InvalidStepError, match="at least one column"):
+        get_spec("group_summarise").validate({"group_by": ["region"], "aggregations": []}, ["region"])
+
+
+def test_pivot_flattens_its_columns_to_plain_strings():
+    """DuckDB registration in the Chat with Data handoff rejects non-string column labels,
+    so a tuple label here would break the export rather than merely look untidy."""
+    result, _ = run(
+        "pivot",
+        sales_frame(),
+        {"index": ["region"], "columns": "month", "values": "amount", "function": "sum", "fill_value": None},
+    )
+
+    assert list(result.columns) == ["region", "Feb", "Jan"]
+    assert all(isinstance(column, str) for column in result.columns)
+    assert result.set_index("region").loc["N", "Jan"] == 15.0
+
+
+def test_pivot_fills_empty_cells_with_a_typed_in_number():
+    frame = pd.DataFrame({"region": ["N", "S"], "month": ["Jan", "Feb"], "amount": [10.0, 20.0]})
+    result, _ = run(
+        "pivot",
+        frame,
+        {"index": ["region"], "columns": "month", "values": "amount", "function": "sum", "fill_value": "0"},
+    )
+
+    assert result.set_index("region").loc["N", "Feb"] == 0.0
+
+
+def test_pivot_refuses_to_sum_a_text_column_and_leaves_the_table_alone():
+    frame = sales_frame()
+    result, warnings_out = run(
+        "pivot",
+        frame,
+        {"index": ["region"], "columns": "month", "values": "order", "function": "sum", "fill_value": None},
+    )
+
+    pd.testing.assert_frame_equal(result, frame)
+    assert "isn't a numeric column" in warnings_out[0]
+
+
+def test_pivot_warns_when_it_produces_too_many_columns():
+    frame = pd.DataFrame(
+        {
+            "region": ["N"] * (MAX_PIVOT_COLUMNS + 5),
+            "code": [f"c{index}" for index in range(MAX_PIVOT_COLUMNS + 5)],
+            "amount": [1.0] * (MAX_PIVOT_COLUMNS + 5),
+        }
+    )
+    _, warnings_out = run(
+        "pivot",
+        frame,
+        {"index": ["region"], "columns": "code", "values": "amount", "function": "sum", "fill_value": None},
+    )
+
+    assert any("columns" in warning for warning in warnings_out)
+
+
+def test_pivot_rejects_reusing_one_column_in_two_roles():
+    with pytest.raises(InvalidStepError, match="can't also be"):
+        get_spec("pivot").validate(
+            {"index": ["region"], "columns": "month", "values": "month", "function": "sum", "fill_value": None},
+            ["region", "month", "amount"],
+        )
+
+
+def test_unpivot_stacks_the_columns_it_is_given():
+    result, _ = run(
+        "unpivot",
+        sales_frame(),
+        {
+            "id_columns": ["region", "month"],
+            "value_columns": ["amount"],
+            "variable_name": "Attribute",
+            "value_name": "Value",
+        },
+    )
+
+    assert list(result.columns) == ["region", "month", "Attribute", "Value"]
+    assert set(result["Attribute"]) == {"amount"}
+    assert len(result) == 5
+
+
+def test_unpivot_with_no_value_columns_stacks_everything_else():
+    result, _ = run(
+        "unpivot",
+        sales_frame(),
+        {"id_columns": ["region"], "value_columns": [], "variable_name": "Attribute", "value_name": "Value"},
+    )
+
+    assert set(result["Attribute"]) == {"month", "amount", "order"}
+    # Stacking columns of different types has no honest type but text.
+    assert result["Value"].dtype == "string"
+
+
+def test_unpivot_rejects_a_name_that_collides_with_a_kept_column():
+    with pytest.raises(InvalidStepError, match="already a column"):
+        get_spec("unpivot").validate(
+            {
+                "id_columns": ["region"],
+                "value_columns": ["amount"],
+                "variable_name": "region",
+                "value_name": "Value",
+            },
+            ["region", "amount"],
+        )
+
+
+def test_unpivot_rejects_keeping_every_column():
+    with pytest.raises(InvalidStepError, match="nothing left to stack"):
+        get_spec("unpivot").validate(
+            {"id_columns": ["region", "amount"], "value_columns": [], "variable_name": "a", "value_name": "b"},
+            ["region", "amount"],
+        )
+
+
+def test_reshape_log_lines_read_as_sentences():
+    assert get_spec("group_summarise").describe(
+        {"group_by": ["region"], "aggregations": [{"column": "amount", "function": "sum"}]}
+    ) == "Summarised by region: sum of amount"
+    assert "across the whole table" in get_spec("group_summarise").describe(
+        {"group_by": [], "aggregations": [{"column": "amount", "function": "sum"}]}
+    )
+    assert get_spec("pivot").describe(
+        {"index": ["region"], "columns": "month", "values": "amount", "function": "sum", "fill_value": None}
+    ) == "Pivoted sum of amount with region down the side and month across the top"
+    assert "every other column" in get_spec("unpivot").describe(
+        {"id_columns": ["region"], "value_columns": [], "variable_name": "a", "value_name": "b"}
+    )
+
+
+# --------------------------------------------------------------------------------------
 # Cross-cutting guarantees
 # --------------------------------------------------------------------------------------
 
@@ -409,11 +648,25 @@ def test_every_registered_action_leaves_its_input_frame_untouched():
         "find_replace": {"columns": ["note"], "find": "a", "replace": "b", "regex": False, "case_sensitive": True},
         "fill_missing": {"by_column": {"note": {"strategy": "custom", "value": "Unknown"}}},
         "drop_duplicates": {"columns": None, "keep": "first"},
+        "group_summarise": {"group_by": ["region"], "aggregations": [{"column": "amount", "function": "count"}]},
+        "pivot": {
+            "index": ["region"],
+            "columns": "note",
+            "values": "amount",
+            "function": "count",
+            "fill_value": None,
+        },
+        "unpivot": {
+            "id_columns": ["region"],
+            "value_columns": ["amount"],
+            "variable_name": "Attribute",
+            "value_name": "Value",
+        },
     }
     assert set(samples) == set(STEP_REGISTRY), "every registered action needs a sample here"
 
     for action, params in samples.items():
-        frame = pd.DataFrame({"amount": ["1", "2", "3"], "note": ["a", "b", None]})
+        frame = pd.DataFrame({"amount": ["1", "2", "3"], "note": ["a", "b", None], "region": ["N", "S", "N"]})
         before = frame.copy()
         run(action, frame, params)
         pd.testing.assert_frame_equal(frame, before, obj=f"{action} mutated its input")

@@ -22,6 +22,9 @@ Plan → Test → Build, one phase at a time.
 Stage 7: Pin to Dashboard (6.1), the Dashboard page (6.3) and HTML + Excel export
 (6.4) — complete. Build-order item 6 is done; Chat with Data now runs end to end.
 
+Since then, out of band: the Data Cleaner gained Summarise / Pivot / Unpivot, which save a
+derived table rather than recording a step. See the addendum at the end of `docs/plan.md`.
+
 Next: Stage 8 — Task Builder (requirement 7), build-order item 7.
 
 # Library docs (Agno, Streamlit)

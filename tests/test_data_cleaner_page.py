@@ -644,3 +644,239 @@ def test_changing_a_column_type_shows_up_in_the_column_panel(tmp_path, monkeypat
 
     assert not app.exception
     assert panel_type("dept") == "categorical"
+
+
+# --------------------------------------------------------------------------------------
+# Summaries: group & total, pivot, unpivot
+# --------------------------------------------------------------------------------------
+
+SALES_CSV = (
+    b"region,month,amount,order_id\n"
+    b"North,Jan,10,a\nSouth,Jan,20,b\nNorth,Feb,30,c\nSouth,Feb,40,d\nNorth,Jan,5,a\n"
+)
+
+
+def _sources(app) -> list[session.TableState]:
+    return [table for table in _tables(app) if table.derived_from is None]
+
+
+def _summaries(app) -> list[session.TableState]:
+    return [table for table in _tables(app) if table.derived_from is not None]
+
+
+def _only_summary(app) -> session.TableState:
+    summaries = _summaries(app)
+    assert len(summaries) == 1
+    return summaries[0]
+
+
+def _effective(app, table: session.TableState) -> list[dict]:
+    """The recipe a table really runs, resolved the way `session.effective_steps` does.
+
+    Re-derived here rather than called, for the same reason as `_cleaned`: the real
+    function reads `st.session_state`, which only the app's own thread may touch.
+    """
+    if table.derived_from is None:
+        return table.steps
+    parent = app.session_state[session.DC_TABLES_KEY][table.derived_from]
+    return parent.steps + [table.reshape]
+
+
+def _select_tab(app, table: session.TableState):
+    """Marks a table's tab as the open one, for the next run only.
+
+    Only the open tab's fragment runs, so a summary's own widgets don't exist in the
+    element tree until its tab is selected. It has to be re-set before *every* run:
+    `st.tabs` is a block rather than a widget in AppTest's tree, so AppTest sends no
+    selection back and Streamlit falls to the first tab again on the following run.
+    """
+    tables = _tables(app)
+    app.session_state[session.DC_TABS_KEY] = session.tab_labels(tables)[
+        [each.table_id for each in tables].index(table.table_id)
+    ]
+    return app
+
+
+def _summary_frame(app, table: session.TableState, payload: bytes) -> pd.DataFrame:
+    raw = loaders.read_table(payload, table.file_name, table.sheet_name)
+    return pipeline.apply_steps(raw, _effective(app, table))
+
+
+def _save_group_summary(app, table_id: str, group_by: list[str], columns: list[str], functions: list[str]):
+    _open(app, table_id, "group_summarise")
+    app.multiselect(key=f"dc_summarise_groupby_{table_id}").set_value(group_by).run()
+    app.multiselect(key=f"dc_summarise_values_{table_id}").set_value(columns).run()
+    app.multiselect(key=f"dc_summarise_functions_{table_id}").set_value(functions).run()
+    return _click_and_settle(app, f"dc_save_summary_group_summarise_{table_id}")
+
+
+def test_saving_a_group_summary_adds_a_derived_table(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    table_id = _only_table(app).table_id
+
+    _save_group_summary(app, table_id, ["region"], ["amount"], ["sum"])
+
+    assert not app.exception
+    summary = _only_summary(app)
+    assert summary.derived_from == table_id
+    assert summary.reshape["action"] == "group_summarise"
+    assert summary.steps == [], "a summary recipe lives on its parent, not on itself"
+
+    frame = _summary_frame(app, summary, SALES_CSV)
+    assert list(frame.columns) == ["region", "sum_of_amount"]
+    assert sorted(frame["sum_of_amount"]) == [45.0, 60.0]
+
+
+def test_a_summary_gets_its_own_tab_and_worksheet(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    _save_group_summary(app, _only_table(app).table_id, ["region"], ["amount"], ["sum"])
+
+    tables = _tables(app)
+    assert len(tables) == 2
+    assert tables[1].derived_from is not None, "a summary sits straight after the table it came from"
+    assert len(set(session.tab_labels(tables))) == 2
+    assert len(session.export_sheet_names(tables)) == 2
+
+
+def test_a_summary_follows_its_source_when_that_is_cleaned_further(tmp_path, monkeypatch):
+    """The linkage invariant. A summary stores only its reshape, so cleaning the source
+    afterwards has to reach it — otherwise two tables that look related disagree."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    table_id = _only_table(app).table_id
+    _save_group_summary(app, table_id, ["region"], ["amount"], ["sum"])
+
+    before = _summary_frame(app, _only_summary(app), SALES_CSV)
+    assert sorted(before["sum_of_amount"]) == [45.0, 60.0]
+
+    _open(app, table_id, "drop_duplicates")
+    app.multiselect(key=f"dc_dupe_columns_{table_id}").set_value(["order_id"]).run()
+    _click_and_settle(app, f"dc_apply_drop_duplicates_{table_id}")
+
+    assert not app.exception
+    summary = _only_summary(app)
+    assert "drop_duplicates" in [step["action"] for step in _effective(app, summary)]
+    # The duplicate order_id row carried 5, so the North total has to drop with it.
+    assert sorted(_summary_frame(app, summary, SALES_CSV)["sum_of_amount"]) == [40.0, 60.0]
+
+
+def test_removing_the_source_file_removes_its_summaries(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV), ("other.csv", OTHER_CSV))
+    sales = next(table for table in _sources(app) if table.file_name == "sales.csv")
+    _save_group_summary(app, sales.table_id, ["region"], ["amount"], ["sum"])
+    assert len(_summaries(app)) == 1
+
+    _upload(app, ("other.csv", OTHER_CSV))
+
+    assert not app.exception
+    assert _summaries(app) == []
+    assert len(_sources(app)) == 1
+
+
+def test_a_summary_survives_reruns_of_the_uploader(tmp_path, monkeypatch):
+    """`sync_tables` rebuilds the working set from the uploader every rerun, so a summary
+    that is not carried over explicitly would vanish on the next interaction."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    _save_group_summary(app, _only_table(app).table_id, ["region"], ["amount"], ["sum"])
+
+    app.run()
+    app.run()
+
+    assert not app.exception
+    assert len(_summaries(app)) == 1
+
+
+def test_editing_a_summary_replaces_it_rather_than_adding_another(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    _save_group_summary(app, _only_table(app).table_id, ["region"], ["amount"], ["sum"])
+    summary = _only_summary(app)
+
+    _select_tab(app, summary).run()
+    app.button(key=f"dc_edit_summary_{summary.table_id}").click()
+    _select_tab(app, summary).run()
+    app.multiselect(key=f"dc_summarise_groupby_{summary.table_id}").set_value(["month"])
+    _select_tab(app, summary).run()
+    _select_tab(app, summary)
+    _click_and_settle(app, f"dc_save_summary_group_summarise_{summary.table_id}")
+
+    assert not app.exception
+    edited = _only_summary(app)
+    assert edited.table_id == summary.table_id
+    assert edited.reshape["params"]["group_by"] == ["month"]
+
+
+def test_deleting_a_summary_leaves_its_source_alone(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    table_id = _only_table(app).table_id
+    _save_group_summary(app, table_id, ["region"], ["amount"], ["sum"])
+    summary = _only_summary(app)
+
+    _select_tab(app, summary).run()
+    app.button(key=f"dc_delete_summary_{summary.table_id}").click()
+    _select_tab(app, summary).run()
+    _select_tab(app, summary)
+    _click_and_settle(app, f"dc_confirm_delete_summary_{summary.table_id}")
+
+    assert not app.exception
+    assert _summaries(app) == []
+    assert [table.table_id for table in _sources(app)] == [table_id]
+
+
+def test_saving_a_pivot_produces_a_column_per_distinct_value(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    table_id = _only_table(app).table_id
+
+    # `region` across the top rather than `month`: month names parse as dates, so upload
+    # type detection makes that column a date and its pivoted headings would be timestamps.
+    _open(app, table_id, "pivot")
+    app.multiselect(key=f"dc_pivot_index_{table_id}").set_value(["order_id"]).run()
+    app.selectbox(key=f"dc_pivot_columns_{table_id}").set_value("region").run()
+    app.selectbox(key=f"dc_pivot_values_{table_id}").set_value("amount").run()
+    app.selectbox(key=f"dc_pivot_function_{table_id}").set_value("sum").run()
+    _click_and_settle(app, f"dc_save_summary_pivot_{table_id}")
+
+    assert not app.exception
+    frame = _summary_frame(app, _only_summary(app), SALES_CSV)
+    assert list(frame.columns) == ["order_id", "North", "South"]
+    assert frame.set_index("order_id").loc["a", "North"] == 15.0
+
+
+def test_saving_an_unpivot_stacks_the_chosen_columns(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    table_id = _only_table(app).table_id
+
+    _open(app, table_id, "unpivot")
+    app.multiselect(key=f"dc_unpivot_ids_{table_id}").set_value(["region", "month"]).run()
+    app.multiselect(key=f"dc_unpivot_values_{table_id}").set_value(["amount"]).run()
+    _click_and_settle(app, f"dc_save_summary_unpivot_{table_id}")
+
+    assert not app.exception
+    frame = _summary_frame(app, _only_summary(app), SALES_CSV)
+    assert list(frame.columns) == ["region", "month", "Attribute", "Value"]
+    assert len(frame) == 5
+
+
+def test_a_reshape_is_never_recorded_as_a_cleaning_step(tmp_path, monkeypatch):
+    """A reshape changes the grain of the table, so recording it would silently replace
+    the table being cleaned. The command bar routes these to `_save_summary` only."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    table_id = _only_table(app).table_id
+    _save_group_summary(app, table_id, ["region"], ["amount"], ["sum"])
+
+    source = next(table for table in _sources(app) if table.table_id == table_id)
+    assert [step["action"] for step in source.steps] == ["set_column_types"]
+
+
+def test_the_download_carries_a_sheet_per_summary(tmp_path, monkeypatch):
+    """`build_download` runs on every rerun, so a summary it couldn't derive would surface
+    as an st.error here rather than as a bad file later."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    summary = _save_group_summary(app, _only_table(app).table_id, ["region"], ["amount"], ["sum"]) and _only_summary(
+        app
+    )
+
+    assert not app.exception
+    assert not app.error
+    assert app.download_button(key="dc_download_button")
+    caption = next(caption.value for caption in app.caption if "One workbook" in caption.value)
+    assert "2 sheet(s)" in caption
+    assert summary.output_sheet_name in caption

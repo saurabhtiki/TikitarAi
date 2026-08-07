@@ -69,11 +69,19 @@ all Streamlit state, one `exceptions.py`, everything else pure and unit-testable
 
 ## UI/UX
 
-### Pinning stays one click
+### Pinning stays one click — and only one
 
 No dialog, no prompt — §6.1 step 3 is explicit that the chat flow must not be interrupted.
 The heading defaults to the question, so a pinned tile is already labelled before the user
-opens the Dashboard. Feedback is a `st.toast` carrying the running pool count.
+opens the Dashboard.
+
+Once pressed, the button reads **Pinned to Dashboard** and is disabled, and `pin()` returns
+the existing item rather than making a second copy. A live button after a successful press
+reads as "press me again", and every extra press used to put another identical tile in the
+pool. The state is `ChatMessage.pinned_item_id` *plus* the item still being in the report,
+so discarding the copy on the Dashboard genuinely un-pins the answer. It is wired through
+`on_click` rather than the button's return value, so the label flips on the same rerun the
+click causes rather than on whatever the user presses next.
 
 ### `app_pages/dashboard.py`
 
@@ -100,29 +108,29 @@ interaction is learned once and works at all three levels §6.3 asks to be reord
 - **Delete**, which returns any items inside to the pool rather than destroying them, and
   says how many
 
-Per item: a heading box, a comment box, **Generate comment**, **Move to** a different
-subsection, **Look**, and **Unplace**. The outputs themselves are *not* drawn in the tree —
-a dozen full-size Plotly charts is unusable as a structure editor.
+Per item: a heading box, a comment box, **Move to** a different subsection, **Look**, and
+**Unplace**. The outputs themselves are *not* drawn in the tree — a dozen full-size Plotly
+charts is unusable as a structure editor.
 
 **② Preview** — the report top to bottom, walked through the same `model.walk(report)`
 both exporters use, so what is previewed cannot drift from what downloads.
 
 **③ Download** — the preset picker (**Clean** / **Corporate** / **Compact**), an optional
-hand-edit behind an expander, and the two buttons.
+hand-edit behind an expander, the two buttons, and the finished HTML in an iframe beneath
+them. The two previews answer different questions: ② says whether the *report* is right,
+③ says whether the *stylesheet* is, which is the only thing the presets are for. An iframe
+rather than `st.html` because the report carries a whole page's stylesheet — `body`,
+`table`, `h1` — which injected into the app would restyle the app itself.
 
-### The AI comment is on demand
+### The comment is the chat's own, and the user's to edit
 
-`analyst.commentary.write_commentary` was already written, already `knowledge_base`-aware
-and already never raises, so it is reused verbatim. Generating is a button rather than
-something that fires at pin time: pinning is meant to be a click that costs nothing, and a
-model call behind every pin would make a burst of pinning slow and expensive for comments
-the user may well rewrite. The button is disabled with the reason given when there is no
-session model or no rows to comment on — the same gate the chat input uses.
-
-A regenerated comment needs the text area to actually show it, which a widget keyed on the
-item alone would not: Streamlit widgets remember their own value rather than re-reading
-`value=`. Hence `PinnedItem.comment_revision`, bumped by `set_comment` and folded into the
-widget key.
+The comment box opens holding the written answer the chat already produced for that
+question, and nothing regenerates it. A **Generate comment** button was built and then
+removed: `analyst.commentary` had already written a comment for every answer by the time it
+was pinned, so the button offered a second model call to replace text the user had in front
+of them. **The Dashboard now makes no model calls at all** — it arranges what the chat
+produced — which is why the page has no LLM profile lookup and its tests need no model
+seam.
 
 ---
 
@@ -149,6 +157,16 @@ surface is a subprocess launching a headless browser, and the exception types ka
 raises are neither documented nor stable across versions, so narrowing would reintroduce
 exactly the failure this function exists to prevent. PNG bytes are cached on the item, so
 downloading both formats rasterizes each chart once.
+
+A chart is re-laid-out before it is rendered, on a copy so the one on screen is untouched.
+`analyst.charts` draws with `margin={"l": 10, "r": 10, "t": 55, "b": 10}`, which is right
+in a browser that grows those margins to fit whatever the axes need; kaleido renders once
+at a fixed size and gives the labels no such room, so an exported chart ran its y tick
+values off the left edge and printed the x axis title through the category names.
+`_prepared_for_export` sets floor margins, turns `automargin` on so long labels still push
+them out, and pins the background white with dark text — the export is a white page in
+both formats, and a chart drawn under a dark theme otherwise carried pale axis text onto
+it.
 
 ### Excel
 
@@ -183,28 +201,51 @@ force**, so a broken edit costs the change and never the download.
 |---|---|
 | `dashboard/` (new: 7 modules + template) | as tabled above |
 | `app_pages/dashboard.py` (new) | the page |
-| `app_pages/chat_with_data.py` | pin button enabled, gate widened, toast; Start over clears the report too |
+| `app_pages/chat_with_data.py` | pin button enabled, gate widened, pins once; per-table Remove; uploader detach; Start over clears the report too |
+| `analyst/session.py` | `ChatMessage.pinned_item_id`, an opaque string that stops a second pin |
+| `engine/session.py` | `EngineTable.uploader_managed`, `detach_uploader_tables`, `remove_table`, the dismissed-id set |
 | `streamlit_app.py` | page registered in the "Explore" group |
 | `cleaner/export.py` | `check_limits` / `column_width` / `write_sheet` made public for reuse |
 | `pyproject.toml` | `jinja2` declared directly, `kaleido` added |
 
-`analyst/session.py` was **not** changed: clearing the dashboard on Start over happens at
-the page, the same arrangement `chat_session.reset_chat()` already uses, so no package
-below the page layer needs to know `dashboard/` exists.
+`analyst/session.py` gained a field but no import: clearing the dashboard on Start over
+still happens at the page, the same arrangement `chat_session.reset_chat()` already uses,
+so no package below the page layer knows `dashboard/` exists.
+
+## Surviving a page switch
+
+Requirement 6.3 gives the Dashboard its own page, which makes leaving Chat with Data and
+coming back an ordinary thing to do — and it destroyed the session. Streamlit drops a keyed
+widget's value the moment that widget stops being rendered, and `st.file_uploader` is the
+one widget with no `persist_state` to opt out. So the uploader came back empty,
+`sync_tables` read that as "the user removed every file", and the tables, the links, the
+column descriptions and the whole transcript went with them.
+
+`detach_uploader_tables` runs before the widget is built and takes the loaded tables out of
+the uploader's reconciliation whenever the uploader's key is missing from session state —
+which is exactly the signal that its value was dropped, and on a genuinely new session is a
+no-op because nothing is loaded. Detached tables stay loaded and queryable; the uploader is
+purely additive from then on. Removing one is then the per-table **Remove** button, which
+also works for tables adopted from the Data Cleaner (they never had an uploader entry) and
+records the table_id so the still-populated widget cannot reconcile it straight back in.
+
+The two `st.segmented_control`s that pick a view — `de_view` and `db_view` — take
+`persist_state="session"` for the same underlying reason, so returning to a page lands
+where it was left rather than back at step one.
 
 ## Reused, not rebuilt
 
-`analyst.commentary.write_commentary` · `analyst.charts`' figures ·
-`cleaner.naming.sanitize_sheet_names` · `cleaner.export`'s limits and column widths ·
-`llm.session.active_profile` · the `open_dialog`/`close_dialog`/`pending_dialog` idiom from
-`engine/session.py` · the download-button shape from `data_cleaner.py` · `st.switch_page`
-for the cross-page jump.
+`analyst.charts`' figures · `cleaner.naming.sanitize_sheet_names` · `cleaner.export`'s
+limits and column widths · `engine.session._drop_removed` for the per-table Remove · the
+`open_dialog`/`close_dialog`/`pending_dialog` idiom and the `on_dismiss` handler from
+`engine/session.py` and `chat_with_data.py` · the download-button shape from
+`data_cleaner.py` · `st.switch_page` for the cross-page jump.
 
 ---
 
 ## Verification
 
-`uv run pytest` — **811 passed**, plus one pre-existing failure carried in from Stage 6
+`uv run pytest` — **825 passed**, plus one pre-existing failure carried in from Stage 6
 (`test_a_collapsed_step_does_not_run_its_body`), confirmed independent of this work by
 re-running it against the unmodified page.
 
@@ -221,18 +262,24 @@ re-running it against the unmodified page.
 - `test_dashboard_excel_export.py` (14) — one sheet per subsection plus Contents, names
   sanitized/truncated/de-duplicated, a subsection called "Contents" not displacing it,
   500 rows written, a picture embedded, a row-limit breach refused before writing.
-- `test_dashboard_page.py` (32) — every role reaches it; empty states; place, unplace,
-  discard; rename; delete returning items; reorder disabled at the ends; the position box
-  appearing only when it earns its space; Generate comment gated, working, and failing
-  safely; a plain rerun never calling the model; both downloads absent while empty.
+- `test_dashboard_page.py` — every role reaches it; empty states; place, unplace, discard;
+  rename; delete returning items; reorder disabled at the ends; the position box appearing
+  only when it earns its space; the comment box arriving with the chat's own answer and no
+  Generate button anywhere; the Look dialog opening, closing, and not rearming itself;
+  both downloads and the HTML preview absent while empty, present once placed.
 - `test_chat_with_data_page.py` (extended) — the pin button live, present on a
   commentary-only answer, absent on an error and on the user's own message; one click
-  adding exactly one pool entry; the pinned frame surviving `release_payload`; pinning not
-  re-answering; Start over clearing the report.
+  adding exactly one pool entry; two clicks still adding one; the button reading "Pinned"
+  and going disabled; discarding the copy offering it again; the pinned frame surviving
+  `release_payload`; pinning not re-answering; Start over clearing the report. Plus
+  `TestSurvivingNavigation` and `TestRemoveTable` for the page-switch fix — a page switch
+  simulated by deleting the uploader's session-state key, which is precisely what Streamlit
+  does.
 
 Rasterization is stubbed in every test — it launches a headless browser — and was
-exercised by hand instead: a real Plotly figure produced a 78 KB PNG, a 107 KB
-self-contained HTML with no network references, and a 56 KB workbook.
+exercised by hand instead: a real Plotly figure produced an 80 KB PNG, a 109 KB
+self-contained HTML with **no** `http` substring anywhere in it, and a 57 KB workbook. The
+before/after of the margin fix was checked by looking at both renders.
 
 ### Known gaps
 
@@ -241,4 +288,70 @@ self-contained HTML with no network references, and a 56 KB workbook.
   body. A performance question, not a correctness one, and untouched by this phase.
 - `AppTest` can't read the bytes behind a download button (recorded in
   `test_data_cleaner_page.py`), so what the exports *contain* is asserted against the pure
-  builders and the page tests only check the buttons appear.
+  builders and the page tests only check the buttons appear. `st.iframe` likewise has no
+  typed `AppTest` element, so the HTML preview is asserted through its caption.
+- `AppTest` has no way to dismiss an `st.dialog` natively (clicking outside it, its X,
+  `ESC`), so the `on_dismiss` handler that clears the flag on those paths is not directly
+  covered — only the Close button path is.
+
+---
+
+# Addendum — Summarise, Pivot and Unpivot in the Data Cleaner
+
+Added after Stage 7 at the user's request, ahead of Stage 8. Not a phase of its own: it
+extends an existing page rather than opening a requirement.
+
+Every cleaning action so far rewrote a table in place and kept its grain. These three
+change the grain, so they **save a new table** instead of recording a step. The saved
+summary becomes its own tab, its own worksheet in the download, and its own queryable
+table in Chat with Data.
+
+## The one decision everything follows from
+
+A summary is a plain `TableState` with `derived_from` set, not a type of its own. That is
+what lets `build_download`, `naming.sanitize_sheet_names`, `tab_labels` and — the big one —
+`engine.session.adopt_cleaner_tables` carry it with essentially no code of their own. The
+whole engine-side cost was one line: adoption resolves declared types through
+`cleaner_session.effective_steps` rather than `.steps`.
+
+`effective_steps(table)` is where the linkage lives: a summary's recipe is its **parent's
+current steps** plus its one reshape, resolved on every call rather than frozen at save
+time. Because `_cached_cleaned_table` is keyed on that resolved list, cleaning the parent
+invalidates the summary's cache entry for free — there is no invalidation code.
+
+`sync_tables` rebuilds the working set from the uploader each rerun, so summaries are
+carried over explicitly, each placed straight after its parent. A summary whose parent is
+gone is simply not carried over, which is the cascade delete the page relies on.
+
+## Shape of the three actions
+
+- `group_summarise` — group keys plus (columns × functions). No group keys is legal and
+  gives one totals row; it runs through the same `groupby` on a constant so the two paths
+  can't diverge. `sum`/`mean`/`median` on a text column warns and skips that one
+  aggregation rather than costing the user the whole summary.
+- `pivot` — column labels are flattened to unique strings, which is load-bearing rather
+  than cosmetic: `duckdb_session.register_table` rejects a frame with non-unique labels, so
+  a tuple label would break the Chat with Data handoff. Width is capped in the dialog, not
+  in `validate`, because `validate` has no frame and so can't know the cardinality.
+- `unpivot` — `melt`, with a mixed-type value column cast to text, for the same DuckDB
+  reason.
+
+## Notes and known gaps
+
+- A summary tab is preview-only: metrics, preview, column details, sheet name, Edit and
+  Delete. Giving it a cleaning bar of its own would make "reset this table" and the
+  per-step undo ambiguous about which half of the recipe they act on.
+- Renaming a summary happens only in the "Output sheet name" box on its tab. The edit
+  dialog deliberately has no name field: that box holds the pre-edit text in its own
+  widget state and would write it straight back over anything typed in the dialog.
+- `st.selectbox` hands back a stored value its options no longer contain, unlike
+  `st.multiselect` which filters stale selections itself. The pivot dialog's pickers narrow
+  each other, so its two selectboxes are re-checked against their own options.
+- Upload type detection reads a month-name column (`Jan`, `Feb`) as a **date**, so pivoting
+  across it produces timestamp headings. Pre-existing detection behaviour, not introduced
+  here, but it is the first place a user is likely to meet it — set the column back to text
+  first. `test_saving_a_pivot_produces_a_column_per_distinct_value` pivots across `region`
+  for exactly this reason.
+- In `AppTest`, `st.tabs` is a block rather than a widget, so no tab selection is sent back
+  and the open tab has to be re-set in session state before *every* run. `_select_tab` in
+  `test_data_cleaner_page.py` does that; without it a summary's own widgets never render.

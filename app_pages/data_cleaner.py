@@ -25,10 +25,15 @@ from auth.exceptions import AuthDatabaseError
 from cleaner import loaders, naming, pipeline, profiling, session
 from cleaner.exceptions import DataCleanerError, InvalidStepError
 from cleaner.steps import (
+    AGGREGATION_FUNCTIONS,
     CASE_CHOICES,
     DEFAULT_KEEP_PATTERN,
+    DEFAULT_VALUE_NAME,
+    DEFAULT_VARIABLE_NAME,
     DUPLICATE_KEEP_CHOICES,
     FILL_STRATEGIES,
+    MAX_PIVOT_COLUMNS,
+    RESHAPE_ACTIONS,
     get_spec,
 )
 from engine import session as engine_session
@@ -37,6 +42,16 @@ from sidebar import render_sidebar
 logger = logging.getLogger(__name__)
 
 RESET_ACTION = "reset"
+DELETE_SUMMARY_ACTION = "delete_summary"
+
+# The reshape actions, which save a *new* table instead of recording a step on this one.
+# Kept as a page-level constant rather than read off `steps.RESHAPE_ACTIONS` at each use,
+# so the dialog wiring below reads in one place.
+SUMMARY_ACTIONS = RESHAPE_ACTIONS
+
+# A reshape's preview grid is a sanity check, not the deliverable — the saved summary's
+# own tab shows every row.
+PREVIEW_ROWS_IN_DIALOG = 50
 
 # Which pages can receive the cleaned tables, and where each one lives. Chat with Data
 # is the only consumer so far (it's the only page with an adoption path into the Data
@@ -95,6 +110,15 @@ COMMAND_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
             (RESET_ACTION, "Reset to raw", ":material/restart_alt:"),
         ],
     ),
+    (
+        "summarise",
+        "Summarise",
+        [
+            ("group_summarise", "Group & total", ":material/functions:"),
+            ("pivot", "Pivot", ":material/pivot_table_chart:"),
+            ("unpivot", "Unpivot", ":material/table_rows:"),
+        ],
+    ),
 ]
 
 # Segmented-control option faces, flattened once so `format_func` is a plain lookup.
@@ -109,6 +133,7 @@ COMMAND_GROUP_HELP = {
     "values": "Decide how values are read, and what to do about blanks.",
     "text": "Tidy the contents of text columns.",
     "rows": "Work on whole rows, or start this table again.",
+    "summarise": "Reshape this table into a new one — totals, a pivot, or long form.",
 }
 
 DIALOG_TITLES = {
@@ -124,7 +149,11 @@ DIALOG_TITLES = {
     "change_case": "Change letter case",
     "find_replace": "Find & replace",
     "drop_duplicates": "Remove duplicate rows",
+    "group_summarise": "Group & total",
+    "pivot": "Pivot",
+    "unpivot": "Unpivot",
     RESET_ACTION: "Reset this table?",
+    DELETE_SUMMARY_ACTION: "Delete this summary?",
 }
 
 try:
@@ -165,6 +194,13 @@ def _apply_step(table_id: str, action: str, params: dict, *, to_all_tables: bool
     rejected before it can enter the recipe — that is what keeps a stored recipe
     well-formed for Stage 7 to serialize later.
     """
+    if action in SUMMARY_ACTIONS:
+        # A reshape changes the table's grain, so recording it here would silently replace
+        # the table someone is cleaning. `_save_summary` is the only route for these.
+        logger.error("Refused to record the reshape '%s' as a cleaning step on table %s.", action, table_id)
+        st.error("That action creates a new table rather than changing this one.")
+        return
+
     targets = list(session.get_tables().values()) if to_all_tables else [session.get_table(table_id)]
     applied = 0
 
@@ -199,6 +235,14 @@ def _apply_step(table_id: str, action: str, params: dict, *, to_all_tables: bool
 
 
 def _remove_step(table_id: str, index: int) -> None:
+    """Drops one step and replays the rest.
+
+    Called from the fragment body on the button's return value, not as an `on_click`
+    callback. `st.rerun` is a no-op inside a callback, and inside a *fragment's* callback
+    Streamlit reports that by writing a warning element, which then lands at the top of
+    the app instead of in this tab. Reading the button's return value keeps the rerun in
+    the body, where app scope actually works.
+    """
     table = session.get_table(table_id)
     if table is None:
         return
@@ -600,6 +644,311 @@ def _dialog_reset(table, frame) -> None:
             st.rerun(scope="app")
 
 
+# --------------------------------------------------------------------------------------
+# Summary dialogs — the three that save a new table instead of recording a step
+# --------------------------------------------------------------------------------------
+
+
+def _saved_params(table: session.TableState, action: str) -> dict:
+    """The reshape's stored parameters, when this dialog was opened to edit one."""
+    if table.reshape is None or table.reshape.get("action") != action:
+        return {}
+    return table.reshape.get("params", {})
+
+
+def _keep_options(saved: list, options: list[str]) -> list:
+    """Filters a saved multiselect value down to what still exists.
+
+    A saved column may have been renamed or deleted by later cleaning; handing Streamlit a
+    default that isn't in `options` raises rather than degrading.
+    """
+    return [value for value in saved if value in options]
+
+
+def _option_index(saved, options: list, fallback: int = 0) -> int:
+    return options.index(saved) if saved in options else fallback
+
+
+def _still_an_option(value, options: list):
+    """Corrects a selectbox value that its own options no longer contain.
+
+    `st.multiselect` filters stale selections out itself when its options change, but
+    `st.selectbox` hands back the stored value verbatim. These pickers narrow each other —
+    choosing a column for the rows removes it from the columns picker — so without this a
+    stale pick would flow into the params and be rejected by the validator instead of just
+    moving on.
+    """
+    if value in options:
+        return value
+    return options[0] if options else None
+
+
+def _render_reshape_preview(table: session.TableState, action: str, frame, params: dict):
+    """Runs the reshape and shows the result, returning it so the footer can gate on it.
+
+    A live grid rather than the `_impact_caption` sentence the cleaning dialogs use: "this
+    removes 40 rows" says nothing useful about a pivot, whereas seeing the shape is the
+    whole decision.
+    """
+    try:
+        spec = get_spec(action)
+        spec.validate(params, list(frame.columns))
+        result, warnings_out = spec.apply(frame, params)
+    except InvalidStepError as error:
+        st.info(str(error), icon=":material/info:")
+        return None
+    except (ValueError, TypeError, KeyError) as error:
+        logger.exception("Could not preview the '%s' reshape.", action)
+        st.error(f"This couldn't be worked out from the current data: {error}")
+        return None
+
+    for warning in warnings_out:
+        st.warning(warning, icon=":material/error:")
+
+    st.caption(f"Preview — {len(result):,} row(s) × {len(result.columns):,} column(s).")
+    st.dataframe(
+        result.head(PREVIEW_ROWS_IN_DIALOG),
+        key=f"dc_reshape_preview_{action}_{table.table_id}",
+        width="stretch",
+        hide_index=True,
+    )
+    return result
+
+
+def _save_summary(table: session.TableState, action: str, params: dict, result) -> None:
+    """The Save/Cancel footer for a reshape, and the save itself.
+
+    Editing writes the reshape back onto the summary rather than creating a second table,
+    so a summary keeps its identity — and with it its worksheet name and its place in the
+    tab strip — across edits.
+    """
+    editing = table.derived_from is not None
+    too_wide = result is not None and len(result.columns) > MAX_PIVOT_COLUMNS
+    if too_wide:
+        st.error(
+            f"This produces {len(result.columns):,} columns, past the {MAX_PIVOT_COLUMNS:,} limit. "
+            f"Choose a column with fewer distinct values."
+        )
+
+    # Only when creating. An existing summary is renamed through the "Output sheet name"
+    # box on its own tab, and offering a second field here would let the two disagree —
+    # that box holds the pre-edit text in its own widget state and would write it straight
+    # back over anything typed in the dialog.
+    name = table.output_sheet_name
+    if not editing:
+        name = st.text_input(
+            "Save as",
+            value=f"{table.output_sheet_name} summary",
+            key=f"dc_summary_name_{action}_{table.table_id}",
+            help="Names the new tab, the worksheet in the download, and the table in Chat with Data.",
+        ).strip()
+
+    save_column, cancel_column = st.columns(2)
+    with save_column:
+        if st.button(
+            "Save summary",
+            key=f"dc_save_summary_{action}_{table.table_id}",
+            icon=":material/save:",
+            type="primary",
+            help="Add this as a new table alongside the cleaned ones.",
+            disabled=result is None or too_wide or not name,
+            width="stretch",
+        ):
+            step = pipeline.make_step(action, params)
+            if editing:
+                session.set_reshape(table.table_id, step)
+                session.set_output_sheet_name(table.table_id, name)
+            elif session.add_summary_table(table.table_id, step, name) is None:
+                st.error("That table is no longer loaded, so the summary couldn't be saved.")
+                return
+            session.close_dialog()
+            st.rerun(scope="app")
+    with cancel_column:
+        if st.button(
+            "Cancel",
+            key=f"dc_cancel_summary_{action}_{table.table_id}",
+            help="Close without saving anything.",
+            width="stretch",
+        ):
+            session.close_dialog()
+            st.rerun(scope="app")
+
+
+def _dialog_group_summarise(table, frame) -> None:
+    saved = _saved_params(table, "group_summarise")
+    all_columns = list(frame.columns)
+
+    group_by = st.multiselect(
+        "Group by",
+        options=all_columns,
+        default=_keep_options(saved.get("group_by") or [], all_columns),
+        key=f"dc_summarise_groupby_{table.table_id}",
+        help="One row comes back per combination of these. Leave empty for a single totals row.",
+    )
+    value_options = [column for column in all_columns if column not in group_by]
+    numeric = set(profiling.numeric_columns(frame))
+    saved_values = [aggregation.get("column") for aggregation in saved.get("aggregations") or []]
+
+    columns = st.multiselect(
+        "Total up",
+        options=value_options,
+        default=_keep_options(list(dict.fromkeys(saved_values)), value_options),
+        format_func=lambda column: column if column in numeric else f"{column} (text)",
+        key=f"dc_summarise_values_{table.table_id}",
+        help="Sum, average and median need a numeric column — the others work on text too.",
+    )
+    functions = st.multiselect(
+        "Using",
+        options=AGGREGATION_FUNCTIONS,
+        default=list(dict.fromkeys(aggregation.get("function") for aggregation in saved.get("aggregations") or []))
+        or ["sum"],
+        key=f"dc_summarise_functions_{table.table_id}",
+        help="Pick more than one to get a column per function, such as both a sum and a count.",
+    )
+
+    params = {
+        "group_by": group_by,
+        "aggregations": [{"column": column, "function": function} for column in columns for function in functions],
+    }
+    result = _render_reshape_preview(table, "group_summarise", frame, params) if columns and functions else None
+    _save_summary(table, "group_summarise", params, result)
+
+
+def _dialog_pivot(table, frame) -> None:
+    saved = _saved_params(table, "pivot")
+    all_columns = list(frame.columns)
+
+    index = st.multiselect(
+        "Rows (down the side)",
+        options=all_columns,
+        default=_keep_options(saved.get("index") or [], all_columns),
+        key=f"dc_pivot_index_{table.table_id}",
+        help="The columns that stay as rows, one row per combination.",
+    )
+    across_options = [column for column in all_columns if column not in index]
+    across = _still_an_option(
+        st.selectbox(
+            "Columns (across the top)",
+            options=across_options,
+            index=_option_index(saved.get("columns"), across_options) if across_options else None,
+            key=f"dc_pivot_columns_{table.table_id}",
+            help="Each distinct value here becomes its own column. Best on something with few values.",
+        ),
+        across_options,
+    )
+    value_options = [column for column in across_options if column != across]
+    values = _still_an_option(
+        st.selectbox(
+            "Values",
+            options=value_options,
+            index=_option_index(saved.get("values"), value_options) if value_options else None,
+            key=f"dc_pivot_values_{table.table_id}",
+            help="The column filling the grid.",
+        ),
+        value_options,
+    )
+    function_column, fill_column = st.columns(2)
+    with function_column:
+        function = st.selectbox(
+            "Using",
+            options=AGGREGATION_FUNCTIONS,
+            index=_option_index(saved.get("function"), AGGREGATION_FUNCTIONS),
+            key=f"dc_pivot_function_{table.table_id}",
+            help="How to combine rows that land in the same cell.",
+        )
+    with fill_column:
+        fill_value = st.text_input(
+            "Fill empty cells with",
+            value=str(saved.get("fill_value") or ""),
+            key=f"dc_pivot_fill_{table.table_id}",
+            help="Leave blank to leave empty cells empty. Type 0 to show gaps as zeroes.",
+        ).strip()
+
+    params = {
+        "index": index,
+        "columns": across,
+        "values": values,
+        "function": function,
+        "fill_value": fill_value or None,
+    }
+    result = _render_reshape_preview(table, "pivot", frame, params) if index and across and values else None
+    _save_summary(table, "pivot", params, result)
+
+
+def _dialog_unpivot(table, frame) -> None:
+    saved = _saved_params(table, "unpivot")
+    all_columns = list(frame.columns)
+
+    id_columns = st.multiselect(
+        "Keep these columns as-is",
+        options=all_columns,
+        default=_keep_options(saved.get("id_columns") or [], all_columns),
+        key=f"dc_unpivot_ids_{table.table_id}",
+        help="The columns that identify each row, such as a region or a date.",
+    )
+    stack_options = [column for column in all_columns if column not in id_columns]
+    value_columns = st.multiselect(
+        "Stack these columns into rows",
+        options=stack_options,
+        default=_keep_options(saved.get("value_columns") or [], stack_options),
+        key=f"dc_unpivot_values_{table.table_id}",
+        help="Leave empty to stack every column you aren't keeping.",
+    )
+    variable_column, value_column = st.columns(2)
+    with variable_column:
+        variable_name = st.text_input(
+            "Name the column of headings",
+            value=saved.get("variable_name") or DEFAULT_VARIABLE_NAME,
+            key=f"dc_unpivot_varname_{table.table_id}",
+            help="Holds the old column headings, one per row.",
+        ).strip()
+    with value_column:
+        value_name = st.text_input(
+            "Name the column of values",
+            value=saved.get("value_name") or DEFAULT_VALUE_NAME,
+            key=f"dc_unpivot_valuename_{table.table_id}",
+            help="Holds what was in each of those columns.",
+        ).strip()
+
+    params = {
+        "id_columns": id_columns,
+        "value_columns": value_columns,
+        "variable_name": variable_name or DEFAULT_VARIABLE_NAME,
+        "value_name": value_name or DEFAULT_VALUE_NAME,
+    }
+    result = _render_reshape_preview(table, "unpivot", frame, params) if id_columns else None
+    _save_summary(table, "unpivot", params, result)
+
+
+def _dialog_delete_summary(table, frame) -> None:
+    st.warning(
+        f"Delete the summary '{table.source_label}'? This cannot be undone, though you can build it again.",
+        icon=":material/warning:",
+    )
+    confirm_column, cancel_column = st.columns(2)
+    with confirm_column:
+        if st.button(
+            "Delete summary",
+            key=f"dc_confirm_delete_summary_{table.table_id}",
+            icon=":material/delete:",
+            type="primary",
+            help="Remove this summary from the tabs, the download and the export.",
+            width="stretch",
+        ):
+            session.remove_table(table.table_id)
+            session.close_dialog()
+            st.rerun(scope="app")
+    with cancel_column:
+        if st.button(
+            "Cancel",
+            key=f"dc_cancel_delete_summary_{table.table_id}",
+            help="Keep this summary.",
+            width="stretch",
+        ):
+            session.close_dialog()
+            st.rerun(scope="app")
+
+
 DIALOG_BODIES = {
     "skip_rows": _dialog_skip_rows,
     "remove_empty_rows": _dialog_remove_empty_rows,
@@ -613,7 +962,11 @@ DIALOG_BODIES = {
     "change_case": _dialog_change_case,
     "find_replace": _dialog_find_replace,
     "drop_duplicates": _dialog_drop_duplicates,
+    "group_summarise": _dialog_group_summarise,
+    "pivot": _dialog_pivot,
+    "unpivot": _dialog_unpivot,
     RESET_ACTION: _dialog_reset,
+    DELETE_SUMMARY_ACTION: _dialog_delete_summary,
 }
 
 
@@ -787,14 +1140,13 @@ def _render_log(table: session.TableState, report) -> None:
         text_col.markdown(f"{index + 1}. {prefix}{line}{prefix}")
         if outcome is not None and outcome.message:
             text_col.caption(outcome.message)
-        remove_col.button(
+        if remove_col.button(
             "",
             key=f"dc_remove_step_{table.table_id}_{index}",
             icon=":material/close:",
             help="Remove just this step and replay the rest.",
-            on_click=_remove_step,
-            args=(table.table_id, index),
-        )
+        ):
+            _remove_step(table.table_id, index)
 
 
 def _export_name(table: session.TableState) -> str:
@@ -859,6 +1211,58 @@ def _render_preview(table: session.TableState, cleaned) -> None:
     final_name = _export_name(table)
     if final_name != sheet_name:
         st.caption(f"Saved as worksheet '{final_name}'.")
+
+
+@st.fragment
+def _render_summary_tab(table: session.TableState, file_bytes: bytes) -> None:
+    """A saved summary's tab: what it is, what it produced, and how to change it.
+
+    Deliberately without the cleaning command bar. A summary's recipe is its parent's
+    steps plus one reshape, resolved live by `session.effective_steps`; letting it carry
+    steps of its own would make "reset this table" and the per-step undo ambiguous about
+    which half they act on. Clean the source instead and the summary follows.
+    """
+    parent = session.get_table(table.derived_from) if table.derived_from else None
+    if parent is None or table.reshape is None:
+        st.error("The table this summary came from is no longer loaded.")
+        return
+
+    try:
+        parent_frame, _ = session.cleaned_table(parent, file_bytes)
+        summary_frame, _ = session.cleaned_table(table, file_bytes)
+    except DataCleanerError as error:
+        logger.exception("Could not prepare summary %s for display.", table.table_id)
+        st.error(str(error))
+        return
+
+    st.caption(f"From **{parent.source_label}** — {pipeline.describe_step(table.reshape)}.")
+    _render_metrics(parent_frame, summary_frame)
+
+    edit_column, delete_column, _ = st.columns([1, 1, 3])
+    with edit_column:
+        st.button(
+            "Edit summary",
+            key=f"dc_edit_summary_{table.table_id}",
+            icon=":material/edit:",
+            help="Change the columns or the function, keeping this tab and its name.",
+            on_click=session.open_dialog,
+            args=(table.table_id, table.reshape["action"]),
+            width="stretch",
+        )
+    with delete_column:
+        st.button(
+            "Delete summary",
+            key=f"dc_delete_summary_{table.table_id}",
+            icon=":material/delete:",
+            help="Remove this summary. The table it came from is untouched.",
+            on_click=session.open_dialog,
+            args=(table.table_id, DELETE_SUMMARY_ACTION),
+            width="stretch",
+        )
+
+    # Options come from the parent's frame, since that is what the reshape runs against.
+    _render_pending_dialog(table, parent_frame)
+    _render_preview(table, summary_frame)
 
 
 @st.fragment
@@ -998,6 +1402,9 @@ if profile is not None:
                 if file_bytes is None:
                     st.error("This file is no longer available. Please upload it again.")
                     continue
-                _render_table_tab(loaded_table, file_bytes)
+                if loaded_table.derived_from is not None:
+                    _render_summary_tab(loaded_table, file_bytes)
+                else:
+                    _render_table_tab(loaded_table, file_bytes)
 
         _render_download(loaded_tables)

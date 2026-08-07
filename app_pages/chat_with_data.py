@@ -8,6 +8,8 @@ Every answer carries a "Pin to Dashboard" button (requirement 6.1 step 3). It co
 answer into `dashboard.session`'s pool and returns immediately — no dialog, no question
 about where it should go — because pinning happens mid-conversation and anything that
 interrupts the chat to ask defeats the point. Arranging happens on the Dashboard page.
+The button then shows as done and stops accepting presses, so an answer can only reach the
+report once however many times it is clicked.
 
 Open to every logged-in role (requirement 2.2 grants Chat with Data to all three), so
 this page follows `settings.py` and carries no `require_role` guard.
@@ -26,10 +28,18 @@ Step 1 is the one exception to the toggle hiding a step outright — its
 `st.file_uploader` must be instantiated on *every* rerun regardless of which view is
 selected, to keep reporting its files; the moment a run skips creating it (which
 switching views would do, same as a collapsed expander skipping it would), it comes back
-empty on the next run and silently drops every loaded table. Once files are loaded it
-auto-collapses to one summary line, so in practice it costs a single line under the
-toggle rather than a panel. Steps 2 and 3 don't have that problem — their state lives in
-plain `session_state` dicts, not a raw widget — so they can be hidden outright.
+empty on the next run. Once files are loaded it auto-collapses to one summary line, so in
+practice it costs a single line under the toggle rather than a panel. Steps 2 and 3 don't
+have that problem — their state lives in plain `session_state` dicts, not a raw widget —
+so they can be hidden outright.
+
+Rendering it every run is not enough on its own, because leaving the page entirely still
+drops the widget's value and `st.file_uploader` is the one widget with no `persist_state`
+to prevent that. So `session.detach_uploader_tables` runs first and takes the loaded
+tables out of the uploader's reconciliation the moment its state is gone: after a trip to
+the Dashboard the box looks empty, and the tables, links, descriptions and transcript are
+all still there. Removing one of those tables is then the per-table **Remove** button
+rather than the uploader's own "x".
 """
 
 import logging
@@ -120,6 +130,12 @@ def _render_upload() -> list[session.EngineTable]:
     # session_state key to be written once that widget has been created this run.
     session.consume_start_over()
 
+    # Also before the uploader exists, and for a related reason: this reads whether the
+    # widget's value survived the last run, which stops being answerable the moment the
+    # widget is rebuilt. See `session.detach_uploader_tables` — it is what keeps a visit to
+    # the Dashboard from wiping every loaded table on the way back.
+    detached = session.detach_uploader_tables()
+
     _render_cleaner_handoff()
 
     uploads = st.file_uploader(
@@ -130,6 +146,15 @@ def _render_upload() -> list[session.EngineTable]:
         max_upload_size=session.MAX_UPLOAD_SIZE_MB,
         help="Every cell is read as text first, so leading zeros in IDs and account numbers survive.",
     )
+
+    if detached:
+        # Said once, on the run that detaches, rather than standing permanently: the box
+        # above being empty while tables are listed below is confusing exactly once.
+        st.caption(
+            f":grey[The box above forgets its files when you leave this page, so it looks empty — "
+            f"your {detached} loaded table(s) are still here and still queryable. Use **Remove** "
+            "beside a table to drop it.]"
+        )
 
     sheet_selection: dict[str, list[str]] = {}
     for upload in uploads or []:
@@ -169,6 +194,8 @@ def _render_loaded_tables(tables: list[session.EngineTable]) -> None:
     st.dataframe(summary, key="de_tables_summary", width="stretch", hide_index=True)
     st.caption("The names under **Table** are what you'll refer to when you ask questions.")
 
+    _render_remove_buttons(tables)
+
     for table in tables:
         with st.expander(f"Preview {table.table_name}", icon=":material/table:"):
             try:
@@ -180,6 +207,31 @@ def _render_loaded_tables(tables: list[session.EngineTable]) -> None:
                 )
             except DataEngineError as error:
                 st.error(str(error))
+
+
+def _render_remove_buttons(tables: list[session.EngineTable]) -> None:
+    """One Remove per loaded table, under the summary that names them.
+
+    The uploader's own "x" can only take back a file it still holds, which is nothing at
+    all for a table adopted from the Data Cleaner or detached after a trip to another page
+    (see `session.detach_uploader_tables`). Without these, dropping one of those meant
+    Start over — discarding every other table, every link and the whole chat to get rid of
+    one file.
+    """
+    with st.container(horizontal=True, key="de_remove_table_bar"):
+        for table in tables:
+            if st.button(
+                f"Remove {table.table_name}",
+                key=f"de_remove_table_{table.table_id}",
+                icon=":material/delete:",
+                help=f"Drop {table.table_name} and any links that use it. Every other table stays as "
+                "it is. To bring it back, upload the file again.",
+            ):
+                removed = session.remove_table(table.table_id)
+                if removed:
+                    session.refresh_dictionary()
+                    st.toast(f"Removed {removed}.", icon=":material/delete:")
+                st.rerun(scope="app")
 
 
 # --------------------------------------------------------------------------------------
@@ -781,21 +833,44 @@ def _render_message(message: ChatMessage, index: int) -> None:
         for warning in message.warnings:
             st.caption(f":orange[{warning}]")
 
-        # Requirement 6.1 step 3: *every* chat output can be pinned, so this is gated on
-        # the message being an answer rather than on it carrying a chart or a table —
-        # written commentary is one of requirement 6.2's three output types and belongs in
-        # a report as much as the other two.
-        if st.button(
-            "Pin to Dashboard",
+        _render_pin_button(message, index)
+
+
+def _render_pin_button(message: ChatMessage, index: int) -> None:
+    """The one-way trip from an answer to the Dashboard (requirement 6.1 step 3).
+
+    Offered on *every* answer rather than only those carrying a chart or a table — written
+    commentary is one of requirement 6.2's three output types and belongs in a report as
+    much as the other two.
+
+    Once pressed it shows as done and stops accepting presses, because a button that stays
+    live reads as "press me again" and every press used to add another identical tile to
+    the Dashboard. The state is the pinned copy still being in the report, so discarding it
+    there brings this button back rather than stranding the answer.
+    """
+    if dashboard_session.pinned_item(message) is not None:
+        st.button(
+            "Pinned to Dashboard",
             key=f"an_pin_{index}",
-            icon=":material/push_pin:",
-            help="Copy this answer to your Dashboard. Nothing is asked for here — you title and arrange it on the Dashboard page.",
-        ):
-            dashboard_session.pin(message)
-            st.toast(
-                f"Pinned — {dashboard_session.pool_count()} waiting on the Dashboard.",
-                icon=":material/push_pin:",
-            )
+            icon=":material/check:",
+            disabled=True,
+            help=f"Already on your Dashboard — {dashboard_session.pool_count()} item(s) waiting to be placed. "
+            "Discard it there if you want to pin this answer again.",
+        )
+        return
+
+    # `on_click` rather than acting on the return value: a callback runs *before* the rerun
+    # the click triggers, so the button comes back painted as "Pinned" on that same rerun.
+    # Acting on the return value would leave it reading "Pin to Dashboard" until the user
+    # clicked something else, which is what invited the second press in the first place.
+    st.button(
+        "Pin to Dashboard",
+        key=f"an_pin_{index}",
+        icon=":material/push_pin:",
+        on_click=dashboard_session.pin,
+        args=(message,),
+        help="Copy this answer to your Dashboard. Nothing is asked for here — you title and arrange it on the Dashboard page.",
+    )
 
 
 # Every widget suffix the customize panel owns. "Reset to automatic" clears them all, and
@@ -1263,6 +1338,10 @@ if profile is not None:
         default="Setup",
         required=True,
         label_visibility="collapsed",
+        # Widget values are dropped when the widget stops being rendered, and a visit to
+        # the Dashboard does that — so without this, coming back to ask one more question
+        # lands on Setup with the chat apparently gone.
+        persist_state="session",
         help="Setup: links and column descriptions. Chat: ask questions about your data.",
         width="stretch",
     )

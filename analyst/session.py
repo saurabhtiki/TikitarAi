@@ -80,6 +80,12 @@ class ChatMessage:
         chart_warnings: the subset describing the chart, replaced wholesale when the user
             redraws it — the others still apply and are left alone.
         is_error: renders the message as a failure rather than an answer.
+        pinned_item_id: the id of the dashboard item this answer was pinned as, or None.
+            An opaque string here on purpose — it is what stops a second press of "Pin to
+            Dashboard" making a second copy of the same answer, and recording it on the
+            message is what makes that survive a rerun. `analyst/` does not import
+            `dashboard/` to read it; the page checks whether the id is still in the report,
+            so discarding the pinned copy offers the button again.
     """
 
     role: str
@@ -94,6 +100,7 @@ class ChatMessage:
     warnings: list[str] = field(default_factory=list)
     chart_warnings: list[str] = field(default_factory=list)
     is_error: bool = False
+    pinned_item_id: str | None = None
 
     def release_payload(self) -> None:
         """Drops the heavy attachments, keeping the readable parts.
