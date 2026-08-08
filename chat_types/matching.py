@@ -150,6 +150,14 @@ class MatchReport:
             lines.append(f"{len(self.extra_tables)} extra file(s) not imported: {listed}.")
         return lines
 
+    def status_word(self) -> str:
+        """Two words for Step 1's header, which is all that shows while that step is shut.
+
+        The full report lives inside Step 1, so once it collapses this is the only trace of
+        the check left on screen — and on Chat and Checks it is the only trace at all.
+        """
+        return "matched" if self.ok else "needs attention"
+
     def summary(self) -> str:
         """The one line the page puts on the match panel."""
         if not self.ok:

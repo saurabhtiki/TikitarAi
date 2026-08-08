@@ -58,6 +58,23 @@ Calculated-column statements are deliberately **not** part of a chat type — th
 Task recipe. Start over keeps the chat type selected, because uploading next month's files
 against the same setup is the normal way to use one.
 
+The **Delete button is commented out** in `_render_chat_type_bar` — deleting a chat type
+isn't offered on the page. `_delete_chat_type`, `chat_types.db.delete_type` and its
+un-scoping of criteria sets all remain, and the page test for it is skipped with that
+reason, so un-commenting the button is all it takes to bring the feature back.
+
+The match report lives **inside the Step 1 expander**, not in a panel of its own: once the
+upload matches, collapsing Step 1 takes the green banner and its notes off the screen, so
+Chat and Checks are not topped by a box repeating setup feedback. The step's header carries
+`report.status_word()` — `matched` / `needs attention` — because that is all that shows
+while it is shut. A blocking problem, or a discarded file, re-opens the step once
+(`_open_step_one_on_problems`, keyed on the problems so a *different* one re-opens again but
+a user who deliberately collapsed it is left alone). Acting on the check is deliberately not
+gated on the step being open — a collapsed step must still discard extras and apply the
+saved setup. `_sync_selection` moved inside Step 1 too, after `_render_upload`: it has to
+run before the check, or a switching run would measure the upload against the chat type
+being switched away from and discard tables on its say-so.
+
 Three subtleties worth not rediscovering. **Selecting a chat type re-reads the uploader's
 files** (`engine.session.reload_uploaded_tables`) — a table already in DuckDB was typed by
 detection and the text is gone, so picking a setup after uploading would otherwise report a

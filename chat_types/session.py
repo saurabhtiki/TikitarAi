@@ -27,6 +27,7 @@ CT_ACTIVE_KEY = "ct_active_chat_type"
 CT_APPLIED_KEY = "ct_applied_signature"
 CT_DISCARDED_KEY = "ct_discarded_tables"
 CT_WARNINGS_KEY = "ct_apply_warnings"
+CT_PROBLEM_KEY = "ct_problem_signature"
 CT_PICKER_KEY = "ct_picker"
 
 # What the picker calls the ad-hoc path. Selecting it is every earlier stage's behaviour,
@@ -90,9 +91,18 @@ def forget_upload() -> None:
     selection itself survives Start over on purpose — discarding this month's files to
     upload next month's against the same chat type is the normal way to use one.
     """
-    for key in (CT_APPLIED_KEY, CT_DISCARDED_KEY, CT_WARNINGS_KEY):
+    for key in (CT_APPLIED_KEY, CT_DISCARDED_KEY, CT_WARNINGS_KEY, CT_PROBLEM_KEY):
         st.session_state.pop(key, None)
     engine_session.clear_load_outcomes()
+
+
+def problem_signature() -> str:
+    """The problems Step 1 was last re-opened for. See the page's `_open_step_one_on_problems`."""
+    return st.session_state.get(CT_PROBLEM_KEY, "")
+
+
+def note_problem_signature(signature: str) -> None:
+    st.session_state[CT_PROBLEM_KEY] = signature
 
 
 def note_discarded(table_names: list[str]) -> None:

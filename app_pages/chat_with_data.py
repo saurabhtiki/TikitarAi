@@ -148,9 +148,9 @@ def _render_upload() -> list[session.EngineTable]:
     active_chat_type = chat_type_session.active()
     if active_chat_type is not None:
         expected = ", ".join(active_chat_type.table_names()) or "nothing yet"
-        st.caption(
-            f":grey[**{active_chat_type.display_name()}** expects: {expected}. "
-            "Upload this month's files — we'll check them against it.]"
+        st.error(
+            f"**{active_chat_type.display_name()}** expects: {expected}. "
+            "Upload Current files — we'll check them against it."
         )
 
     uploads = st.file_uploader(
@@ -292,7 +292,7 @@ def _render_chat_type_bar(user_id: int, loaded_tables: list[session.EngineTable]
             # onto the ad-hoc path while its tables were loaded under a chat type.
             persist_state="session",
             help="A saved setup: which files to expect, how they link, and what the columns mean. "
-            "Pick one and just upload this month's files.",
+            "Pick one and just upload Current files.",
         )
 
         name = st.text_input(
@@ -313,7 +313,7 @@ def _render_chat_type_bar(user_id: int, loaded_tables: list[session.EngineTable]
             on_click=_save_chat_type,
             args=(user_id, name),
             help="Store the tables, links and column descriptions as they stand now, so next "
-            "month you only have to upload the files.",
+            "time you only have to upload the files.",
         )
 
         # if active is not None and active.chat_type_id is not None:
@@ -414,59 +414,110 @@ def _delete_chat_type(user_id: int, chat_type: chat_type_model.ChatType) -> None
     st.toast(f"Deleted “{chat_type.display_name()}”.{kept}", icon=":material/delete:")
 
 
-def _render_match_panel(loaded_tables: list[session.EngineTable]) -> matching.MatchReport | None:
-    """Checks this upload against the active chat type, and says what it found.
+def _match_report(loaded_tables: list[session.EngineTable]) -> matching.MatchReport | None:
+    """This upload checked against the active chat type, or None on the ad-hoc path.
 
-    Rendered outside Step 1 rather than inside it, so it stays on screen after that step
-    auto-collapses — a blocking problem the user can't see is worse than no check at all.
-
-    Returns the report, or None on the ad-hoc path.
+    Pure — no rendering, no side effects — so it is safe to call twice on one run: once
+    before Step 1 for its header, once inside it for the panel and the views' gate.
     """
     chat_type = chat_type_session.active()
-    if chat_type is None or not chat_type.tables:
+    if chat_type is None or not chat_type.tables or not loaded_tables:
         return None
-
-    if not loaded_tables:
-        # Every uploaded file may have been discarded for not belonging to this chat type,
-        # in which case this note is the only thing standing between the user and a file
-        # that appeared to vanish on upload.
-        for note in _discarded_note():
-            st.caption(f":grey[{note}]")
-        return None
-
-    report = matching.check_upload(
+    return matching.check_upload(
         chat_type, session.load_outcomes(), session.semantic_types_by_table()
     )
+
+
+def _match_status(loaded_tables: list[session.EngineTable]) -> str:
+    """A word for Step 1's header, so a collapsed step still says how the check went."""
+    report = _match_report(loaded_tables)
+    return f" · {report.status_word()}" if report is not None else ""
+
+
+def _check_upload(loaded_tables: list[session.EngineTable]) -> matching.MatchReport | None:
+    """Acts on the check: drops what the chat type doesn't expect, applies what it saved.
+
+    Called from inside Step 1, but deliberately **not** gated on that step being open — a
+    collapsed step must still discard extra tables and apply the saved links, because the
+    views below are only safe once it has.
+
+    Returns the report, for `_render_match_notes` and for the gate on Chat and Checks.
+    """
+    report = _match_report(loaded_tables)
+    if report is None:
+        return None
 
     if report.extra_tables:
         _discard_extra_tables(report.extra_tables)
         st.rerun(scope="app")
 
+    chat_type = chat_type_session.active()
     if report.ok and chat_type_session.needs_applying(chat_type, session.table_names()):
         chat_type_session.apply_setup(chat_type, session.table_names())
         st.rerun(scope="app")
 
-    with st.container(border=True, key="ct_match_panel"):
-        if report.ok:
-            st.success(report.summary(), icon=":material/check_circle:")
-        else:
-            st.error(report.summary(), icon=":material/error:")
-            for problem in report.problems():
-                st.markdown(f"- {problem}")
-            st.caption(
-                "Fix these in your file and upload it again, or switch to "
-                f"**{chat_type_session.NEW_CHAT_TYPE}** to carry on without this chat type."
-            )
-
-        # Read back rather than taken from `apply_setup` above: applying ends in a rerun,
-        # which destroys anything that run painted.
-        for warning in chat_type_session.apply_warnings():
-            st.warning(warning, icon=":material/error:")
-
-        for note in [*report.notes(), *_discarded_note()]:
-            st.caption(f":grey[{note}]")
-
+    _open_step_one_on_problems(report)
     return report
+
+
+def _open_step_one_on_problems(report: matching.MatchReport | None) -> None:
+    """Re-opens Step 1 when a new problem appears, since the check now lives inside it.
+
+    Step 1 auto-collapses once files are loaded, so a blocking problem would arrive already
+    hidden — on the very views whose "fix the problems above" message points at it. Keyed
+    on the problems themselves rather than run unconditionally: forcing the step open on
+    every run would fight a user who deliberately collapsed it, while a *different* problem
+    is worth showing again.
+    """
+    problems = [
+        *(report.problems() if report is not None and not report.ok else []),
+        # A file that vanished on upload has to be said out loud even though nothing is
+        # blocked by it — silence there reads as the app losing the upload.
+        *_discarded_note(),
+    ]
+    signature = "|".join(problems)
+    if signature == chat_type_session.problem_signature():
+        return
+
+    chat_type_session.note_problem_signature(signature)
+    if problems:
+        session.queue_step_state(session.STEP_UPLOAD, True)
+        st.rerun(scope="app")
+
+
+def _render_match_notes(report: matching.MatchReport | None) -> None:
+    """What the check found, inside Step 1 rather than in a container of its own.
+
+    Nothing is drawn on the ad-hoc path, and nothing outside this step: once the upload
+    matches, collapsing Step 1 takes the whole report off the screen, which is the point —
+    Chat and Checks are for working, not for re-reading a green banner. What must not be
+    missed stays visible because `_open_step_one_on_problems` opens the step for it.
+    """
+    if report is None:
+        # No report and still something to say: every uploaded file may have been discarded
+        # for not belonging to this chat type, leaving no tables to check.
+        for note in _discarded_note():
+            st.caption(f":grey[{note}]")
+        return
+
+    if report.ok:
+        st.success(report.summary(), icon=":material/check_circle:")
+    else:
+        st.error(report.summary(), icon=":material/error:")
+        for problem in report.problems():
+            st.markdown(f"- {problem}")
+        st.caption(
+            "Fix these in your file and upload it again, or switch to "
+            f"**{chat_type_session.NEW_CHAT_TYPE}** to carry on without this chat type."
+        )
+
+    # Read back rather than taken from `apply_setup` above: applying ends in a rerun, which
+    # destroys anything that run painted.
+    for warning in chat_type_session.apply_warnings():
+        st.warning(warning, icon=":material/error:")
+
+    for note in [*report.notes(), *_discarded_note()]:
+        st.caption(f":grey[{note}]")
 
 
 def _discard_extra_tables(extra_tables: list[str]) -> None:
@@ -1580,7 +1631,10 @@ if profile is not None:
     session.get_statements()
 
     upload_summary = (
-        f"{len(loaded_tables)} table(s) — " + ", ".join(table.table_name for table in loaded_tables)
+        f"{len(loaded_tables)} table(s) — "
+        + ", ".join(table.table_name for table in loaded_tables)
+        # So a collapsed Step 1 still reports the chat type check that now lives inside it.
+        + _match_status(loaded_tables)
         if loaded_tables
         else ""
     )
@@ -1632,7 +1686,20 @@ if profile is not None:
         # per-table previews below are gated — they are the expensive part, and they hold
         # no state.
         loaded_tables = _render_upload()
+
+        # Acted on here rather than where the picker is drawn: this reruns, and a rerun
+        # before `st.file_uploader` has been created is a run in which that widget wasn't
+        # rendered — Streamlit then drops its value, taking the files with it. It also has
+        # to come before the check below, which would otherwise measure this upload against
+        # the chat type being switched away from, and discard tables on its say-so.
+        _sync_selection(user_id, chosen_chat_type, saved_chat_types)
+
+        # Ungated on purpose: a collapsed step must still act on the check. Only the
+        # *reporting* of it is part of what this step shows.
+        match_report = _check_upload(loaded_tables)
+
         if upload_step.open:
+            _render_match_notes(match_report)
             if loaded_tables:
                 _render_loaded_tables(loaded_tables)
             else:
@@ -1646,14 +1713,7 @@ if profile is not None:
             session.collapse_once(session.STEP_UPLOAD)
         st.rerun(scope="app")
 
-    # Acted on here rather than where the picker is drawn: this can rerun, and a rerun
-    # before `st.file_uploader` has been created costs the uploaded files. See
-    # `_sync_selection`.
-    _sync_selection(user_id, chosen_chat_type, saved_chat_types)
-
-    # After Step 1 and outside it, so a blocking problem stays on screen once that step
-    # auto-collapses. None on the ad-hoc path, which is what leaves every view open below.
-    match_report = _render_match_panel(loaded_tables)
+    # None on the ad-hoc path, which is what leaves every view open below.
     upload_matches = match_report is None or match_report.ok
 
     if view == "Setup":
@@ -1712,12 +1772,12 @@ if profile is not None:
             with st.container(border=True, key="an_chat_container1",):
                 _render_chat(user_id)
         else:
-            # The panel above already lists what's wrong. Answering questions against a
-            # half-matched load is the one thing requirement 6.6 exists to prevent — a text
-            # date column returns wrong rows rather than an error.
+            # Step 1 already lists what's wrong, and was re-opened for it. Answering
+            # questions against a half-matched load is the one thing requirement 6.6 exists
+            # to prevent — a text date column returns wrong rows rather than an error.
             st.info(
-                "Fix the problems above before asking questions — the answers wouldn't be "
-                "reliable until then.",
+                "Fix the problems listed in Step 1 before asking questions — the answers "
+                "wouldn't be reliable until then.",
                 icon=":material/error:",
             )
 
@@ -1731,8 +1791,8 @@ if profile is not None:
             )
         elif not upload_matches:
             st.info(
-                "Fix the problems above before running criteria — a wrong Yes/No goes "
-                "straight onto your Dashboard as a report.",
+                "Fix the problems listed in Step 1 before running criteria — a wrong Yes/No "
+                "goes straight onto your Dashboard as a report.",
                 icon=":material/error:",
             )
         else:

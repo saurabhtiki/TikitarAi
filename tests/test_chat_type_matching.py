@@ -12,7 +12,7 @@ error at all. Fixed or refused, never tolerated.
 import pandas as pd
 import pytest
 
-from chat_types.matching import MatchReport, check_upload, normalise
+from chat_types.matching import MatchReport, RetypedColumn, check_upload, normalise
 from chat_types.model import capture
 from engine.loading import DeclaredLoad, declaration_failures, prepare_declared_table
 from engine.relationships import Relationship
@@ -281,3 +281,21 @@ def test_types_read_as_english_in_a_sentence(semantic_type, expected):
     outcome = DeclaredLoad(failures=[ConversionFailure("column", semantic_type, 1, ["x"])])
     report = check_upload(_chat_type(), {"salary": outcome}, LOADED)
     assert f"couldn't be read as {expected}" in report.problems()[0]
+
+
+class TestTheHeaderWord:
+    """Step 1 holds the whole report, so its header is all that shows once it collapses."""
+
+    def test_a_clean_match_reads_as_matched(self):
+        assert MatchReport(matched_tables=["salary"]).status_word() == "matched"
+
+    def test_notes_alone_still_read_as_matched(self):
+        # Nothing to act on: a retyped column is the chat type doing its job.
+        report = MatchReport(
+            matched_tables=["salary"],
+            retyped_columns=[RetypedColumn("salary", "joining_date", "text", "date")],
+        )
+        assert report.status_word() == "matched"
+
+    def test_a_blocking_problem_asks_for_attention(self):
+        assert MatchReport(missing_tables=["salary"]).status_word() == "needs attention"

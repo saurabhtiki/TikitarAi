@@ -125,6 +125,12 @@ class TestTheBar:
         _save_as(app, "Salary processing")
         assert len(chat_type_db.list_types(1)) == 1
 
+    @pytest.mark.skip(
+        reason="The Delete button is commented out in `_render_chat_type_bar` — deleting a "
+        "chat type is not offered on the page for now. Kept rather than removed because the "
+        "handler, `chat_types.db.delete_type` and its un-scoping of criteria sets are all "
+        "still there: un-comment the button and this passes again."
+    )
     def test_deleting_puts_the_session_back_on_the_ad_hoc_path(self, tmp_path, monkeypatch):
         app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_JANUARY))
         _save_as(app, "Salary processing")
@@ -320,7 +326,7 @@ class TestBlockingTheViews:
         fresh.session_state["de_view"] = "Chat"
         fresh.run()
 
-        assert any("Fix the problems above" in element.value for element in fresh.info)
+        assert any("Fix the problems listed in Step 1" in element.value for element in fresh.info)
         assert not fresh.chat_input
 
     def test_checks_is_closed_too(self, tmp_path, monkeypatch):
@@ -339,7 +345,96 @@ class TestBlockingTheViews:
         app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_MISSING_COLUMN))
         app.session_state["de_view"] = "Chat"
         app.run()
-        assert not any("Fix the problems above" in element.value for element in app.info)
+        assert not any("Fix the problems listed in Step 1" in element.value for element in app.info)
+
+
+class TestWhereTheReportIsShown:
+    """The check reports inside Step 1, not in a panel of its own.
+
+    A green banner, a retype note and a link warning are setup feedback: worth reading once,
+    not worth a bordered box above every question the user asks for the rest of the session.
+    Collapsing Step 1 takes them off the screen. What must not be missed — a blocking
+    problem, or a file that didn't import — re-opens the step instead.
+    """
+
+    def _matched_and_collapsed(self, tmp_path, monkeypatch, view):
+        app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_JANUARY))
+        _save_as(app, "Salary processing")
+
+        app.session_state[engine_session.STEP_UPLOAD] = False
+        app.session_state["de_view"] = view
+        app.run()
+        return app
+
+    def test_a_matched_upload_says_nothing_once_step_one_is_collapsed(self, tmp_path, monkeypatch):
+        app = self._matched_and_collapsed(tmp_path, monkeypatch, "Chat")
+
+        assert not any("matched" in element.value for element in app.success)
+        assert app.chat_input
+
+    def test_a_blocking_problem_re_opens_step_one_and_is_read_there(self, tmp_path, monkeypatch):
+        # Chat says "fix the problems listed in Step 1", so Step 1 has to be showing them.
+        # Step 1 collapses itself the moment files load, which is exactly when the problem
+        # appears — without the re-open, the message would arrive already hidden.
+        app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_JANUARY))
+        _save_as(app, "Salary processing")
+
+        fresh = _make_app(tmp_path, monkeypatch)
+        _select(fresh, "Salary processing")
+        # Not `_upload`, which opens the step first — the point here is a step that is
+        # already shut when the files arrive.
+        fresh.session_state[engine_session.STEP_UPLOAD] = False
+        fresh.run()
+        fresh.file_uploader(key=engine_session.DE_UPLOADER_KEY).set_value(
+            [("salary.csv", SALARY_MISSING_COLUMN, "text/csv")]
+        ).run()
+
+        assert fresh.session_state[engine_session.STEP_UPLOAD] is True
+        assert any("**bonus** is missing in **salary**" in element.value for element in fresh.markdown)
+
+    def test_collapsing_it_again_is_respected(self, tmp_path, monkeypatch):
+        # Re-opening on every run would fight a user who read the problem and shut the step;
+        # the header keeps saying "needs attention" either way.
+        app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_JANUARY))
+        _save_as(app, "Salary processing")
+
+        fresh = _make_app(tmp_path, monkeypatch)
+        _select(fresh, "Salary processing")
+        _upload(fresh, ("salary.csv", SALARY_MISSING_COLUMN))
+        fresh.session_state[engine_session.STEP_UPLOAD] = False
+        fresh.run()
+
+        assert fresh.session_state[engine_session.STEP_UPLOAD] is False
+
+    def test_a_discarded_file_re_opens_step_one_too(self, tmp_path, monkeypatch):
+        # Nothing is blocked, but a file that appears to vanish on upload is worse than a
+        # blocked one: the user has no reason to look for a message at all.
+        app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_JANUARY))
+        _save_as(app, "Salary processing")
+
+        fresh = _make_app(tmp_path, monkeypatch)
+        _select(fresh, "Salary processing")
+        fresh.session_state[engine_session.STEP_UPLOAD] = False
+        _upload(fresh, ("salary.csv", SALARY_JANUARY), ("leave.csv", LEAVE_CSV))
+
+        assert fresh.session_state[engine_session.STEP_UPLOAD] is True
+        assert any("not imported" in element.value for element in fresh.caption)
+
+    def test_a_collapsed_step_still_applies_the_saved_setup(self, tmp_path, monkeypatch):
+        # Only the *reporting* moved inside Step 1. Retyping the columns and restoring the
+        # links has to happen whether or not the step is open, or landing on Chat with it
+        # shut would query an untyped table.
+        app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_JANUARY))
+        _save_as(app, "Salary processing")
+
+        fresh = _make_app(tmp_path, monkeypatch)
+        _select(fresh, "Salary processing")
+        _upload(fresh, ("salary.csv", SALARY_MARCH))
+        fresh.session_state[engine_session.STEP_UPLOAD] = False
+        fresh.session_state["de_view"] = "Chat"
+        fresh.run()
+
+        assert _types(fresh, "salary")["joining_date"] == "date"
 
 
 class TestStartOver:
