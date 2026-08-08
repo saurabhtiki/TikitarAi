@@ -3,12 +3,14 @@ import pytest
 
 from dashboard.model import (
     DEFAULT_SUBSECTION_NAME,
+    MAX_ROW_COLUMNS,
     UNTITLED_ITEM,
     PinnedItem,
     Report,
     add_section,
     add_subsection,
     assign_item,
+    group_into_rows,
     move,
     numbered_sections,
     numbered_subsections,
@@ -18,6 +20,7 @@ from dashboard.model import (
     subsection_choices,
     unassign_item,
     walk,
+    wraps_to_new_row,
 )
 
 
@@ -227,3 +230,76 @@ def test_item_reports_what_it_holds():
     assert not PinnedItem(frame=frame.iloc[:0]).has_table()
     assert not PinnedItem().has_chart()
     assert PinnedItem(figure=object()).has_chart()
+
+
+# --------------------------------------------------------------------------------------
+# Side-by-side rows
+# --------------------------------------------------------------------------------------
+
+
+def _items(*flags: bool) -> list[PinnedItem]:
+    """One item per flag, named A, B, C… so a grouping reads at a glance."""
+    return [
+        PinnedItem(item_id=chr(ord("a") + position), heading=chr(ord("A") + position), column_with_previous=flag)
+        for position, flag in enumerate(flags)
+    ]
+
+
+def _headings(rows: list[list[PinnedItem]]) -> list[list[str]]:
+    return [[item.heading for item in row] for row in rows]
+
+
+def test_items_stack_one_per_row_by_default():
+    assert _headings(group_into_rows(_items(False, False, False))) == [["A"], ["B"], ["C"]]
+
+
+def test_a_run_of_toggled_items_shares_one_row():
+    rows = group_into_rows(_items(False, True, True, True, False))
+    assert _headings(rows) == [["A", "B", "C", "D"], ["E"]]
+
+
+def test_a_toggle_off_starts_the_next_row():
+    rows = group_into_rows(_items(False, True, False, True))
+    assert _headings(rows) == [["A", "B"], ["C", "D"]]
+
+
+def test_the_first_item_of_a_subsection_starts_a_row_whatever_its_flag_says():
+    """It has nothing above it to join, so the flag is simply not honoured."""
+    assert _headings(group_into_rows(_items(True, False))) == [["A"], ["B"]]
+
+
+def test_a_row_never_grows_past_the_column_cap():
+    rows = group_into_rows(_items(False, *([True] * 5)))
+    assert len(rows[0]) == MAX_ROW_COLUMNS
+    assert _headings(rows) == [["A", "B", "C", "D"], ["E", "F"]]
+
+
+def test_grouping_an_empty_subsection_gives_no_rows():
+    assert group_into_rows([]) == []
+
+
+def test_wrapping_is_reported_only_when_the_flag_was_not_honoured():
+    items = _items(False, True, True, True, True)
+    assert not wraps_to_new_row(items, 1)
+    assert not wraps_to_new_row(items, 3)
+    # Fifth item, fifth column — the row above is full, so it starts a new one.
+    assert wraps_to_new_row(items, 4)
+
+
+def test_an_item_with_the_flag_off_never_reports_wrapping():
+    assert not wraps_to_new_row(_items(False, False), 1)
+
+
+def test_wrapping_is_reported_for_a_flagged_first_item():
+    assert wraps_to_new_row(_items(True), 0)
+
+
+def test_wrapping_of_an_index_outside_the_list_is_not_an_error():
+    assert not wraps_to_new_row(_items(False), 7)
+
+
+def test_walk_hands_renderers_the_same_rows(report):
+    items = report.sections[0].subsections[0].items
+    items.append(PinnedItem(item_id="pool-4", heading="Beside it", column_with_previous=True))
+    rendered = walk(report)[0].subsections[0]
+    assert [len(row) for row in rendered.rows()] == [2]

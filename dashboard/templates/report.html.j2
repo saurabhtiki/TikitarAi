@@ -25,25 +25,37 @@
     <h3>{{ subsection.number }} {{ subsection.name }}</h3>
 
       {# `entries`, not `items`: these subsections are dicts, and Jinja resolves
-         `.items` on a dict to `dict.items` before it looks at the key. #}
-      {% for item in subsection.entries %}
-      <div class="item">
-        <h4>{{ item.heading }}</h4>
+         `.items` on a dict to `dict.items` before it looks at the key. Each entry is a
+         *row* of items to sit side by side; a row of one is written bare, so a report
+         with no side-by-side items produces exactly the markup it always did. #}
+      {% for row in subsection.entries %}
+      {% if row | length > 1 %}
+      <div class="item-row cols-{{ row | length }}">
+      {% endif %}
 
-        {% if item.image %}
-        <img src="data:image/png;base64,{{ item.image }}" alt="{{ item.heading }}">
-        {% elif item.chart_failed %}
-        <p class="note">This chart couldn't be included as a picture. Its data is below.</p>
-        {% endif %}
+        {% for item in row %}
+        <div class="item">
+          <h4>{{ item.heading }}</h4>
 
-        {% if item.table %}
-        <div class="table-wrap">{{ item.table | safe }}</div>
-        {% endif %}
+          {% if item.image %}
+          <img src="data:image/png;base64,{{ item.image }}" alt="{{ item.heading }}">
+          {% elif item.chart_failed %}
+          <p class="note">This chart couldn't be included as a picture. Its data is below.</p>
+          {% endif %}
 
-        {% if item.comment %}
-        <p class="comment">{{ item.comment }}</p>
-        {% endif %}
+          {% if item.table %}
+          <div class="table-wrap">{{ item.table | safe }}</div>
+          {% endif %}
+
+          {% if item.comment %}
+          <p class="comment">{{ item.comment }}</p>
+          {% endif %}
+        </div>
+        {% endfor %}
+
+      {% if row | length > 1 %}
       </div>
+      {% endif %}
       {% endfor %}
 
     {% endfor %}

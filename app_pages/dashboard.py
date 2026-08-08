@@ -9,7 +9,10 @@ they are three different jobs rather than three parts of one screen:
 - **Build** — the unplaced pool on the left, the section/subsection tree on the right.
   Placing an item is a dropdown and a button, and every row of the tree carries the same
   three reordering controls, so the interaction is learned once and works at all three
-  levels requirement 6.3 asks to be reorderable.
+  levels requirement 6.3 asks to be reorderable. Each placed item also carries one
+  layout switch — "Show in columns with above" — and a run of them becomes a row of
+  equal-width columns; `model.group_into_rows` is what both this view's warning and the
+  exports read, so a row is never described one way here and built another way there.
 - **Preview** — the report read top to bottom, walked through `dashboard.model.walk`,
   which is the same function both exporters use. What is previewed is what downloads.
 - **Download** — the CSS preset, the optional hand-edit, the two buttons, and the finished
@@ -40,6 +43,7 @@ from dashboard.exceptions import ReportExportError
 from dashboard.excel_export import build_report_workbook
 from dashboard.html_export import build_html
 from dashboard.model import (
+    MAX_ROW_COLUMNS,
     PinnedItem,
     Report,
     add_section,
@@ -55,6 +59,7 @@ from dashboard.model import (
     subsection_choices,
     unassign_item,
     walk,
+    wraps_to_new_row,
 )
 from sidebar import render_sidebar
 
@@ -404,6 +409,8 @@ def _render_item_body(report: Report, subsection, item: PinnedItem, index: int) 
         help="Printed under the chart and table in both exports. It starts as the answer's own commentary from the chat — edit it freely.",
     )
 
+    _render_column_toggle(subsection, item, index)
+
     with st.container(horizontal=True, key=f"db_item_actions_{item.item_id}"):
         choices = [pair for pair in subsection_choices(report) if pair[0] != subsection.node_id]
         if choices:
@@ -444,6 +451,39 @@ def _render_item_body(report: Report, subsection, item: PinnedItem, index: int) 
             st.rerun(scope="app")
 
 
+def _render_column_toggle(subsection, item: PinnedItem, index: int) -> None:
+    """The one control behind side-by-side layout: "show in columns with the item above".
+
+    Off by default, so an untouched report reads exactly as it always did — one item per
+    row. Turning it on for a run of items puts that run in one row of equal columns, up to
+    `MAX_ROW_COLUMNS`.
+
+    The flag stays with the item when it is reordered or moved to another subsection,
+    which is deliberate: it says something about the item ("I'm happy to share a row"),
+    not about a position. What it *cannot* say is which item it will end up beside, so the
+    two cases where it is asked for and not honoured — nothing above to join, or a full row
+    above — say so under the switch rather than silently doing nothing.
+    """
+    first_in_subsection = index == 0
+
+    item.column_with_previous = st.toggle(
+        "Show in columns with above",
+        value=item.column_with_previous and not first_in_subsection,
+        key=f"db_item_columns_{item.item_id}",
+        disabled=first_in_subsection,
+        help="Nothing above this item to sit beside — it always starts a row."
+        if first_in_subsection
+        else "Show this item beside the one above it, in equal-width columns, instead of "
+        f"underneath it. Up to {MAX_ROW_COLUMNS} items can share a row.",
+    )
+
+    if wraps_to_new_row(subsection.items, index):
+        st.caption(
+            f":orange[The row above already holds {MAX_ROW_COLUMNS} items, so this one "
+            "starts a new row.]"
+        )
+
+
 # --------------------------------------------------------------------------------------
 # Preview
 # --------------------------------------------------------------------------------------
@@ -473,11 +513,23 @@ def _render_preview(report: Report) -> None:
         st.subheader(f"{section.number}. {section.name}", divider="grey")
         for subsection in section.subsections:
             st.markdown(f"##### {subsection.number} {subsection.name}")
-            for item in subsection.items:
-                st.markdown(f"**{item.display_heading()}**")
-                _render_item_output(item, f"db_preview_{item.item_id}")
-                if item.comment.strip():
-                    st.markdown(f":grey[_{item.comment.strip()}_]")
+            # Grouped through the model's own `rows()`, the same call the HTML export
+            # makes, so a row that reads as four columns here is four columns there.
+            for row in subsection.rows():
+                if len(row) == 1:
+                    _render_preview_item(row[0])
+                    continue
+                for column, item in zip(st.columns(len(row), gap="medium"), row):
+                    with column:
+                        _render_preview_item(item)
+
+
+def _render_preview_item(item: PinnedItem) -> None:
+    """One item as the report reads it — heading, output, comment."""
+    st.markdown(f"**{item.display_heading()}**")
+    _render_item_output(item, f"db_preview_{item.item_id}")
+    if item.comment.strip():
+        st.markdown(f":grey[_{item.comment.strip()}_]")
 
 
 # --------------------------------------------------------------------------------------

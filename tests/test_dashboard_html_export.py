@@ -149,6 +149,54 @@ def test_a_chart_is_rasterized_once_across_both_exports(monkeypatch, frame):
 
 
 # --------------------------------------------------------------------------------------
+# Side-by-side rows
+# --------------------------------------------------------------------------------------
+
+
+def test_a_report_without_side_by_side_items_writes_no_row_wrappers(frame):
+    """The markup a report always produced, unchanged — which is what keeps every preset
+    and every hand-edited stylesheet styling it the way it already did."""
+    html = build_html(_report_with(PinnedItem(heading="A", frame=frame), PinnedItem(heading="B")), _css())
+    # The class name is in the stylesheet either way — what must be absent is any element
+    # carrying it.
+    assert 'class="item-row' not in html
+    assert html.count('<div class="item">') == 2
+
+
+def test_toggled_items_are_wrapped_in_one_row(frame):
+    html = build_html(
+        _report_with(
+            PinnedItem(heading="A", frame=frame),
+            PinnedItem(heading="B", column_with_previous=True),
+            PinnedItem(heading="C", column_with_previous=True),
+        ),
+        _css(),
+    )
+    assert html.count('class="item-row cols-3"') == 1
+    assert html.count('<div class="item">') == 3
+
+
+def test_a_row_ends_where_the_toggle_does(frame):
+    html = build_html(
+        _report_with(
+            PinnedItem(heading="A", frame=frame),
+            PinnedItem(heading="B", column_with_previous=True),
+            PinnedItem(heading="C"),
+        ),
+        _css(),
+    )
+    assert html.count('class="item-row cols-2"') == 1
+    assert "cols-3" not in html
+
+
+def test_the_stylesheet_can_lay_a_row_out(frame):
+    """The flex rules live in the shared block, so they arrive with every preset."""
+    html = build_html(_report_with(PinnedItem(heading="A", frame=frame)), _css())
+    assert ".item-row" in html
+    assert "display: flex" in html
+
+
+# --------------------------------------------------------------------------------------
 # frame_to_html
 # --------------------------------------------------------------------------------------
 

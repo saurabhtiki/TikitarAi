@@ -18,7 +18,15 @@ from streamlit.testing.v1 import AppTest
 from auth.db import init_db, seed_default_admin
 from dashboard import session as dashboard_session
 from dashboard.css_presets import DEFAULT_PRESET
-from dashboard.model import PinnedItem, Report, add_section, add_subsection, assign_item
+from dashboard.model import (
+    MAX_ROW_COLUMNS,
+    PinnedItem,
+    Report,
+    add_section,
+    add_subsection,
+    assign_item,
+    group_into_rows,
+)
 from llm.db import create_profile, init_llm_table
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -292,6 +300,73 @@ class TestLookDialog:
         # The rerun any other button would cause.
         app.button(key="db_add_section").click().run()
         assert dashboard_session.DB_DIALOG_KEY not in app.session_state
+
+class TestColumnLayout:
+    """The "Show in columns with above" toggle (requirement 6.3's layout half)."""
+
+    def _app_with(self, tmp_path, monkeypatch, count: int):
+        report = _placed_report(
+            *(PinnedItem(item_id=f"i{n}", heading=f"Q{n}", frame=FRAME) for n in range(count))
+        )
+        return _make_app(tmp_path, monkeypatch, report=report)
+
+    def _placed(self, app):
+        return _report(app).sections[0].subsections[0].items
+
+    def test_every_placed_item_offers_the_toggle(self, tmp_path, monkeypatch):
+        app = self._app_with(tmp_path, monkeypatch, 2)
+        assert {toggle.key for toggle in app.toggle} == {"db_item_columns_i0", "db_item_columns_i1"}
+
+    def test_it_starts_off_so_an_untouched_report_still_stacks(self, tmp_path, monkeypatch):
+        app = self._app_with(tmp_path, monkeypatch, 2)
+        assert not any(item.column_with_previous for item in self._placed(app))
+
+    def test_the_first_item_cannot_join_anything_above_it(self, tmp_path, monkeypatch):
+        app = self._app_with(tmp_path, monkeypatch, 2)
+        assert app.toggle(key="db_item_columns_i0").disabled
+        assert not app.toggle(key="db_item_columns_i1").disabled
+
+    def test_turning_it_on_puts_the_item_beside_the_one_above(self, tmp_path, monkeypatch):
+        app = self._app_with(tmp_path, monkeypatch, 2)
+        app.toggle(key="db_item_columns_i1").set_value(True).run()
+
+        placed = self._placed(app)
+        assert placed[1].column_with_previous
+        assert [len(row) for row in group_into_rows(placed)] == [2]
+
+    def test_reaching_the_top_of_a_subsection_clears_a_flag_that_can_no_longer_apply(
+        self, tmp_path, monkeypatch
+    ):
+        """Moving an item up past its neighbour leaves it with nothing to sit beside, so
+        the switch it shows and the flag it carries both go back to off."""
+        app = self._app_with(tmp_path, monkeypatch, 2)
+        app.toggle(key="db_item_columns_i1").set_value(True).run()
+        app.button(key="db_item_i1_up").click().run()
+
+        placed = self._placed(app)
+        assert [item.item_id for item in placed] == ["i1", "i0"]
+        assert not placed[0].column_with_previous
+
+    def test_a_fifth_column_says_why_it_dropped_to_the_next_row(self, tmp_path, monkeypatch):
+        app = self._app_with(tmp_path, monkeypatch, MAX_ROW_COLUMNS + 1)
+        for position in range(1, MAX_ROW_COLUMNS + 1):
+            app.toggle(key=f"db_item_columns_i{position}").set_value(True).run()
+
+        assert [len(row) for row in group_into_rows(self._placed(app))] == [MAX_ROW_COLUMNS, 1]
+        assert any("starts a new row" in caption.value for caption in app.caption)
+
+    def test_the_preview_lays_a_row_out_in_columns(self, tmp_path, monkeypatch):
+        report = _placed_report(
+            PinnedItem(item_id="a", heading="Sales", frame=FRAME),
+            PinnedItem(item_id="b", heading="Costs", frame=FRAME, column_with_previous=True),
+        )
+        app = _set_view(_make_app(tmp_path, monkeypatch, report=report), "Preview")
+
+        assert not app.exception
+        assert len(app.dataframe) == 2
+        assert any("Sales" in markdown.value for markdown in app.markdown)
+        assert any("Costs" in markdown.value for markdown in app.markdown)
+
 
 class TestPreview:
     def test_an_empty_report_says_what_to_do(self, tmp_path, monkeypatch):

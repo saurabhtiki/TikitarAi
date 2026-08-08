@@ -52,6 +52,9 @@ body { margin: 0; }
 table { border-collapse: collapse; width: 100%; }
 .note { font-style: italic; }
 .empty { text-align: center; }
+.item-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px; }
+.item-row > .item { flex: 1 1 0; min-width: 220px; margin-left: 0; margin-right: 0; }
+@media print { .item-row { page-break-inside: avoid; } }
 """
 
 CLEAN_CSS = (
@@ -85,6 +88,9 @@ h2 { font-size: 1.25rem; font-weight: 600; margin: 40px 0 0; padding: 12px 40px;
 h3 { font-size: 1.05rem; font-weight: 600; margin: 28px 40px 0; color: #14375e; text-transform: uppercase; letter-spacing: 0.04em; }
 h4 { font-size: 1rem; font-weight: 600; margin: 24px 40px 10px; color: #1a1a1a; }
 .item { margin: 0 40px 32px; page-break-inside: avoid; }
+/* This preset's page inset lives on .item, and the shared rules zero an item's side
+   margins inside a row, so the row has to carry the inset instead. */
+.item-row { margin: 0 40px; }
 .comment { margin: 14px 0 0; color: #40484f; font-size: 0.92rem; }
 table { font-size: 0.82rem; margin: 12px 0; border: 1px solid #cfd8e3; }
 th { text-align: left; font-weight: 600; padding: 8px 12px; background: #14375e; color: #ffffff; }

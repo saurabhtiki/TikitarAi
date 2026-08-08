@@ -17,6 +17,9 @@ Three decisions are worth stating, because the rest of the package leans on them
   export's one-sheet-per-subsection mapping stays unambiguous.
 - **Numbering is derived, never stored.** `numbered_sections` computes "1", "1.1" from
   list position, so a reorder renumbers for free and no two nodes can ever claim "2.1".
+- **Side-by-side layout is derived too.** An item carries one flag — "sit beside the item
+  above" — and `group_into_rows` turns a run of them into a row. Nothing stores a row id,
+  so reordering can never leave a row pointing at an item that moved out of it.
 """
 
 import logging
@@ -36,6 +39,11 @@ DEFAULT_SUBSECTION_NAME = "General"
 UNTITLED_SECTION = "Untitled section"
 UNTITLED_ITEM = "Untitled item"
 UNTITLED_REPORT = "Untitled report"
+
+# How many items may share one row of the report. Four narrow columns is already the point
+# where a table inside one stops being readable, and past that the HTML wraps anyway — so
+# the cap is enforced in `group_into_rows` rather than left to the stylesheet.
+MAX_ROW_COLUMNS = 4
 
 
 def new_id() -> str:
@@ -64,6 +72,11 @@ class PinnedItem:
         source_id: what produced this item, for things that own their report item and
             re-save it — a criteria in `checks/` (requirement 6.5). None for anything
             pinned from the chat, where each pin is its own one-off snapshot.
+        column_with_previous: render this item beside the one above it rather than under
+            it. The flag belongs to the item, not to a position, so moving an item carries
+            its answer to "do I sit beside my neighbour" with it — and an item that lands
+            first in a subsection simply starts a row, because `group_into_rows` has
+            nothing above it to join.
     """
 
     item_id: str = field(default_factory=new_id)
@@ -76,6 +89,7 @@ class PinnedItem:
     outputs: set[str] = field(default_factory=set)
     png: bytes | None = None
     source_id: str | None = None
+    column_with_previous: bool = False
 
     def display_heading(self) -> str:
         """What to print above this item. Never empty."""
@@ -136,6 +150,47 @@ def numbered_subsections(section: Section, section_number: str) -> list[tuple[st
         (f"{section_number}.{position}", subsection)
         for position, subsection in enumerate(section.subsections, start=1)
     ]
+
+
+def group_into_rows(items: list[PinnedItem]) -> list[list[PinnedItem]]:
+    """A subsection's items split into rows of side-by-side columns.
+
+    A run of items whose `column_with_previous` is set joins the row the first of them
+    started, so turning the flag on for items 2, 3 and 4 puts items 1–4 in one row of four
+    equal columns. Everything else is a row of its own, which is what an untouched report
+    is: every flag off, one item per row, exactly the old behaviour.
+
+    Two things the flag can ask for and not get, both resolved by starting a new row rather
+    than by refusing:
+
+    - the **first** item of a subsection has nothing above it to join;
+    - a row already holding `MAX_ROW_COLUMNS` items is full, so the next one wraps.
+
+    The Preview view, the HTML export and the Build view's own warning all group through
+    this one function, so what the page says about a row is what the download does with it.
+    """
+    rows: list[list[PinnedItem]] = []
+    for item in items:
+        if rows and item.column_with_previous and len(rows[-1]) < MAX_ROW_COLUMNS:
+            rows[-1].append(item)
+        else:
+            rows.append([item])
+    return rows
+
+
+def wraps_to_new_row(items: list[PinnedItem], index: int) -> bool:
+    """True when the item at `index` asked to sit beside the one above and couldn't.
+
+    Only ever True for an item whose flag is on, and only because it is first in its
+    subsection or because the row above is full. The Build view turns it into a note under
+    the toggle — a switch that is on while the export ignores it needs to say so.
+    """
+    if not 0 <= index < len(items):
+        return False
+    item = items[index]
+    if not item.column_with_previous:
+        return False
+    return any(row[0] is item for row in group_into_rows(items))
 
 
 def subsection_choices(report: Report) -> list[tuple[str, str]]:
@@ -336,6 +391,13 @@ class RenderedSubsection:
     number: str
     name: str
     items: list[PinnedItem]
+
+    def rows(self) -> list[list[PinnedItem]]:
+        """The same items grouped into side-by-side rows, for renderers that lay out in
+        two dimensions. The Excel export ignores this and reads `items`: a worksheet puts
+        one block under the next, and a "column" there would mean something else entirely.
+        """
+        return group_into_rows(self.items)
 
 
 @dataclass

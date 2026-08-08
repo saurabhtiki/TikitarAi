@@ -95,6 +95,18 @@ among the unscoped ones, since the index would otherwise roll the whole delete b
 Out of band, earlier: the Data Cleaner gained Summarise / Pivot / Unpivot, which save a
 derived table rather than recording a step.
 
+Out of band, since: the Dashboard can lay items side by side. A placed item carries one
+flag — `PinnedItem.column_with_previous`, shown as **Show in columns with above**, off by
+default — and `model.group_into_rows` turns a run of them into a row of up to
+`MAX_ROW_COLUMNS` (4) equal columns. **No row id is stored**, deliberately: the flag says
+"I'm happy to share a row", so reordering can never leave a row pointing at an item that
+moved out of it, and the two cases the flag can't be honoured (nothing above to join, row
+above full) start a new row and say so rather than refusing. `RenderedSubsection.rows()`
+is what the Preview and the HTML export both read; the Excel export ignores it and stays
+on `items`, because a column in a worksheet means something else. A row of one is written
+with **no wrapper element**, so a report that never touches the toggle produces byte-for-byte
+the markup it always did and every preset and hand-edited stylesheet keeps working.
+
 Known pre-existing failures, not from this stage (they fail with Stage 9's page changes
 stashed): `test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body`
 and `TestRelationships::test_confirming_a_bad_link_keeps_it_declared_but_unenforced`.

@@ -14,6 +14,11 @@ string — the title, headings, comments — is user text and is escaped by the 
 Tables carry **every row**. Requirement 7.3 is explicit that on-screen output may be
 capped but HTML and Excel exports always contain the full result, so there is no row limit
 here and no "showing first N" notice to write.
+
+Items are handed to the template already grouped into rows by `model.group_into_rows`. A
+row of one is written exactly as an item always was — no wrapper element — so a report
+that never touches the side-by-side toggle produces the same markup it did before, and
+every preset and hand-edited stylesheet keeps styling it the way it already did.
 """
 
 import base64
@@ -99,8 +104,12 @@ def build_html(report: Report, css: str) -> str:
                     "number": subsection.number,
                     "name": subsection.name,
                     # Named `entries` because Jinja resolves `.items` on a dict to
-                    # `dict.items` before it ever looks for the key.
-                    "entries": [_render_item(item) for item in subsection.items],
+                    # `dict.items` before it ever looks for the key. Grouped into rows
+                    # here rather than in the template, so the flag that decides layout is
+                    # read by `group_into_rows` in one place.
+                    "entries": [
+                        [_render_item(item) for item in row] for row in subsection.rows()
+                    ],
                 }
                 for subsection in section.subsections
             ],
