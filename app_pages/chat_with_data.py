@@ -51,6 +51,7 @@ from analyst import charts, pipeline, routing
 from analyst import session as chat_session
 from analyst.exceptions import ChatStorageError
 from analyst.session import ChatMessage
+from app_pages import chart_controls
 from app_pages.checks_view import render_checks
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
@@ -1136,6 +1137,7 @@ def _render_message(message: ChatMessage, index: int) -> None:
 
         if routing.OUTPUT_DATAFRAME in message.outputs and message.frame is not None:
             st.dataframe(message.frame, key=f"an_frame_{index}", width="stretch", hide_index=True)
+            _render_generate_chart_button(message, index)
 
         if message.text:
             st.markdown(message.text)
@@ -1183,36 +1185,65 @@ def _render_pin_button(message: ChatMessage, index: int) -> None:
     )
 
 
-# Every widget suffix the customize panel owns. "Reset to automatic" clears them all, and
-# keeping the list in one place stops it drifting out of step with the controls themselves.
-CHART_CONTROL_SUFFIXES = (
-    "kind",
-    "x",
-    "y",
-    "colour",
-    "title",
-    "palette",
-    "series",
-    "values",
-    "legend",
-    "sort",
-    "top",
-    "height",
-)
+def _chart_keys(index: int) -> chart_controls.ChartKeys:
+    """The widget namespace one answer's chart panel owns, keyed by transcript position."""
+    return chart_controls.ChartKeys(prefix="an_chart", suffix=f"_{index}")
+
+
+def _render_generate_chart_button(message: ChatMessage, index: int) -> None:
+    """Offers a chart for an answer that came back as a table.
+
+    `routing.classify_output` decides whether a question wanted a chart, and a question that
+    didn't ask for one gets a table — as does a question that did ask and couldn't be drawn,
+    which `analyst.pipeline` deliberately downgrades rather than showing nothing. Both leave
+    rows on screen that the user may well want to see plotted, and until this button their
+    only recourse was to ask the question again in different words.
+
+    Only offered while the message still holds its frame: `analyst.session` releases those
+    from older turns, and a button that can't draw anything would be a dead end.
+    """
+    if message.figure is not None or message.frame is None:
+        return
+    if not charts.available_chart_types(message.frame):
+        return
+
+    if not st.button(
+        "Generate chart",
+        key=f"an_chart_new_{index}",
+        icon=":material/insert_chart:",
+        help="Plot these rows. Nothing is re-run and nothing is asked of the AI — the chart is built from the table above, and you can change what it plots.",
+    ):
+        return
+
+    choices, warnings = chart_controls.seed_choices(message.frame, message.question)
+    figure, draw_warnings = (
+        charts.render_chart(message.frame, choices) if choices is not None else (None, [])
+    )
+    if figure is None:
+        st.caption(f":orange[{' '.join(warnings + draw_warnings) or 'These rows cannot be charted.'}]")
+        return
+
+    message.figure = figure
+    message.choices = choices
+    message.style = charts.ChartStyle()
+    message.chart_warnings = warnings + draw_warnings
+    # The answer's own record of what it produced, so a later pin and the export agree with
+    # what is on screen.
+    message.outputs.add(routing.OUTPUT_CHART)
+    st.rerun(scope="app")
 
 
 def _render_chart_controls(message: ChatMessage, index: int) -> None:
     """Lets the user redraw the chart from the rows already in hand.
 
+    The panel itself lives in `chart_controls`, shared with the Checks page; this is the
+    part that is the chat's own — which message is being redrawn, and what "reset" means
+    here, which is the chart this question produced on its own.
+
     Nothing here calls the model or re-runs any SQL: the frame behind this message is still
     in session state, so changing a dropdown is a redraw of data that has already been
     fetched. The controls open pre-filled with what was drawn automatically, so opening the
     panel and closing it again changes nothing.
-
-    Split across two tabs because the two halves answer different questions — **Data** is
-    what the chart is of, **Style** is what it looks like — and they are stored as two
-    separate values for the same reason, so changing the chart type keeps the title and
-    colours the user picked.
 
     Only offered while the message still holds its frame — `analyst.session` releases those
     from older turns, and controls that can't redraw anything would be a dead end.
@@ -1227,18 +1258,36 @@ def _render_chart_controls(message: ChatMessage, index: int) -> None:
 
     current = message.choices
     current_style = message.style or charts.ChartStyle()
+    keys = _chart_keys(index)
 
-    with st.expander("Customize chart", icon=":material/tune:"):
+    # `key` + `on_change` is what makes the open/closed state a widget rather than a fresh
+    # `expanded=False` on every run. Every control in here ends in `st.rerun`, so without it
+    # the panel shut itself the moment anything was changed in it.
+    with st.expander(
+        "Customize chart",
+        icon=":material/tune:",
+        key=f"an_chart_panel_{index}",
+        on_change="rerun",
+    ):
         data_tab, style_tab = st.tabs(["Data", "Style"], key=f"an_chart_tabs_{index}")
         with data_tab:
-            chosen = _chart_data_controls(frame, current, kinds, index)
+            chosen = chart_controls.render_data_controls(frame, current, kinds, keys)
         with style_tab:
             # `chosen or current` because the style controls only need to know the shape of
             # the chart to decide what to offer, and an empty Values box isn't a reason to
             # empty the Style tab too.
-            chosen_style = _chart_style_controls(
-                message, frame, chosen or current, current_style, index
+            chosen_style = chart_controls.render_style_controls(
+                frame,
+                chosen or current,
+                current_style,
+                keys,
+                title_placeholder=chart_controls.figure_title(message.figure),
             )
+            if chart_controls.render_reset_button(
+                keys,
+                help_text="Discards these customizations and rebuilds the chart this question produced on its own.",
+            ):
+                _reset_chart(message)
 
     if chosen is None:
         st.caption(":orange[Pick at least one value to plot — showing the last chart until you do.]")
@@ -1260,211 +1309,14 @@ def _render_chart_controls(message: ChatMessage, index: int) -> None:
     st.rerun(scope="app")
 
 
-def _chart_data_controls(
-    frame: pd.DataFrame, current: charts.ChartChoices, kinds: list[str], index: int
-) -> charts.ChartChoices | None:
-    """The **Data** tab: what the chart is of. None when nothing is selected to plot."""
-    columns = list(frame.columns)
-    numeric = [name for name in columns if pd.api.types.is_numeric_dtype(frame[name])]
-
-    # Read from the widgets rather than from `current`, which is a run behind them: moving
-    # the x axis onto the column currently used as the legend would otherwise leave the
-    # legend holding a value its own option list no longer offers.
-    live_x = st.session_state.get(f"an_chart_x_{index}", current.x)
-    live_measures = st.session_state.get(f"an_chart_y_{index}", current.measures)
-    # A measure can't also be the thing it's split by, and neither can the x axis.
-    splits = ["None", *(name for name in columns if name != live_x and name not in live_measures)]
-
-    chosen_kind = st.selectbox(
-        "Chart type",
-        options=kinds,
-        index=kinds.index(current.kind) if current.kind in kinds else 0,
-        format_func=lambda kind: charts.CHART_LABELS.get(kind, kind),
-        key=f"an_chart_kind_{index}",
-        help="Only the types that suit this result are listed — a pie needs a few non-negative parts of one whole, a scatter needs two numeric columns.",
-    )
-    axis_column, value_column = st.columns(2)
-    with axis_column:
-        chosen_x = st.selectbox(
-            "X axis" if chosen_kind != charts.CHART_PIE else "Slices",
-            options=columns,
-            index=columns.index(current.x) if current.x in columns else 0,
-            key=f"an_chart_x_{index}",
-            help="The category or date the values are grouped along. On a horizontal bar this runs up the side instead.",
-        )
-    with value_column:
-        chosen_measures = st.multiselect(
-            "Values",
-            options=numeric,
-            default=[name for name in current.measures if name in numeric],
-            key=f"an_chart_y_{index}",
-            help="The numbers to plot. Pick several to compare them side by side — types that can only draw one will use the first.",
-        )
-
-    _drop_stale_selection(f"an_chart_colour_{index}", splits)
-    chosen_split = st.selectbox(
-        "Colour / legend",
-        options=splits,
-        index=splits.index(current.colour) if current.colour in splits else 0,
-        key=f"an_chart_colour_{index}",
-        help="Splits each value into one coloured series per value of this column — e.g. status, giving a legend of statuses.",
-    )
-
-    if not chosen_measures:
-        return None
-    return charts.ChartChoices(
-        kind=chosen_kind,
-        x=chosen_x,
-        measures=list(chosen_measures),
-        colour=None if chosen_split == "None" else chosen_split,
-    )
-
-
-def _chart_style_controls(
-    message: ChatMessage,
-    frame: pd.DataFrame,
-    chosen: charts.ChartChoices,
-    current: charts.ChartStyle,
-    index: int,
-) -> charts.ChartStyle:
-    """The **Style** tab: what the chart looks like.
-
-    Controls that this particular chart couldn't honour are left out rather than shown
-    doing nothing — there is no stacking to choose with one series, and no order to choose
-    along a time axis. What is left out keeps whatever it was, so switching a bar to a line
-    and back doesn't quietly discard the stacking that was set.
-    """
-    # An empty box means "use the title derived from the columns", so the automatic title
-    # keeps up as the data controls change. Showing the current one as a placeholder says
-    # what will be used without pinning it in place.
-    title = st.text_input(
-        "Title",
-        value=current.title or "",
-        placeholder=_current_chart_title(message),
-        key=f"an_chart_title_{index}",
-        help="Leave blank to keep the title built from the column names.",
-    )
-
-    palettes = charts.available_palettes(frame, chosen)
-    _drop_stale_selection(f"an_chart_palette_{index}", palettes)
-    left, right = st.columns(2)
-    with left:
-        palette = st.selectbox(
-            "Colours",
-            options=palettes,
-            index=palettes.index(current.palette) if current.palette in palettes else 0,
-            format_func=lambda name: charts.PALETTE_LABELS.get(name, name),
-            key=f"an_chart_palette_{index}",
-            help="The colour sequence the series are drawn in. 'Colour-blind safe' is the one to pick for a chart other people will read.",
-        )
-    with right:
-        series = current.series
-        if charts.supports_series_layout(frame, chosen):
-            layouts = list(charts.SERIES_LABELS)
-            series = st.selectbox(
-                "Series",
-                options=layouts,
-                index=layouts.index(current.series) if current.series in layouts else 0,
-                format_func=lambda name: charts.SERIES_LABELS.get(name, name),
-                key=f"an_chart_series_{index}",
-                help="How the series share the space: side by side to compare them, stacked for the total, 100% stacked to compare their shares.",
-            )
-
-    show_values = st.checkbox(
-        "Show values on the chart",
-        value=current.show_values,
-        key=f"an_chart_values_{index}",
-        help="Prints each point's own number on the chart. Best kept off when there are many bars, where the labels start to overlap.",
-    )
-    show_legend = st.checkbox(
-        "Show legend",
-        value=current.show_legend,
-        key=f"an_chart_legend_{index}",
-        help="Turn off when there is only one series and the legend is just naming it again.",
-    )
-
-    sort = current.sort
-    top_n = current.top_n
-    ceiling = charts.top_n_ceiling(frame, chosen)
-    order_column, top_column = st.columns(2)
-    with order_column:
-        if charts.supports_sorting(frame, chosen):
-            orders = list(charts.SORT_LABELS)
-            sort = st.selectbox(
-                "Sort",
-                options=orders,
-                index=orders.index(current.sort) if current.sort in orders else 0,
-                format_func=lambda name: charts.SORT_LABELS.get(name, name),
-                key=f"an_chart_sort_{index}",
-                help="'Automatic' is biggest-first for a single run of bars and chronological over time.",
-            )
-    with top_column:
-        if ceiling:
-            automatic = charts.default_top_n(frame, chosen)
-            picked = st.slider(
-                "Show top",
-                min_value=1,
-                max_value=ceiling,
-                value=min(current.top_n or automatic, ceiling),
-                key=f"an_chart_top_{index}",
-                help="How many categories to draw. The rest stay in the table below.",
-            )
-            # Left as None while it matches the automatic cap, so the cap can keep moving
-            # with the chart type instead of being frozen the moment this panel is opened.
-            top_n = None if picked == automatic else picked
-
-    height = st.slider(
-        "Height",
-        min_value=charts.MIN_CHART_HEIGHT,
-        max_value=charts.MAX_CHART_HEIGHT,
-        value=current.height,
-        step=30,
-        key=f"an_chart_height_{index}",
-        help="Taller is easier to read when there are many categories, especially on a horizontal bar.",
-    )
-
-    _render_chart_reset(message, index)
-
-    return charts.ChartStyle(
-        title=title.strip() or None,
-        palette=palette,
-        series=series,
-        show_values=show_values,
-        show_legend=show_legend,
-        sort=sort,
-        top_n=top_n,
-        height=height,
-    )
-
-
-def _current_chart_title(message: ChatMessage) -> str:
-    """The title on the chart right now, used as the Title box's placeholder."""
-    try:
-        return str(message.figure.layout.title.text or "")
-    except AttributeError:
-        # A figure without a title layout is not worth losing the whole panel over.
-        logger.debug("Chart figure had no readable title.", exc_info=True)
-        return ""
-
-
-def _render_chart_reset(message: ChatMessage, index: int) -> None:
+def _reset_chart(message: ChatMessage) -> None:
     """Puts the chart back to the one this question produced on its own.
 
-    Both halves have to go: clearing the stored choices without clearing the widgets would
-    leave the panel showing selections the chart no longer reflects.
+    Both halves have to go: the widgets are cleared by `render_reset_button` before this is
+    called, and clearing them without rebuilding the stored choices would leave the panel
+    showing defaults over a chart that still reflects the old picks.
     """
-    if not st.button(
-        "Reset to automatic",
-        key=f"an_chart_reset_{index}",
-        icon=":material/restart_alt:",
-        help="Discards these customizations and rebuilds the chart this question produced on its own.",
-    ):
-        return
-
-    for suffix in CHART_CONTROL_SUFFIXES:
-        st.session_state.pop(f"an_chart_{suffix}_{index}", None)
-
-    automatic, warnings = charts.choose_chart(message.frame, message.question)
+    automatic, warnings = chart_controls.seed_choices(message.frame, message.question)
     if automatic is not None:
         figure, draw_warnings = charts.render_chart(message.frame, automatic)
         if figure is not None:
@@ -1473,18 +1325,6 @@ def _render_chart_reset(message: ChatMessage, index: int) -> None:
             message.style = charts.ChartStyle()
             message.chart_warnings = warnings + draw_warnings
     st.rerun(scope="app")
-
-
-def _drop_stale_selection(key: str, options: list[str]) -> None:
-    """Forgets a stored selection the options no longer contain.
-
-    The panel's option lists depend on each other — the legend can't offer the column now
-    on the x axis, and the single-colour palette disappears the moment there are two series
-    — so a selection made a run ago can stop being offered. Dropping it lets the widget
-    fall back to its default instead of holding a value it can't show.
-    """
-    if key in st.session_state and st.session_state[key] not in options:
-        del st.session_state[key]
 
 
 def _render_transcript() -> None:
@@ -1517,6 +1357,9 @@ def _answer_pending_question(active_profile: dict) -> None:
         chat_store = None
         storage_warning = str(error)
 
+    # Read before the answer is appended, so it is genuinely the *previous* result.
+    previous_frame, previous_sql = chat_session.last_result()
+
     with st.chat_message(chat_session.ROLE_ASSISTANT):
         with st.spinner("Working through your data…"):
             answer = pipeline.answer(
@@ -1529,6 +1372,10 @@ def _answer_pending_question(active_profile: dict) -> None:
                 relationships=session.get_relationships(),
                 db=chat_store,
                 session_id=chat_session.agent_session_id(),
+                # Rescues "now show that as a pie chart" when the model answers it in
+                # prose instead of re-running the query the rows came from.
+                previous_frame=previous_frame,
+                previous_sql=previous_sql,
             )
 
     chat_session.clear_pending_question()

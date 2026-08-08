@@ -739,16 +739,71 @@ class TestChatPanel:
         assert next(box for box in app.text_input if box.key == "an_chart_title_1").value == ""
 
     def test_a_message_without_a_chart_offers_no_controls(self, tmp_path, monkeypatch):
-        answer = Answer(
-            question="list the rows",
-            text="Here they are.",
-            frame=pd.DataFrame({"sku": ["s1"], "total": [1.0]}),
-            outputs={"dataframe"},
-        )
-        app = self._in_chat(tmp_path, monkeypatch, answer=answer)
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._table_answer())
         app.chat_input[0].set_value("list the rows").run()
 
         assert not [box for box in app.selectbox if box.key == "an_chart_kind_1"]
+
+    def _table_answer(self) -> Answer:
+        """An answer that came back as a table: either the question didn't want a chart, or
+        one was wanted and couldn't be drawn and `pipeline` downgraded it."""
+        return Answer(
+            question="list the rows",
+            text="Here they are.",
+            frame=pd.DataFrame({"sku": ["s1", "s2"], "total": [1.0, 2.0]}),
+            outputs={"dataframe"},
+        )
+
+    def test_a_table_answer_offers_to_chart_it(self, tmp_path, monkeypatch):
+        """Without this the user's only recourse was to ask the question again in different
+        words, hoping the router judged it a chart this time."""
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._table_answer())
+        app.chat_input[0].set_value("list the rows").run()
+
+        assert not app.exception
+        assert app.button(key="an_chart_new_1")
+
+    def test_an_answer_that_already_has_a_chart_does_not_offer_the_button(self, tmp_path, monkeypatch):
+        """The Customize panel is the entry point there, and two doors to one panel is
+        noise."""
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._chart_answer())
+        app.chat_input[0].set_value("total basic by sku as a chart").run()
+
+        assert not [button for button in app.button if button.key == "an_chart_new_1"]
+
+    def test_generating_one_draws_it_and_opens_the_panel(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._table_answer())
+        app.chat_input[0].set_value("list the rows").run()
+        app.button(key="an_chart_new_1").click().run()
+
+        assert not app.exception
+        message = app.session_state[chat_session.AN_MESSAGES_KEY][1]
+        assert message.figure is not None
+        assert message.choices is not None
+        assert "chart" in message.outputs
+        assert [box for box in app.selectbox if box.key == "an_chart_kind_1"]
+
+    def test_a_result_with_nothing_to_plot_is_not_offered_the_button(self, tmp_path, monkeypatch):
+        answer = Answer(
+            question="list the names",
+            text="Here they are.",
+            frame=pd.DataFrame({"sku": ["s1"], "city": ["Pune"]}),
+            outputs={"dataframe"},
+        )
+        app = self._in_chat(tmp_path, monkeypatch, answer=answer)
+        app.chat_input[0].set_value("list the names").run()
+
+        assert not [button for button in app.button if button.key == "an_chart_new_1"]
+
+    def test_the_generated_chart_can_then_be_pinned_with_the_answer(self, tmp_path, monkeypatch):
+        app = self._in_chat(tmp_path, monkeypatch, answer=self._table_answer())
+        app.chat_input[0].set_value("list the rows").run()
+        app.button(key="an_chart_new_1").click().run()
+        next(button for button in app.button if button.key == "an_pin_1").click().run()
+
+        item = app.session_state[dashboard_session.DB_REPORT_KEY].pool[0]
+        assert item.has_chart()
+        assert item.has_table()
 
     def test_a_conversational_column_change_is_recorded_like_a_dialog_one(self, tmp_path, monkeypatch):
         """Requirement 7.5 replays one ordered statement list, so it must not matter which

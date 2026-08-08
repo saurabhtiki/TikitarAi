@@ -29,6 +29,8 @@ from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 
+from analyst import charts
+from app_pages import chart_controls
 from chat_types import session as chat_type_session
 from checks import actions as checks_actions
 from checks import db as checks_db
@@ -390,8 +392,29 @@ def _report_heading(check: Check, mode: str) -> str:
     return f"{check.display_name()}{suffix}"
 
 
+def _chart_figure(check: Check, shown: pd.DataFrame):
+    """The chart to pin beside the table, or None when this criteria has none.
+
+    Drawn fresh from the rows being pinned rather than reusing the figure on screen, so that
+    the report gets a chart of exactly what the report is getting — the two are the same
+    rows today, and this is what keeps them the same if that ever stops being true.
+
+    A chart that fails to draw costs the chart, never the save: the table, the counts and the
+    remarks are the report item, and the picture is the part that can be missing.
+    """
+    if check.chart is None:
+        return None
+    figure, warnings = charts.render_chart(shown, check.chart, check.chart_style)
+    if figure is None:
+        logger.warning(
+            "Criteria '%s' was saved without its chart: %s", check.display_name(), " ".join(warnings)
+        )
+    return figure
+
+
 def _save_to_report(check: Check, frame: pd.DataFrame, shown: pd.DataFrame, mode: str, user_id: int) -> None:
-    """Addtion.md step 6, plus the pin. One press, three things.
+    """Addtion.md step 6, plus the pin. One press: the run is frozen, the remarks are
+    written, and the rows — with this criteria's chart, if it has one — go to the report.
 
     Two frames, deliberately:
 
@@ -429,6 +452,7 @@ def _save_to_report(check: Check, frame: pd.DataFrame, shown: pd.DataFrame, mode
         comment=check.remarks,
         sql=check.sql,
         frame=shown,
+        figure=_chart_figure(check, shown),
     )
     logger.info("Saved criteria '%s' to the report as item %s.", check.display_name(), item.item_id)
 
@@ -458,13 +482,100 @@ def _remove_from_report(check: Check) -> None:
     logger.info("Removed criteria '%s' from the report.", check.display_name())
 
 
-def _render_results(check: Check, frame: pd.DataFrame, user_id: int) -> None:
-    """The result, the All/Failures/Passes filter, and Save.
+def _chart_keys(check: Check) -> chart_controls.ChartKeys:
+    """The widget namespace one criteria's chart panel owns."""
+    return chart_controls.ChartKeys(prefix="ck_chart", suffix=f"_{check.check_id}")
 
-    No chart here. Every criteria drawing its own was a chart of one rule's rows repeated
-    down the page; the single stacked summary at the foot of this tab compares all of them
-    at once, which is the picture an exception report actually wants.
+
+def _render_chart(check: Check, shown: pd.DataFrame) -> None:
+    """A chart of the rows on screen, built by the user rather than chosen for them.
+
+    No criteria gets a chart automatically — an automatic chart of one rule's rows, repeated
+    down the page for every rule, is the thing this tab deliberately doesn't do, and the
+    stacked summary at the foot of the tab is the picture that compares rules to each other.
+    A chart the user asks for and builds is a different object: "breaches by department" is
+    exactly what belongs beside the table in the report.
+
+    Drawn from `shown`, the same rows the table above holds, so a report item headed
+    "breaches only" cannot carry a chart that quietly includes the passes.
+
+    The figure is rebuilt on every rerun rather than stored: the frame is already in memory,
+    and `Check` holds the recipe so that saving and reloading a criteria set brings the chart
+    back — a Plotly figure would neither survive that round trip nor describe itself.
     """
+    kinds = charts.available_chart_types(shown)
+    if not kinds:
+        return
+
+    keys = _chart_keys(check)
+    if check.chart is None:
+        if st.button(
+            "Generate chart",
+            key=f"ck_chart_new_{check.check_id}",
+            icon=":material/insert_chart:",
+            help="Plot the rows above. Nothing is re-run and nothing is asked of the AI — you choose what it plots, and it is saved with this criteria.",
+        ):
+            chosen, _ = chart_controls.seed_choices(shown, check.criteria_text)
+            check.chart = chosen
+            check.chart_style = charts.ChartStyle()
+            st.rerun(scope="app")
+        return
+
+    figure, warnings = charts.render_chart(shown, check.chart, check.chart_style)
+    if figure is None:
+        st.caption(f":orange[{' '.join(warnings) or 'These rows cannot be charted.'}]")
+    else:
+        st.plotly_chart(figure, key=f"ck_chart_fig_{check.check_id}", width="stretch")
+        for warning in warnings:
+            st.caption(f":orange[{warning}]")
+
+    # `key` + `on_change` is what makes the open/closed state a widget rather than a fresh
+    # `expanded=False` on every run. Every control in here ends in `st.rerun`, so without it
+    # the panel shut itself the moment anything was changed in it.
+    with st.expander(
+        "Customize chart",
+        icon=":material/tune:",
+        key=f"ck_chart_panel_{check.check_id}",
+        on_change="rerun",
+    ):
+        data_tab, style_tab = st.tabs(["Data", "Style"], key=f"ck_chart_tabs_{check.check_id}")
+        with data_tab:
+            chosen = chart_controls.render_data_controls(shown, check.chart, kinds, keys)
+        with style_tab:
+            # `chosen or check.chart` because the style controls only need the shape of the
+            # chart to decide what to offer, and an empty Values box isn't a reason to empty
+            # the Style tab too.
+            chosen_style = chart_controls.render_style_controls(
+                shown,
+                chosen or check.chart,
+                check.chart_style or charts.ChartStyle(),
+                keys,
+                title_placeholder=chart_controls.figure_title(figure),
+            )
+        if st.button(
+            "Remove chart",
+            key=f"ck_chart_remove_{check.check_id}",
+            icon=":material/delete:",
+            help="Take the chart off this criteria. Its result table and everything else stay as they are — the report keeps the table on the next save.",
+        ):
+            check.chart = None
+            check.chart_style = None
+            chart_controls.clear_controls(keys)
+            st.rerun(scope="app")
+
+    if chosen is None:
+        st.caption(":orange[Pick at least one value to plot — showing the last chart until you do.]")
+        return
+    if chosen == check.chart and chosen_style == check.chart_style:
+        return
+
+    check.chart = chosen
+    check.chart_style = chosen_style
+    st.rerun(scope="app")
+
+
+def _render_results(check: Check, frame: pd.DataFrame, user_id: int) -> None:
+    """The result, the All/Failures/Passes filter, the chart, and Save."""
     # One pass over `criteria_met` for the headline and the table both, rather than
     # `filter_rows` twice — that materialized a whole DataFrame of passing rows to take its
     # length, on every rerun, for one integer.
@@ -492,6 +603,9 @@ def _render_results(check: Check, frame: pd.DataFrame, user_id: int) -> None:
         st.dataframe(shown.head(PREVIEW_ROWS), width="stretch", key=f"ck_result_{check.check_id}")
         if len(shown) > PREVIEW_ROWS:
             st.caption(f"Showing the first {PREVIEW_ROWS} of {len(shown)} rows. The report keeps all of them.")
+        # `shown` whole, not the previewed head: a chart of the first 500 of 20,000 breaches
+        # would be a different chart from the one the report is about to be given.
+        _render_chart(check, shown)
 
     already_saved = check.is_saved()
     save_column, remove_column = st.columns([1, 1])

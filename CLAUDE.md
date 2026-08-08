@@ -107,6 +107,51 @@ on `items`, because a column in a worksheet means something else. A row of one i
 with **no wrapper element**, so a report that never touches the toggle produces byte-for-byte
 the markup it always did and every preset and hand-edited stylesheet keeps working.
 
+Out of band, since: **charts a user builds, in Checks as well as Chat.** The Data/Style
+panel moved out of `chat_with_data.py` into `app_pages/chart_controls.py`, shared by both
+pages and keyed by a `ChartKeys(prefix, suffix)` so the widget names are unchanged
+(`an_chart_kind_1`, and now `ck_chart_kind_{check_id}`). `ChartKeys.created` records what it
+hands out, because the aggregation pickers are named after columns and a prefix sweep could
+not tell message 1's widgets from message 11's.
+
+`analyst/charts.py` gained three things, every default reproducing what it drew before:
+**Combo (bar + line)**, the one type Express can't express, so `_draw_combo` builds the
+figure by hand with an optional `secondary_y`; **per-column aggregation** (`Aggregation`,
+sum/count/average/min/max) applied by `_aggregate` as a pre-step that groups by x — and the
+legend column with it, or every series would be handed the same totals — whose derived
+columns then become the measures and run through cap → sort → draw untouched; and
+**`choices_to_dict`/`choices_from_dict`** plus the style pair, the module's first
+serialization, tolerant on the way in because a stored chart is a setting to honour as far as
+it still makes sense, not input to validate. Reading it is what §7.5's `task_json` will want
+too. Aggregating widens the Values box to *every* column, since counting turns a text column
+into a number — which is how a result with no numeric column at all becomes a chart.
+
+A criteria now offers **Generate chart** under its result, and Save pins the figure beside
+the table (`_chart_figure`, drawn from `shown` so a "breaches only" item cannot carry a chart
+including the passes). This reverses the earlier "no chart of its own" call for the
+*user-built* case only — an **automatic** chart per criteria is still not drawn, because that
+was one rule's rows repeated down the page. The spec lives on `Check.chart` /
+`Check.chart_style` and goes into `checks_json` with no `SCHEMA_VERSION` bump, on the same
+grounds as `summary`. The style is only rebuilt when there is a chart to wear it. Chat's
+tables gained the same button: `routing.classify_output` judging a question to want a table,
+or a wanted chart failing to draw, both left rows on screen with no route to a chart at all.
+An already-pinned chat answer keeps its chart-less pinned copy — chat pins are one-shot
+snapshots, and discard-then-repin is the existing way out.
+
+Three follow-ups to that, from using it. **Pie is no longer withheld from a result with more
+than `MAX_PIE_SLICES` rows** — `_cap_rows` already trims a pie to its top slices and says so,
+and the row count was measured *before* aggregating, so the gate hid the type from exactly
+the case it suits. A negative value still takes Pie off the list: that one has no honest
+reading. **Aggregation starts on**, but in `chart_controls.seed_choices` rather than on
+`ChartChoices`, whose default has to stay off — it is what every spec written before the
+field reads back as, and what `pipeline`'s automatic chart keeps, whose SQL has already
+grouped. Scatter is exempt (grouping a continuous x destroys the relationship). And the
+**Customize panel is a stateful expander** (`key=` + `on_change="rerun"`): every control in
+it ends in `st.rerun`, so a plain expander re-declared `expanded=False` and shut itself on
+every change. `AppTest` can't drive that state — it rebuilds widget state from *widget*
+nodes and an expander isn't one — so the test asserts the stamped element id, which only a
+stateful expander carries.
+
 Known pre-existing failures, not from this stage (they fail with Stage 9's page changes
 stashed): `test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body`
 and `TestRelationships::test_confirming_a_bad_link_keeps_it_declared_but_unenforced`.

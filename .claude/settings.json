@@ -55,7 +55,10 @@
       "PowerShell(uv run pytest tests/test_chat_type_page.py -q 2>&1)",
       "Bash(python -m pytest tests/test_chat_type_db.py tests/test_checks_db.py -q)",
       "PowerShell(uv run pytest tests/test_chat_type_page.py tests/test_chat_type_matching.py tests/test_chat_type_db.py tests/test_chat_type_model.py -q 2>&1)",
-      "PowerShell(uv run pytest \"tests/test_chat_type_page.py::TestSelectingAfterTheFilesAreLoaded::test_the_saved_types_are_applied_to_files_uploaded_first\" -q 2>&1)"
+      "PowerShell(uv run pytest \"tests/test_chat_type_page.py::TestSelectingAfterTheFilesAreLoaded::test_the_saved_types_are_applied_to_files_uploaded_first\" -q 2>&1)",
+      "PowerShell(uv run pytest tests/test_analyst_agent.py -q 2>&1)",
+      "PowerShell(uv run pytest tests/test_chat_with_data_page.py tests/test_analyst_routing.py tests/test_analyst_charts.py -q 2>&1)",
+      "PowerShell(uv run pytest tests/test_analyst_last_result.py -q 2>&1)"
     ]
   }
 }

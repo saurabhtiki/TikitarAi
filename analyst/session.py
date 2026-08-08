@@ -133,6 +133,22 @@ def _trim_payloads(messages: list[ChatMessage]) -> None:
         message.release_payload()
 
 
+def last_result() -> tuple[pd.DataFrame | None, str | None]:
+    """The rows and SQL of the most recent answer that queried anything, or `(None, None)`.
+
+    What "show that as a chart" refers to when the model declines to re-run the query
+    itself — see `analyst.pipeline._chart_the_previous_result`. Only answers still holding
+    their payload qualify: `_trim_payloads` releases the older ones, and a question about
+    rows that scrolled that far out of the transcript is not a follow-up any more.
+    """
+    for message in reversed(get_messages()):
+        if message.role != ROLE_ASSISTANT or message.is_error:
+            continue
+        if message.frame is not None and not message.frame.empty:
+            return message.frame, message.sql
+    return None, None
+
+
 def clear_messages() -> None:
     """Empties the transcript. Also drops any question still waiting to be answered, so
     clearing mid-run doesn't leave one to be answered into an empty chat."""

@@ -9,6 +9,14 @@ import json
 import pandas as pd
 import pytest
 
+from analyst.charts import (
+    AGG_COUNT,
+    AGG_SUM,
+    CHART_COMBO,
+    Aggregation,
+    ChartChoices,
+    ChartStyle,
+)
 from checks.exceptions import ChecksStorageError
 from checks.model import (
     COLUMN_MET,
@@ -180,3 +188,49 @@ class TestSerialisation:
 
     def test_a_set_with_no_checks_key_loads_empty(self):
         assert from_json(json.dumps({"version": 1, "persona": "x"})).checks == []
+
+
+class TestTheStoredChart:
+    """A criteria's chart is stored the way its SQL is: as the recipe, not the result. That
+    is what makes re-running a saved set against next month's file redraw the same chart."""
+
+    def _with_a_chart(self):
+        check_set = CheckSet(name="Payroll")
+        check = add_check(check_set, "Bonus cap")
+        check.chart = ChartChoices(
+            kind=CHART_COMBO,
+            x="department",
+            aggregate_by_x=True,
+            aggregations=[Aggregation("basic", AGG_SUM), Aggregation("employee", AGG_COUNT)],
+            line_measures=["Count of employee"],
+            secondary_axis=True,
+        )
+        check.chart_style = ChartStyle(title="Breaches by department", show_values=True)
+        return check_set
+
+    def test_it_survives_the_round_trip(self):
+        restored = from_json(to_json(self._with_a_chart()))
+        original = self._with_a_chart().checks[0]
+        assert restored.checks[0].chart == original.chart
+        assert restored.checks[0].chart_style == original.chart_style
+
+    def test_a_criteria_with_no_chart_stays_that_way(self):
+        restored = from_json(to_json(_populated_set()))
+        assert restored.checks[0].chart is None
+        assert restored.checks[0].chart_style is None
+
+    def test_a_set_saved_before_charts_existed_still_loads(self):
+        """Added without a version bump, on the same grounds as `summary`: its absence reads
+        back as no chart, which is what such a set had."""
+        restored = from_json(
+            json.dumps({"version": 1, "checks": [{"check_id": "a1", "name": "Rule"}]})
+        )
+        assert restored.checks[0].chart is None
+        assert restored.checks[0].name == "Rule"
+
+    def test_a_style_with_no_chart_to_wear_is_not_rebuilt(self):
+        """Style with nothing to draw would be state with no visible cause."""
+        restored = from_json(
+            json.dumps({"version": 1, "checks": [{"check_id": "a1", "chart_style": {"title": "x"}}]})
+        )
+        assert restored.checks[0].chart_style is None

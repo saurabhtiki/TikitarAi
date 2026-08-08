@@ -30,6 +30,14 @@ from datetime import datetime
 
 import pandas as pd
 
+from analyst.charts import (
+    ChartChoices,
+    ChartStyle,
+    choices_from_dict,
+    choices_to_dict,
+    style_from_dict,
+    style_to_dict,
+)
 from checks.exceptions import ChecksStorageError
 
 logger = logging.getLogger(__name__)
@@ -205,6 +213,10 @@ class Check:
             retry.
         saved_run: the locked-in run, or None. Its presence is the only thing that puts
             this criteria into the report.
+        chart / chart_style: how to draw this criteria's result, or None for no chart. Two
+            values rather than a drawn figure, for the same reason `sql` is stored rather
+            than the rows it returned: a recipe survives being saved and re-run next month,
+            where a picture of last month's numbers doesn't.
 
     There is deliberately no `pinned_item_id` here, unlike `analyst.session.ChatMessage`.
     Which report item this criteria owns is answered by `PinnedItem.source_id`, looked up
@@ -221,6 +233,8 @@ class Check:
     saved_run: SavedRun | None = None
     remarks: str = ""
     actions: list[ActionDraft] = field(default_factory=list)
+    chart: ChartChoices | None = None
+    chart_style: ChartStyle | None = None
 
     def display_name(self) -> str:
         """What to label this criteria. Never empty."""
@@ -341,6 +355,8 @@ def _check_to_dict(check: Check) -> dict:
             "fail_count": run.fail_count,
         },
         "actions": [_action_to_dict(action) for action in check.actions],
+        "chart": choices_to_dict(check.chart),
+        "chart_style": style_to_dict(check.chart_style),
     }
 
 
@@ -382,6 +398,10 @@ def _check_from_dict(raw: dict) -> Check:
     # A reloaded criteria has no `saved_run`: its rows were never stored, and rebuilding one
     # with an empty frame would put an item claiming zero failures into the report. The
     # stored SQL comes back so the user can re-test it in one press against today's data.
+    #
+    # The chart comes back with it, and is why the style is only rebuilt when there is a
+    # chart to wear it: a style with nothing to draw would be state with no visible cause.
+    chart = choices_from_dict(raw.get("chart"))
     return Check(
         check_id=str(raw.get("check_id") or new_id()),
         name=str(raw.get("name") or ""),
@@ -391,6 +411,8 @@ def _check_from_dict(raw: dict) -> Check:
         sql=raw.get("sql") or None,
         remarks=str(raw.get("remarks") or ""),
         actions=[_action_from_dict(action) for action in raw.get("actions") or []],
+        chart=chart,
+        chart_style=style_from_dict(raw.get("chart_style")) if chart is not None else None,
     )
 
 

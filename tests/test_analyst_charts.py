@@ -251,9 +251,18 @@ class TestAvailableChartTypes:
         frame = pd.DataFrame({"region": ["N", "S"], "profit": [10, -5]})
         assert charts.CHART_PIE not in charts.available_chart_types(frame)
 
-    def test_too_many_rows_do_not_offer_a_pie(self):
+    def test_many_rows_still_offer_a_pie_and_are_trimmed_to_the_top_slices(self):
+        """Row count is a narrowing, not a veto — unlike a negative value, which has no
+        honest reading. Withholding the type here also withheld it from the aggregated case,
+        where those 20 rows become three slices."""
         frame = pd.DataFrame({"region": [f"r{n}" for n in range(20)], "sales": range(20)})
-        assert charts.CHART_PIE not in charts.available_chart_types(frame)
+        assert charts.CHART_PIE in charts.available_chart_types(frame)
+
+        figure, warnings = charts.render_chart(
+            frame, charts.ChartChoices(kind=charts.CHART_PIE, x="region", measures=["sales"])
+        )
+        assert len(figure.data[0].labels) == charts.MAX_PIE_SLICES
+        assert any("slices" in warning for warning in warnings)
 
     def test_an_unchartable_result_offers_nothing(self):
         frame = pd.DataFrame({"name": ["Ana"], "city": ["Pune"]})
@@ -889,3 +898,303 @@ class TestNeverRaises:
         """A chart is one of three outputs and must not be able to cost the other two."""
         figure, warnings = charts.build_chart(frame, "chart it")
         assert figure is not None or warnings
+
+
+class TestAggregation:
+    """Collapsing repeated x values, so a result with one row per record can be charted as
+    a total per month without going back to the model for different SQL."""
+
+    FRAME = pd.DataFrame(
+        {
+            "month": ["Jan", "Jan", "Feb"],
+            "region": ["N", "S", "N"],
+            "amount": [10.0, 5.0, 7.0],
+            "reference": ["a", "b", "c"],
+        }
+    )
+
+    def _totals(self, figure):
+        return dict(zip(figure.data[0].x, figure.data[0].y))
+
+    def test_rows_sharing_an_x_value_are_summed(self):
+        choices = charts.ChartChoices(
+            kind=charts.CHART_BAR,
+            x="month",
+            aggregate_by_x=True,
+            aggregations=[charts.Aggregation("amount", charts.AGG_SUM)],
+        )
+        figure, warnings = charts.render_chart(self.FRAME, choices)
+        assert self._totals(figure) == {"Jan": 15.0, "Feb": 7.0}
+        assert warnings == []
+
+    @pytest.mark.parametrize(
+        ("function", "expected"),
+        [
+            (charts.AGG_COUNT, {"Jan": 2, "Feb": 1}),
+            (charts.AGG_AVERAGE, {"Jan": 7.5, "Feb": 7.0}),
+            (charts.AGG_MINIMUM, {"Jan": 5.0, "Feb": 7.0}),
+            (charts.AGG_MAXIMUM, {"Jan": 10.0, "Feb": 7.0}),
+        ],
+    )
+    def test_each_function_computes_what_it_says(self, function, expected):
+        choices = charts.ChartChoices(
+            kind=charts.CHART_BAR,
+            x="month",
+            aggregate_by_x=True,
+            aggregations=[charts.Aggregation("amount", function)],
+        )
+        figure, _ = charts.render_chart(self.FRAME, choices)
+        assert self._totals(figure) == expected
+
+    def test_several_functions_on_one_column_become_several_series(self):
+        """The sum and the count of the same amount is the shape a combo chart wants, and
+        neither is derivable from the other."""
+        choices = charts.ChartChoices(
+            kind=charts.CHART_BAR,
+            x="month",
+            aggregate_by_x=True,
+            aggregations=[
+                charts.Aggregation("amount", charts.AGG_SUM),
+                charts.Aggregation("amount", charts.AGG_COUNT),
+            ],
+        )
+        figure, _ = charts.render_chart(self.FRAME, choices)
+        assert [trace.name for trace in figure.data] == ["Sum of amount", "Count of amount"]
+
+    def test_a_text_column_can_be_counted(self):
+        """The reason the Values box widens under aggregation: counting rows turns a column
+        of names into a number."""
+        choices = charts.ChartChoices(
+            kind=charts.CHART_BAR,
+            x="month",
+            aggregate_by_x=True,
+            aggregations=[charts.Aggregation("reference", charts.AGG_COUNT)],
+        )
+        figure, warnings = charts.render_chart(self.FRAME, choices)
+        assert self._totals(figure) == {"Jan": 2, "Feb": 1}
+        assert warnings == []
+
+    def test_a_text_column_cannot_be_summed_and_is_dropped_with_a_reason(self):
+        choices = charts.ChartChoices(
+            kind=charts.CHART_BAR,
+            x="month",
+            aggregate_by_x=True,
+            aggregations=[
+                charts.Aggregation("reference", charts.AGG_SUM),
+                charts.Aggregation("amount", charts.AGG_SUM),
+            ],
+        )
+        figure, warnings = charts.render_chart(self.FRAME, choices)
+        # One trace left, and it is the amount: a single-measure Express chart names itself
+        # on the axis rather than in the legend.
+        assert len(figure.data) == 1
+        assert figure.layout.yaxis.title.text == "Sum of amount"
+        assert any("isn't a number" in warning for warning in warnings)
+
+    def test_a_legend_column_joins_the_grouping_so_each_series_keeps_its_own_totals(self):
+        choices = charts.ChartChoices(
+            kind=charts.CHART_BAR,
+            x="month",
+            colour="region",
+            aggregate_by_x=True,
+            aggregations=[charts.Aggregation("amount", charts.AGG_SUM)],
+        )
+        figure, _ = charts.render_chart(self.FRAME, choices)
+        assert {trace.name for trace in figure.data} == {"N", "S"}
+
+    def test_the_toggle_with_nothing_chosen_asks_rather_than_charting_nothing(self):
+        choices = charts.ChartChoices(kind=charts.CHART_BAR, x="month", aggregate_by_x=True)
+        figure, warnings = charts.render_chart(self.FRAME, choices)
+        assert figure is None
+        assert "Pick at least one value" in warnings[0]
+
+    def test_leaving_the_toggle_off_plots_the_rows_as_they_stand(self):
+        """The default has to reproduce the chart this module drew before aggregation
+        existed, or every chart in every transcript changes underneath its reader."""
+        choices = charts.ChartChoices(kind=charts.CHART_BAR, x="month", measures=["amount"])
+        figure, warnings = charts.render_chart(self.FRAME, choices)
+        assert list(figure.data[0].y) == [10.0, 7.0, 5.0]  # unaggregated, biggest first
+        assert warnings == []
+
+
+class TestComboCharts:
+    FRAME = pd.DataFrame({"month": ["Jan", "Feb"], "amount": [10.0, 7.0], "records": [3, 2]})
+
+    def test_it_draws_bars_and_a_line_together(self):
+        choices = charts.ChartChoices(
+            kind=charts.CHART_COMBO,
+            x="month",
+            measures=["amount", "records"],
+            line_measures=["records"],
+        )
+        figure, warnings = charts.render_chart(self.FRAME, choices)
+        assert [trace.type for trace in figure.data] == ["bar", "scatter"]
+        assert warnings == []
+
+    def test_the_second_axis_is_only_added_when_asked_for(self):
+        plain = charts.ChartChoices(
+            kind=charts.CHART_COMBO,
+            x="month",
+            measures=["amount", "records"],
+            line_measures=["records"],
+        )
+        split = charts.ChartChoices(
+            kind=charts.CHART_COMBO,
+            x="month",
+            measures=["amount", "records"],
+            line_measures=["records"],
+            secondary_axis=True,
+        )
+        assert "yaxis2" not in charts.render_chart(self.FRAME, plain)[0].layout.to_plotly_json()
+        assert charts.render_chart(self.FRAME, split)[0].layout.yaxis2.title.text == "Records"
+
+    def test_picking_no_line_puts_the_last_measure_on_it(self):
+        choices = charts.ChartChoices(
+            kind=charts.CHART_COMBO, x="month", measures=["amount", "records"]
+        )
+        figure, _ = charts.render_chart(self.FRAME, choices)
+        assert [trace.type for trace in figure.data] == ["bar", "scatter"]
+        assert figure.data[1].name == "Records"
+
+    def test_one_measure_falls_back_to_bars_rather_than_refusing(self):
+        choices = charts.ChartChoices(kind=charts.CHART_COMBO, x="month", measures=["amount"])
+        figure, warnings = charts.render_chart(self.FRAME, choices)
+        assert [trace.type for trace in figure.data] == ["bar"]
+        assert any("needs two measures" in warning for warning in warnings)
+
+    def test_marking_everything_as_a_line_falls_back_to_a_line_chart(self):
+        choices = charts.ChartChoices(
+            kind=charts.CHART_COMBO,
+            x="month",
+            measures=["amount", "records"],
+            line_measures=["amount", "records"],
+        )
+        figure, warnings = charts.render_chart(self.FRAME, choices)
+        assert [trace.type for trace in figure.data] == ["scatter", "scatter"]
+        assert any("line chart" in warning for warning in warnings)
+
+    def test_a_legend_split_is_dropped_because_it_cannot_say_which_half_is_the_line(self):
+        frame = pd.DataFrame(
+            {
+                "month": ["Jan", "Jan"],
+                "region": ["N", "S"],
+                "amount": [1.0, 2.0],
+                "records": [1, 2],
+            }
+        )
+        choices = charts.ChartChoices(
+            kind=charts.CHART_COMBO,
+            x="month",
+            measures=["amount", "records"],
+            colour="region",
+            line_measures=["records"],
+        )
+        figure, warnings = charts.render_chart(frame, choices)
+        assert [trace.type for trace in figure.data] == ["bar", "scatter"]
+        assert any("Dropping the 'Region' legend" in warning for warning in warnings)
+
+    def test_labelling_the_values_does_not_hand_a_bar_a_scatter_position(self):
+        """A scatter's 'top center' raises on a bar, so the two families are labelled
+        separately rather than by one `update_traces`."""
+        choices = charts.ChartChoices(
+            kind=charts.CHART_COMBO,
+            x="month",
+            measures=["amount", "records"],
+            line_measures=["records"],
+        )
+        figure, _ = charts.render_chart(self.FRAME, choices, charts.ChartStyle(show_values=True))
+        assert figure.data[0].textposition == "outside"
+        assert "text" in figure.data[1].mode
+
+    def test_it_is_offered_on_a_single_numeric_column(self):
+        """Unlike a scatter: the second series can be made by aggregating the same column a
+        second way."""
+        frame = pd.DataFrame({"month": ["Jan"], "amount": [1.0]})
+        assert charts.CHART_COMBO in charts.available_chart_types(frame)
+
+    def test_the_line_picker_names_the_series_as_the_legend_will(self):
+        choices = charts.ChartChoices(
+            kind=charts.CHART_COMBO,
+            x="month",
+            aggregate_by_x=True,
+            aggregations=[
+                charts.Aggregation("amount", charts.AGG_SUM),
+                charts.Aggregation("amount", charts.AGG_COUNT),
+            ],
+        )
+        assert charts.series_names(self.FRAME, choices) == ["Sum of amount", "Count of amount"]
+
+
+class TestPickerOptions:
+    FRAME = pd.DataFrame({"month": ["Jan"], "amount": [1.0], "records": [2]})
+
+    def test_a_scatter_can_only_put_a_number_on_its_x_axis(self):
+        assert charts.axis_options(self.FRAME, charts.CHART_SCATTER) == ["amount", "records"]
+        assert charts.axis_options(self.FRAME, charts.CHART_BAR) == ["month", "amount", "records"]
+
+    def test_aggregating_widens_the_values_box_to_every_column(self):
+        assert charts.value_options(self.FRAME, aggregated=False) == ["amount", "records"]
+        assert charts.value_options(self.FRAME, aggregated=True) == ["month", "amount", "records"]
+
+    def test_a_text_column_is_not_offered_a_sum_or_an_average(self):
+        assert charts.aggregation_options(self.FRAME, "month") == [
+            charts.AGG_COUNT,
+            charts.AGG_MINIMUM,
+            charts.AGG_MAXIMUM,
+        ]
+        assert charts.AGG_SUM in charts.aggregation_options(self.FRAME, "amount")
+
+    def test_a_column_offers_to_total_a_number_and_to_count_anything_else(self):
+        assert charts.default_aggregation(self.FRAME, "amount") == charts.AGG_SUM
+        assert charts.default_aggregation(self.FRAME, "month") == charts.AGG_COUNT
+
+
+class TestStoringAChart:
+    """A chart is stored as its choices, not its picture — which is what lets a criteria
+    redraw the same chart against next month's file."""
+
+    def test_the_choices_survive_a_round_trip(self):
+        choices = charts.ChartChoices(
+            kind=charts.CHART_COMBO,
+            x="month",
+            colour="region",
+            aggregate_by_x=True,
+            aggregations=[
+                charts.Aggregation("amount", charts.AGG_SUM),
+                charts.Aggregation("reference", charts.AGG_COUNT),
+            ],
+            line_measures=["Count of reference"],
+            secondary_axis=True,
+        )
+        assert charts.choices_from_dict(charts.choices_to_dict(choices)) == choices
+
+    def test_the_style_survives_a_round_trip(self):
+        style = charts.ChartStyle(
+            title="Mine",
+            palette=charts.PALETTE_SAFE,
+            series=charts.SERIES_STACKED,
+            show_values=True,
+            show_legend=False,
+            sort=charts.SORT_LABEL,
+            top_n=5,
+            height=600,
+        )
+        assert charts.style_from_dict(charts.style_to_dict(style)) == style
+
+    def test_an_untouched_style_survives_a_round_trip(self):
+        assert charts.style_from_dict(charts.style_to_dict(charts.ChartStyle())) == charts.ChartStyle()
+
+    def test_nothing_stored_reads_back_as_no_chart(self):
+        assert charts.choices_to_dict(None) is None
+        assert charts.choices_from_dict(None) is None
+        assert charts.choices_from_dict({}) is None
+
+    def test_an_unrecognised_value_falls_back_rather_than_costing_the_whole_chart(self):
+        """A stored chart is a setting to honour as far as it still makes sense, not user
+        input to reject."""
+        restored = charts.choices_from_dict(
+            {"kind": "hologram", "x": "month", "measures": ["amount"]}
+        )
+        assert restored.kind == charts.CHART_BAR
+        assert restored.x == "month"
+        assert charts.style_from_dict({"palette": "neon"}).palette == charts.PALETTE_DEFAULT

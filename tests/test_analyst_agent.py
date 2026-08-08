@@ -226,6 +226,63 @@ class TestPipelineQuestions:
         assert answer.text
 
 
+class TestChartingThePreviousResult:
+    """A chart request the model answers in prose still has rows to plot.
+
+    'Show that as a pie chart' is a follow-up about rows already on screen; a model that
+    reads it as a question about its own abilities runs no query, and without this the
+    user loses the one output they asked for.
+    """
+
+    PREVIOUS = pd.DataFrame({"department": ["Sales", "Ops"], "total": [4000.0, 2000.0]})
+
+    @pytest.fixture(autouse=True)
+    def model_answers_without_querying(self):
+        StubAgent.queries = []
+        StubAgent.reply = "I don't have the ability to generate charts."
+
+    def test_the_previous_rows_are_charted(self, connection):
+        answer = pipeline.answer(
+            PROFILE,
+            connection,
+            "schema",
+            "can u show pie chart of above",
+            previous_frame=self.PREVIOUS,
+            previous_sql="SELECT department, sum(basic) AS total FROM salaries GROUP BY department",
+        )
+        assert answer.figure is not None
+        assert answer.frame is self.PREVIOUS
+        assert answer.sql.startswith("SELECT department")
+
+    def test_the_refusal_is_not_shown_as_the_answer(self, connection):
+        answer = pipeline.answer(
+            PROFILE, connection, "schema", "chart of above", previous_frame=self.PREVIOUS
+        )
+        assert "ability" not in answer.text
+        assert any("previous answer's rows" in warning for warning in answer.warnings)
+        assert analyst_agent.NO_QUERY_WARNING not in answer.warnings
+
+    def test_without_a_previous_result_nothing_is_invented(self, connection):
+        answer = pipeline.answer(PROFILE, connection, "schema", "chart of above")
+        assert answer.figure is None
+        assert answer.frame is None
+
+    def test_an_ordinary_question_never_borrows_the_previous_rows(self, connection, stub_commentary):
+        """The rescue is for chart requests only — every other answer that ran no query is
+        the model saying something about the schema, not an answer about these rows."""
+        answer = pipeline.answer(
+            PROFILE, connection, "schema", "explain that", previous_frame=self.PREVIOUS
+        )
+        assert answer.frame is None
+
+    def test_a_fresh_query_wins_over_the_previous_rows(self, connection):
+        StubAgent.queries = ["SELECT department, sum(basic) AS total FROM salaries GROUP BY department"]
+        answer = pipeline.answer(
+            PROFILE, connection, "schema", "chart total basic by department", previous_frame=self.PREVIOUS
+        )
+        assert answer.frame is not self.PREVIOUS
+
+
 class TestPipelineColumnChanges:
     """Requirement 5.4's conversational door onto the same engine functions."""
 

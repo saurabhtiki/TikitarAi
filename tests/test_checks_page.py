@@ -177,11 +177,14 @@ class TestTestingAndSaving:
             app.session_state[dashboard_session.DB_REPORT_KEY].pool
         )
 
-    def test_no_criteria_draws_a_chart_of_its_own(self, tmp_path, monkeypatch):
-        """Per-criteria charts were one rule's rows drawn again under the table they came
-        from. The set-level summary at the foot of the tab is the chart now."""
+    def test_no_criteria_draws_a_chart_until_one_is_asked_for(self, tmp_path, monkeypatch):
+        """An *automatic* chart per criteria is one rule's rows drawn again under the table
+        they came from, for every rule down the page. A chart the user asks for and builds
+        is a different object, so the button is offered and nothing is drawn until it."""
         app, check_id = self._tested(tmp_path, monkeypatch)
-        assert not [box for box in app.checkbox if box.key == f"ck_chart_{check_id}"]
+        assert app.session_state[checks_session.CK_SET_KEY].checks[0].chart is None
+        assert not [box for box in app.selectbox if box.key == f"ck_chart_kind_{check_id}"]
+        assert app.button(key=f"ck_chart_new_{check_id}")
 
     def test_saving_pins_it_with_the_criteria_name_as_its_heading(self, tmp_path, monkeypatch):
         app, check_id = self._tested(tmp_path, monkeypatch)
@@ -691,3 +694,163 @@ class TestStartOver:
         assert not app.exception
         assert checks_session.CK_SET_KEY not in app.session_state
         assert [row["name"] for row in checks_db.list_sets(1)] == ["Payroll checks"]
+
+
+class TestTheCriteriaChart:
+    """A chart the user builds under a criteria's result, and pins with it.
+
+    The set-level summary at the foot of the tab compares the rules to each other; this is
+    the picture of one rule's own rows, which is the other half of what an exception report
+    wants and the half that has to be asked for.
+    """
+
+    def _tested(self, tmp_path, monkeypatch):
+        app = _add_criteria(_loaded(tmp_path, monkeypatch), "Bonus cap")
+        check_id = _check_ids(app)[0]
+        app.text_area(key=f"ck_text_{check_id}").set_value("Bonus must be at most 5% of basic.").run()
+        _stub_test(monkeypatch)
+        app.button(key=f"ck_test_{check_id}").click().run()
+        monkeypatch.setattr(checks_view.checks_remarks, "write_remarks", lambda *a, **k: ("", []))
+        return app, check_id
+
+    def _charted(self, tmp_path, monkeypatch):
+        app, check_id = self._tested(tmp_path, monkeypatch)
+        app.button(key=f"ck_chart_new_{check_id}").click().run()
+        return app, check_id
+
+    def test_generating_one_opens_the_panel_pre_filled(self, tmp_path, monkeypatch):
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        assert not app.exception
+        assert app.session_state[checks_session.CK_SET_KEY].checks[0].chart is not None
+        assert app.selectbox(key=f"ck_chart_kind_{check_id}")
+        assert app.multiselect(key=f"ck_chart_y_{check_id}").value
+
+    def test_the_panel_offers_the_combo_type_and_the_aggregate_toggle(self, tmp_path, monkeypatch):
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        # AppTest reports the formatted labels, which is what the user actually picks from.
+        combo = checks_view.charts.CHART_LABELS[checks_view.charts.CHART_COMBO]
+        assert combo in app.selectbox(key=f"ck_chart_kind_{check_id}").options
+        assert app.toggle(key=f"ck_chart_agg_{check_id}") is not None
+
+    def test_a_generated_chart_arrives_already_aggregated(self, tmp_path, monkeypatch):
+        """A criteria result is one row per employee, so the first thing worth seeing is the
+        total per department rather than a bar per person."""
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        assert app.toggle(key=f"ck_chart_agg_{check_id}").value is True
+        assert app.session_state[checks_session.CK_SET_KEY].checks[0].chart.aggregations
+
+    def test_the_panel_keeps_its_open_state_as_a_widget(self, tmp_path, monkeypatch):
+        """Every control in the panel ends in `st.rerun`, so an expander that took its state
+        from the call would shut itself on every change. Registering it as a widget — `key`
+        plus `on_change` — is what makes the browser hand the open state back each run.
+
+        Asserted through the id rather than by opening it: `AppTest` rebuilds widget state
+        from the tree's *widget* nodes each run, and an expander isn't one, so the open state
+        can't be driven from a test. The id is only stamped on a stateful expander, so it is
+        the part of the mechanism this suite can hold in place.
+        """
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        # An expander given an icon arrives as a Status node in the test tree.
+        panel = next(block for block in app.status if block.label == "Customize chart")
+        assert panel.proto.id
+
+    def test_the_aggregate_toggle_asks_what_to_compute_for_each_value(self, tmp_path, monkeypatch):
+        """The function pickers are keyed by column name, so they only exist once a column is
+        chosen — which is why `ChartKeys` records what it hands out instead of listing it."""
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        app.toggle(key=f"ck_chart_agg_{check_id}").set_value(True).run()
+        app.multiselect(key=f"ck_chart_y_{check_id}").set_value(["criteria_result"]).run()
+
+        assert not app.exception
+        assert app.multiselect(key=f"ck_chart_fn_criteria_result_{check_id}").value == ["sum"]
+        chart = app.session_state[checks_session.CK_SET_KEY].checks[0].chart
+        assert chart.aggregate_by_x
+        assert [(a.column, a.function) for a in chart.aggregations] == [("criteria_result", "sum")]
+
+    def test_aggregating_lets_a_text_column_be_counted(self, tmp_path, monkeypatch):
+        """A criteria result whose only number is `criteria_result` still charts as "how many
+        breaches per employee" — which is the count of a text column."""
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        app.toggle(key=f"ck_chart_agg_{check_id}").set_value(True).run()
+
+        assert "criteria_met" in app.multiselect(key=f"ck_chart_y_{check_id}").options
+        app.multiselect(key=f"ck_chart_y_{check_id}").set_value(["criteria_met"]).run()
+        assert app.multiselect(key=f"ck_chart_fn_criteria_met_{check_id}").value == ["count"]
+
+    def test_changing_a_control_is_kept_on_the_criteria(self, tmp_path, monkeypatch):
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        app.selectbox(key=f"ck_chart_kind_{check_id}").set_value(
+            checks_view.charts.CHART_BAR_HORIZONTAL
+        ).run()
+        assert app.session_state[checks_session.CK_SET_KEY].checks[0].chart.kind == (
+            checks_view.charts.CHART_BAR_HORIZONTAL
+        )
+
+    def test_two_criteria_get_their_own_chart_widgets(self, tmp_path, monkeypatch):
+        """The same trap the rest of this page has: a key shared between two criteria keeps
+        showing whichever was created first."""
+        app, first = self._charted(tmp_path, monkeypatch)
+        app = _add_criteria(app, "PF mismatch")
+        second = _check_ids(app)[1]
+        app.text_area(key=f"ck_text_{second}").set_value("PF must match.").run()
+        app.button(key=f"ck_test_{second}").click().run()
+        app.button(key=f"ck_chart_new_{second}").click().run()
+
+        assert app.selectbox(key=f"ck_chart_kind_{first}")
+        assert app.selectbox(key=f"ck_chart_kind_{second}")
+
+    def test_saving_pins_the_chart_beside_the_table(self, tmp_path, monkeypatch):
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        app.button(key=f"ck_save_{check_id}").click().run()
+
+        item = app.session_state[dashboard_session.DB_REPORT_KEY].pool[0]
+        assert item.has_chart()
+        assert item.has_table()
+
+    def test_saving_without_one_pins_the_table_alone(self, tmp_path, monkeypatch):
+        app, check_id = self._tested(tmp_path, monkeypatch)
+        app.button(key=f"ck_save_{check_id}").click().run()
+
+        item = app.session_state[dashboard_session.DB_REPORT_KEY].pool[0]
+        assert not item.has_chart()
+        assert item.has_table()
+
+    def test_removing_the_chart_and_saving_again_leaves_the_item_table_only(self, tmp_path, monkeypatch):
+        """The item is updated in place, so an item that keeps a chart the criteria no longer
+        has would be a report showing something the user deleted."""
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        app.button(key=f"ck_save_{check_id}").click().run()
+        assert app.session_state[dashboard_session.DB_REPORT_KEY].pool[0].has_chart()
+
+        app.button(key=f"ck_chart_remove_{check_id}").click().run()
+        app.button(key=f"ck_save_{check_id}").click().run()
+
+        pool = app.session_state[dashboard_session.DB_REPORT_KEY].pool
+        assert len(pool) == 1
+        assert not pool[0].has_chart()
+
+    def test_the_chart_follows_the_filter_the_table_is_showing(self, tmp_path, monkeypatch):
+        """A report item headed "breaches only" must not carry a chart that quietly includes
+        the passes — the two are drawn from the same rows on purpose."""
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        app.segmented_control(key=f"ck_filter_{check_id}").set_value("Failures").run()
+        app.button(key=f"ck_save_{check_id}").click().run()
+
+        item = app.session_state[dashboard_session.DB_REPORT_KEY].pool[0]
+        assert len(item.frame) == 1
+        assert len(item.figure.data[0].x) == 1
+
+    def test_the_chart_is_stored_with_the_set_and_comes_back_with_it(self, tmp_path, monkeypatch):
+        """The point of storing choices rather than a figure: next month's file gets the
+        same chart without anyone rebuilding it."""
+        app, check_id = self._charted(tmp_path, monkeypatch)
+        original = app.session_state[checks_session.CK_SET_KEY].checks[0].chart
+
+        app.text_input(key="ck_set_name").set_value("Payroll checks").run()
+        app.button(key="ck_save_set").click().run()
+
+        stored = checks_db.list_sets(1)
+        reloaded = checks_db.load_set(stored[0]["set_id"], 1)
+
+        assert not app.exception
+        assert reloaded.checks[0].chart == original

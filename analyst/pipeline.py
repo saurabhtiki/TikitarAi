@@ -22,7 +22,7 @@ import pandas as pd
 from agno.db.base import BaseDb
 
 from analyst import charts, commentary, routing
-from analyst.agent import answer_question
+from analyst.agent import NO_QUERY_WARNING, QueryResult, answer_question
 from analyst.column_intent import handle_message
 from analyst.exceptions import AnalystError
 from engine.relationships import Relationship
@@ -60,6 +60,8 @@ def answer(
     relationships: list[Relationship] | None = None,
     db: BaseDb | None = None,
     session_id: str | None = None,
+    previous_frame: pd.DataFrame | None = None,
+    previous_sql: str | None = None,
     key_path: Path | str | None = None,
 ) -> Answer:
     """Answers one chat message.
@@ -71,6 +73,11 @@ def answer(
         db: the Agno store holding this chat's history, so follow-up questions resolve
             against what came before. See `analyst.session.agent_db`.
         session_id: which conversation in `db` this message belongs to.
+        previous_frame: the rows the last answer was built from, used only to rescue a
+            chart request the model answered without querying — see
+            `_chart_the_previous_result`.
+        previous_sql: the statement behind `previous_frame`, shown as this answer's SQL
+            when that rescue happens, since it is what the chart is plotting.
 
     Never raises: every failure becomes an `Answer` with `is_error` set, because a bad
     question must not take the transcript down with it.
@@ -93,6 +100,8 @@ def answer(
         knowledge_base=knowledge_base,
         db=db,
         session_id=session_id,
+        previous_frame=previous_frame,
+        previous_sql=previous_sql,
         key_path=key_path,
     )
 
@@ -135,7 +144,9 @@ def _query_answer(
     knowledge_base: str | None,
     db: BaseDb | None,
     session_id: str | None,
-    key_path: Path | str | None,
+    previous_frame: pd.DataFrame | None = None,
+    previous_sql: str | None = None,
+    key_path: Path | str | None = None,
 ) -> Answer:
     """Requirement 5.5's agent path, with requirement 6.2's output logic on top."""
     try:
@@ -153,6 +164,9 @@ def _query_answer(
         return Answer(question=question, text=str(error), is_error=True)
 
     outputs = routing.classify_output(question, result.frame)
+    if routing.OUTPUT_CHART in outputs and not result.has_rows:
+        _chart_the_previous_result(result, previous_frame, previous_sql)
+
     built = Answer(
         question=question,
         sql=result.sql,
@@ -198,3 +212,36 @@ def _query_answer(
         built.text = result.narrative or "That query returned no rows."
 
     return built
+
+
+def _chart_the_previous_result(
+    result: QueryResult, previous_frame: pd.DataFrame | None, previous_sql: str | None
+) -> None:
+    """Charts the last answer's rows when a chart was asked for and no query ran.
+
+    "Show that as a pie chart" is a follow-up about rows the user is already looking at, so
+    the model is meant to re-run the query behind them and let this module plot the result.
+    Weaker models sometimes read it as a question about their own abilities instead, reply
+    "I can't draw charts" and never call `run_query` — which leaves nothing to plot and
+    costs the user the one output they explicitly asked for.
+
+    Re-using the previous frame is honest here in a way inventing data never would be: they
+    are the same rows, from the same statement, already on screen one turn above. The model
+    isn't given a second chance to phrase it, because the prose it produced is a refusal —
+    it is replaced, and the SQL shown is the one the rows actually came from.
+
+    Mutates `result` in place; does nothing when there is no previous frame to fall back on.
+    """
+    if previous_frame is None or previous_frame.empty:
+        return
+
+    logger.info("Charting the previous result: the agent answered a chart request without querying.")
+    result.frame = previous_frame
+    result.sql = previous_sql
+    result.narrative = "Here is the previous answer as a chart."
+    # No longer true of an answer that now carries rows, and it would sit directly beside
+    # the warning below saying which rows they are.
+    result.warnings = [warning for warning in result.warnings if warning != NO_QUERY_WARNING]
+    result.warnings.append(
+        "This chart plots the previous answer's rows — the question didn't run a new query."
+    )

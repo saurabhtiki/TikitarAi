@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 # user's tokens circling.
 MAX_TOOL_CALLS = 8
 
+# Set on a result the model answered in prose without touching the data. Named rather than
+# written inline because a caller that rescues such an answer has to be able to take it
+# back off — see `analyst.pipeline._chart_the_previous_result`.
+NO_QUERY_WARNING = "This answer came from the model without running a query."
+
 # How many previous turns the agent sees. Enough for "now show that as a chart" and "break
 # it down by month instead" to resolve, without resending a long chat on every question —
 # each earlier turn carries its tool calls and query results with it.
@@ -55,6 +60,12 @@ SYSTEM_INSTRUCTIONS = [
     "Earlier turns in this conversation are available to you. When a question refers back "
     "to one ('now by month instead', 'and the same for last year'), carry the previous "
     "query forward and change only what was asked — do not start from nothing.",
+    "Charts are drawn by the application from the rows your query returns. You never draw "
+    "or describe a chart yourself, and you must never say that you cannot produce one — "
+    "the user will see the chart even though you cannot.",
+    "A request for a chart, graph, pie, plot or visualisation is still a request for data. "
+    "Answer it by calling `run_query`: re-run the previous question's query (adjusted if "
+    "the request changes it) so there are rows for the chart to be built from.",
     "When the query succeeds, reply with one or two short sentences stating the answer. "
     "Do not repeat the whole table back, and do not show the SQL — both are displayed "
     "separately.",
@@ -189,7 +200,7 @@ def answer_question(
 
     # No query, but something to say — usually "that column isn't in your data". Worth
     # showing: it is the model telling the user their question doesn't match the schema.
-    result.warnings.append("This answer came from the model without running a query.")
+    result.warnings.append(NO_QUERY_WARNING)
     return result
 
 

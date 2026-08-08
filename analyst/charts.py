@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 logger = logging.getLogger(__name__)
 
@@ -65,17 +66,78 @@ CHART_LINE = "line"
 CHART_AREA = "area"
 CHART_SCATTER = "scatter"
 CHART_PIE = "pie"
+CHART_COMBO = "combo"
 
 # What each type is called on screen. Ordered as the picker should list them: the two bars
-# together, then the two time-shaped types, then the specialised pair.
+# together, then the two time-shaped types, then the specialised trio.
 CHART_LABELS: dict[str, str] = {
     CHART_BAR: "Bar",
     CHART_BAR_HORIZONTAL: "Bar — horizontal",
     CHART_LINE: "Line",
     CHART_AREA: "Area",
+    CHART_COMBO: "Combo — bar + line",
     CHART_SCATTER: "Scatter",
     CHART_PIE: "Pie",
 }
+
+
+# --------------------------------------------------------------------------------------
+# Aggregation
+# --------------------------------------------------------------------------------------
+#
+# The frame this module is handed has usually been aggregated already, by the SQL that
+# produced it. That covers the question the user asked; it does not cover the question they
+# ask next, of the same rows — "now show me the monthly total" over a result with one row
+# per invoice. Aggregating here means that second question costs a dropdown rather than a
+# round trip to the model.
+
+AGG_SUM = "sum"
+AGG_COUNT = "count"
+AGG_AVERAGE = "average"
+AGG_MINIMUM = "minimum"
+AGG_MAXIMUM = "maximum"
+
+AGGREGATION_LABELS: dict[str, str] = {
+    AGG_SUM: "Sum",
+    AGG_COUNT: "Count",
+    AGG_AVERAGE: "Average",
+    AGG_MINIMUM: "Minimum",
+    AGG_MAXIMUM: "Maximum",
+}
+
+# The pandas name for each, since only the labels above are this module's own vocabulary.
+PANDAS_AGGREGATIONS: dict[str, str] = {
+    AGG_SUM: "sum",
+    AGG_COUNT: "count",
+    AGG_AVERAGE: "mean",
+    AGG_MINIMUM: "min",
+    AGG_MAXIMUM: "max",
+}
+
+# Counting rows, and the first and last of a sorted set, are meaningful for text and dates
+# as well as numbers. Adding text together, or averaging it, is not.
+NUMERIC_ONLY_AGGREGATIONS = {AGG_SUM, AGG_AVERAGE}
+
+
+@dataclass(frozen=True)
+class Aggregation:
+    """One measure to compute while grouping: a column and what to do with it.
+
+    Frozen because `ChartChoices` is compared for equality to decide whether the chart needs
+    redrawing, and a mutable member would make that comparison unreliable.
+
+    Attributes:
+        column: the column to aggregate.
+        function: one of the `AGG_*` constants.
+    """
+
+    column: str
+    function: str
+
+    def label(self) -> str:
+        """'Sum of basic salary' — the name the derived column carries onto the chart."""
+        verb = AGGREGATION_LABELS.get(self.function, self.function)
+        return f"{verb} of {_pretty(self.column).lower()}"
 
 
 @dataclass
@@ -87,16 +149,30 @@ class ChartChoices:
         x: the column along the category or time axis. On a pie this names the slices; on a
             horizontal bar it is still the category, drawn up the side rather than along
             the bottom.
-        measures: the numeric column(s) to plot. Several become several series; types that
-            can only draw one (pie, scatter, anything with a colour split) use the first
-            and say so.
+        measures: the numeric column(s) to plot, used when `aggregate_by_x` is off. Several
+            become several series; types that can only draw one (pie, scatter, anything
+            with a colour split) use the first and say so.
         colour: the column that splits the measure into a legend, or None.
+        aggregate_by_x: collapses the rows to one per x value (per legend value, where
+            there is a legend) before plotting. What replaces `measures` while it is on is
+            `aggregations` — which is why both fields exist rather than one.
+        aggregations: the measures to compute while grouping. Ignored unless
+            `aggregate_by_x` is on.
+        line_measures: on a combo chart, the measures drawn as lines; the rest are bars.
+            Named by the measure's own name, or by an `Aggregation.label()` when
+            aggregating, so the picker and the chart agree.
+        secondary_axis: on a combo chart, puts the lines on their own right-hand axis. A
+            count and an amount rarely share a scale.
     """
 
     kind: str
     x: str
     measures: list[str] = field(default_factory=list)
     colour: str | None = None
+    aggregate_by_x: bool = False
+    aggregations: list[Aggregation] = field(default_factory=list)
+    line_measures: list[str] = field(default_factory=list)
+    secondary_axis: bool = False
 
 
 # --------------------------------------------------------------------------------------
@@ -214,6 +290,12 @@ def _pretty(name: str) -> str:
     return readable[:1].upper() + readable[1:] if readable else str(name)
 
 
+def pretty_name(name: str) -> str:
+    """`_pretty` for callers outside this module — a chart's own labels and a picker's
+    labels for the same column have to read the same way."""
+    return _pretty(name)
+
+
 def _join_names(names: list[str]) -> str:
     """'A', 'A and B', 'A, B and C' — the way a person would say the list aloud."""
     readable = [_pretty(name) for name in names]
@@ -249,13 +331,15 @@ def available_chart_types(frame: pd.DataFrame | None) -> list[str]:
 
     Only types that would draw something honest are listed, so the picker cannot be used
     to produce a broken chart: a scatter needs two numeric columns to relate, and a pie
-    needs a small number of non-negative parts of one whole.
+    needs non-negative parts of one whole.
     """
     if not is_chartable(frame):
         return []
 
     numeric = _numeric_columns(frame)
-    kinds = [CHART_BAR, CHART_BAR_HORIZONTAL, CHART_LINE, CHART_AREA]
+    # Combo is offered on a single numeric column, unlike scatter: the second series can be
+    # made by aggregating the same column a second way — a sum as bars, a count as the line.
+    kinds = [CHART_BAR, CHART_BAR_HORIZONTAL, CHART_LINE, CHART_AREA, CHART_COMBO]
 
     if len(numeric) >= 2:
         kinds.append(CHART_SCATTER)
@@ -265,13 +349,17 @@ def available_chart_types(frame: pd.DataFrame | None) -> list[str]:
 
 
 def _pie_would_be_honest(frame: pd.DataFrame, numeric: list[str]) -> bool:
-    """A pie needs few enough slices to read, and values that are parts of one whole.
+    """A pie needs something to slice by, and values that are parts of one whole.
 
     Negative values are the important exclusion: a slice cannot be smaller than nothing, so
-    Plotly draws the absolute value and the chart quietly says something untrue.
+    Plotly draws the absolute value and the chart quietly says something untrue. There is no
+    narrowing that fixes that, so it is the one thing that takes the type off the list.
+
+    Row count deliberately isn't a gate. `_cap_rows` already trims a pie to its top slices
+    and says so, and the count here is the count *before* aggregating — a 500-row result
+    grouped by department is six slices, so counting the raw rows withheld the type from
+    exactly the case it suits.
     """
-    if len(frame) > MAX_PIE_SLICES:
-        return False
     if len(frame.columns) - len(numeric) < 1:
         return False
     return any((frame[measure].fillna(0) >= 0).all() for measure in numeric)
@@ -290,18 +378,36 @@ def _is_temporal(frame: pd.DataFrame, column: str) -> bool:
 # does nothing, which is worse than no control at all.
 
 
+def series_names(frame: pd.DataFrame | None, choices: ChartChoices) -> list[str]:
+    """The measures this chart draws, named as they will appear in its legend.
+
+    Aggregating renames them — `amount` becomes 'Sum of amount' — so anything that has to
+    refer to a series by name (the combo chart's line picker, and the combo chart itself)
+    asks here rather than reading `measures`, which by then names the source columns.
+    """
+    if choices.aggregate_by_x:
+        return [entry.label() for entry in choices.aggregations]
+    if frame is None:
+        return list(choices.measures)
+    return [name for name in choices.measures if name in frame.columns]
+
+
 def series_count(frame: pd.DataFrame | None, choices: ChartChoices) -> int:
     """How many series the chart draws: one per legend value, or one per measure."""
     if frame is None:
         return 0
     if choices.colour and choices.colour in frame.columns:
         return int(frame[choices.colour].nunique())
-    return len([name for name in choices.measures if name in frame.columns])
+    return len(series_names(frame, choices))
 
 
 def supports_series_layout(frame: pd.DataFrame | None, choices: ChartChoices) -> bool:
-    """Whether stacking is a real choice: bars or areas, with something to stack."""
-    if choices.kind not in (CHART_BAR, CHART_BAR_HORIZONTAL, CHART_AREA):
+    """Whether stacking is a real choice: bars or areas, with something to stack.
+
+    A combo counts: its bars stack against each other even though its lines don't stack at
+    all, and a combo of three bars and a line is exactly where that matters.
+    """
+    if choices.kind not in (CHART_BAR, CHART_BAR_HORIZONTAL, CHART_AREA, CHART_COMBO):
         return False
     return series_count(frame, choices) > 1
 
@@ -346,6 +452,59 @@ def available_palettes(frame: pd.DataFrame | None, choices: ChartChoices) -> lis
     if series_count(frame, choices) > 1:
         palettes.remove(PALETTE_SINGLE)
     return palettes
+
+
+# --------------------------------------------------------------------------------------
+# What the pickers should offer
+# --------------------------------------------------------------------------------------
+#
+# The page used to work its own column lists out inline, which meant the rule for what could
+# go on which axis lived in two places and only one of them was tested. These are that rule,
+# in the module that already knows the answer.
+
+
+def axis_options(frame: pd.DataFrame | None, kind: str) -> list[str]:
+    """The columns that can carry this chart's x axis.
+
+    Everything qualifies except on a scatter, where the x axis is a second measure and a
+    category on it would draw a column of dots rather than a relationship.
+    """
+    if frame is None:
+        return []
+    if kind == CHART_SCATTER:
+        return _numeric_columns(frame)
+    return list(frame.columns)
+
+
+def value_options(frame: pd.DataFrame | None, *, aggregated: bool) -> list[str]:
+    """The columns that can be plotted as a measure.
+
+    Plotted directly, that means the numeric ones — there is no height to give a name. Under
+    aggregation it means all of them, because counting rows, and the first and last of a
+    sorted set, turn a text or date column into a number.
+    """
+    if frame is None:
+        return []
+    return list(frame.columns) if aggregated else _numeric_columns(frame)
+
+
+def aggregation_options(frame: pd.DataFrame | None, column: str) -> list[str]:
+    """What can be done to this column while grouping."""
+    if frame is None or column not in frame.columns:
+        return []
+    if pd.api.types.is_numeric_dtype(frame[column]):
+        return list(AGGREGATION_LABELS)
+    return [name for name in AGGREGATION_LABELS if name not in NUMERIC_ONLY_AGGREGATIONS]
+
+
+def default_aggregation(frame: pd.DataFrame | None, column: str) -> str:
+    """What a column offers to compute the moment it is picked.
+
+    A number totals; anything else counts, which is the only thing every column can do.
+    """
+    if frame is not None and column in frame.columns and pd.api.types.is_numeric_dtype(frame[column]):
+        return AGG_SUM
+    return AGG_COUNT
 
 
 # --------------------------------------------------------------------------------------
@@ -476,13 +635,31 @@ def render_chart(
 
     if frame is None or frame.empty:
         return None, ["There were no rows to chart."]
-
-    measures = [name for name in choices.measures if name in frame.columns]
-    if not measures or choices.x not in frame.columns:
+    if choices.x not in frame.columns:
         return None, ["That combination of columns isn't in this result any more."]
 
-    measures = _limit_measures(measures, warnings)
+    kind = choices.kind
     colour = _usable_colour(frame, choices.colour, warnings)
+
+    # Which half of a legend split would be the line is not a question the chart can answer,
+    # so the split goes and the combo stays — the combo is the thing the user asked for.
+    if kind == CHART_COMBO and colour is not None:
+        warnings.append(
+            f"Dropping the '{_pretty(colour)}' legend — a bar-and-line chart already uses "
+            "one series per measure."
+        )
+        colour = None
+
+    if choices.aggregate_by_x:
+        frame, measures = _aggregate(frame, choices.x, colour, choices.aggregations, warnings)
+        if not measures:
+            return None, warnings + ["Pick at least one value and what to do with it."]
+    else:
+        measures = [name for name in choices.measures if name in frame.columns]
+        if not measures:
+            return None, warnings + ["That combination of columns isn't in this result any more."]
+
+    measures = _limit_measures(measures, warnings)
 
     # One series per colour already spends the colour axis, so a second measure would have
     # to share it and the two would be indistinguishable.
@@ -493,14 +670,110 @@ def render_chart(
         )
         measures = measures[:1]
 
+    lines: list[str] = []
+    if kind == CHART_COMBO:
+        kind, lines = _settle_combo(measures, choices.line_measures, warnings)
+
     try:
-        ordered = _cap_rows(frame, choices.kind, choices.x, measures, colour, style, warnings)
-        ordered = _sort_rows(ordered, choices.kind, choices.x, measures, colour, style)
-        return _draw(ordered, choices.kind, choices.x, measures, colour, style, warnings)
+        ordered = _cap_rows(frame, kind, choices.x, measures, colour, style, warnings)
+        ordered = _sort_rows(ordered, kind, choices.x, measures, colour, style)
+        if kind == CHART_COMBO:
+            return _draw_combo(ordered, choices.x, measures, lines, choices.secondary_axis, style, warnings)
+        return _draw(ordered, kind, choices.x, measures, colour, style, warnings)
     except (ValueError, TypeError, KeyError) as error:
         # Plotly raises these for shapes it can't map; the table is still perfectly good.
         logger.exception("Could not chart a %s result as a %s.", frame.shape, choices.kind)
         return None, warnings + [f"This result couldn't be charted ({error})."]
+
+
+def _settle_combo(
+    measures: list[str], requested: list[str], warnings: list[str]
+) -> tuple[str, list[str]]:
+    """Works out which measures are lines, and whether a combo is still possible.
+
+    A combo needs at least one bar and at least one line. Rather than refuse the two cases
+    that can't have both — a single measure, or every measure marked as a line — it falls
+    back to the chart those choices actually describe and says so, which is this module's
+    standing answer to a request it can only partly honour.
+
+    Returns:
+        `(kind, lines)`. `kind` is `CHART_COMBO` when the combo stands, or the type it fell
+        back to.
+    """
+    lines = [name for name in requested if name in measures]
+
+    if len(measures) < 2:
+        warnings.append("A bar-and-line chart needs two measures — drawing bars only.")
+        return CHART_BAR, []
+    if not lines:
+        # The last measure, because the picker lists them in the order they were chosen and
+        # the series a user adds to an existing bar chart is the one they want overlaid.
+        lines = measures[-1:]
+    if len(lines) == len(measures):
+        warnings.append("Every measure was marked as a line — drawing a line chart.")
+        return CHART_LINE, []
+    return CHART_COMBO, lines
+
+
+def _aggregate(
+    frame: pd.DataFrame,
+    x_column: str,
+    colour: str | None,
+    aggregations: list[Aggregation],
+    warnings: list[str],
+) -> tuple[pd.DataFrame, list[str]]:
+    """Collapses the rows to one per x value, computing each requested measure.
+
+    This is what makes a result with one row per invoice chartable as a monthly total. The
+    legend column joins the x column as a group key when there is one, so each series keeps
+    its own totals rather than every series being handed the same one.
+
+    Returns:
+        `(frame, measures)` — the grouped frame and the names of the derived columns, which
+        become the measures the rest of the pipeline plots. On failure the frame comes back
+        untouched with no measures, and the caller reports it like any other narrowing.
+    """
+    wanted = _usable_aggregations(frame, aggregations, warnings)
+    if not wanted:
+        return frame, []
+
+    keys = [x_column] + ([colour] if colour and colour != x_column else [])
+    # `dropna=False` so rows with no department still form a group: dropping them would make
+    # the chart's totals quietly disagree with the table's.
+    named = {entry.label(): (entry.column, PANDAS_AGGREGATIONS[entry.function]) for entry in wanted}
+    try:
+        grouped = frame.groupby(keys, dropna=False, observed=True).agg(**named).reset_index()
+    except (ValueError, TypeError, KeyError) as error:
+        logger.exception("Could not aggregate a %s result by '%s'.", frame.shape, x_column)
+        warnings.append(f"These values couldn't be totalled up by '{_pretty(x_column)}' ({error}).")
+        return frame, []
+
+    return grouped, list(named)
+
+
+def _usable_aggregations(
+    frame: pd.DataFrame, aggregations: list[Aggregation], warnings: list[str]
+) -> list[Aggregation]:
+    """Drops the entries this frame can't compute, and says which and why.
+
+    Two exclusions: a column that has left the result, and adding up or averaging something
+    that isn't a number — pandas would either raise or, worse, concatenate the text.
+    """
+    usable: list[Aggregation] = []
+    for entry in aggregations:
+        if entry.column not in frame.columns:
+            warnings.append(f"'{_pretty(entry.column)}' isn't in this result any more.")
+            continue
+        if entry.function in NUMERIC_ONLY_AGGREGATIONS and not pd.api.types.is_numeric_dtype(
+            frame[entry.column]
+        ):
+            verb = AGGREGATION_LABELS.get(entry.function, entry.function).lower()
+            warnings.append(f"Can't take the {verb} of '{_pretty(entry.column)}' — it isn't a number.")
+            continue
+        if entry.label() in {kept.label() for kept in usable}:
+            continue
+        usable.append(entry)
+    return usable
 
 
 def _usable_colour(frame: pd.DataFrame, colour: str | None, warnings: list[str]) -> str | None:
@@ -692,6 +965,71 @@ def _draw(
     return _finish(figure, kind, title, style, warnings)
 
 
+def _draw_combo(
+    frame: pd.DataFrame,
+    x_column: str,
+    measures: list[str],
+    lines: list[str],
+    secondary_axis: bool,
+    style: ChartStyle,
+    warnings: list[str],
+) -> tuple[go.Figure, list[str]]:
+    """Bars and lines on one chart — the one type Express cannot express.
+
+    Every other type is an Express call over the frame as it stands, but Express draws one
+    trace family per call, so mixing them means building the figure by hand. Each measure
+    keeps the palette colour its position would have given it, so a measure moved from bar
+    to line doesn't change colour underneath the reader.
+
+    The second axis is the point of the chart as often as not: a count of breaches and the
+    value at stake are both worth seeing against the same months, and on one axis the
+    smaller of them is a flat line along the bottom.
+    """
+    palette = CHART_PALETTES.get(style.palette, CHART_PALETTES[PALETTE_DEFAULT])
+    figure = make_subplots(specs=[[{"secondary_y": True}]]) if secondary_axis else go.Figure()
+
+    for position, measure in enumerate(measures):
+        colour = palette[position % len(palette)]
+        is_line = measure in lines
+        if is_line:
+            trace = go.Scatter(
+                x=frame[x_column],
+                y=frame[measure],
+                name=_pretty(measure),
+                mode="lines+markers",
+                line={"color": colour, "width": 3},
+                marker={"color": colour},
+            )
+        else:
+            trace = go.Bar(
+                x=frame[x_column], y=frame[measure], name=_pretty(measure), marker_color=colour
+            )
+        if secondary_axis:
+            figure.add_trace(trace, secondary_y=is_line)
+        else:
+            figure.add_trace(trace)
+
+    figure.update_layout(**_bar_layout(style))
+    bars = [name for name in measures if name not in lines]
+    figure.update_xaxes(title_text=_pretty(x_column))
+    if secondary_axis:
+        figure.update_yaxes(title_text=_axis_title(bars), secondary_y=False)
+        figure.update_yaxes(title_text=_axis_title(lines), secondary_y=True, showgrid=False)
+    else:
+        figure.update_layout(yaxis_title="Value")
+
+    preposition = "over" if _is_temporal(frame, x_column) else "by"
+    title = f"{_join_names(bars)} and {_join_names(lines)} {preposition} {_pretty(x_column)}"
+    return _finish(figure, CHART_COMBO, title, style, warnings)
+
+
+def _axis_title(measures: list[str]) -> str:
+    """One measure names its own axis; several share a generic one, as `_name_axes` does."""
+    if len(measures) == 1:
+        return _pretty(measures[0])
+    return "Value"
+
+
 def _bar_layout(style: ChartStyle) -> dict[str, str]:
     """Express's bar arguments for the chosen series layout.
 
@@ -749,6 +1087,21 @@ def _label_values(figure: go.Figure, kind: str, style: ChartStyle) -> None:
     """
     if kind == CHART_PIE:
         figure.update_traces(textinfo="value+percent")
+        return
+
+    if kind == CHART_COMBO:
+        # The two families take different positions, and a bar handed a scatter's
+        # "top center" raises rather than ignoring it — so they are labelled separately.
+        figure.update_traces(
+            texttemplate="%{y:,}", textposition="outside", selector={"type": "bar"}
+        )
+        for trace in figure.data:
+            if trace.type != "scatter":
+                continue
+            trace.texttemplate = "%{y:,}"
+            trace.textposition = "top center"
+            if trace.mode and "text" not in trace.mode:
+                trace.mode = f"{trace.mode}+text"
         return
 
     is_bar = kind in (CHART_BAR, CHART_BAR_HORIZONTAL)
@@ -829,3 +1182,106 @@ def _styled(figure: go.Figure, title: str, style: ChartStyle) -> go.Figure:
     figure.update_xaxes(showgrid=False)
     figure.update_yaxes(gridcolor="rgba(128,128,128,0.2)")
     return figure
+
+
+# --------------------------------------------------------------------------------------
+# Storing a chart
+# --------------------------------------------------------------------------------------
+#
+# `ChartChoices` + `ChartStyle` fully describe a chart, which is what makes them storable:
+# a criteria saves the chart it wants and redraws it against next month's file without a
+# provider call, the same way its SQL is the recipe rather than the answer.
+#
+# Reading is deliberately forgiving. A stored chart is not user input to be validated but a
+# setting to be honoured as far as it still makes sense, so an unrecognised value falls back
+# to the default rather than costing the user the whole chart.
+
+
+def _one_of(raw: object, allowed: dict[str, object] | set[str], fallback: str) -> str:
+    return raw if isinstance(raw, str) and raw in allowed else fallback
+
+
+def choices_to_dict(choices: ChartChoices | None) -> dict | None:
+    """The JSON-safe form of what to plot."""
+    if choices is None:
+        return None
+    return {
+        "kind": choices.kind,
+        "x": choices.x,
+        "measures": list(choices.measures),
+        "colour": choices.colour,
+        "aggregate_by_x": choices.aggregate_by_x,
+        "aggregations": [
+            {"column": entry.column, "function": entry.function} for entry in choices.aggregations
+        ],
+        "line_measures": list(choices.line_measures),
+        "secondary_axis": choices.secondary_axis,
+    }
+
+
+def choices_from_dict(raw: object) -> ChartChoices | None:
+    """Rebuilds what to plot, or None when there is nothing usable to rebuild.
+
+    None rather than a raise: the caller is loading a saved criteria set, and one unreadable
+    chart must not cost the user the rules, the SQL and everything else stored beside it.
+    """
+    if not isinstance(raw, dict):
+        return None
+    x_column = raw.get("x")
+    if not isinstance(x_column, str) or not x_column:
+        return None
+
+    aggregations = [
+        Aggregation(column=str(entry["column"]), function=_one_of(entry.get("function"), AGGREGATION_LABELS, AGG_SUM))
+        for entry in raw.get("aggregations") or []
+        if isinstance(entry, dict) and entry.get("column")
+    ]
+    colour = raw.get("colour")
+    return ChartChoices(
+        kind=_one_of(raw.get("kind"), CHART_LABELS, CHART_BAR),
+        x=x_column,
+        measures=[str(name) for name in raw.get("measures") or []],
+        colour=str(colour) if colour else None,
+        aggregate_by_x=bool(raw.get("aggregate_by_x")),
+        aggregations=aggregations,
+        line_measures=[str(name) for name in raw.get("line_measures") or []],
+        secondary_axis=bool(raw.get("secondary_axis")),
+    )
+
+
+def style_to_dict(style: ChartStyle | None) -> dict | None:
+    """The JSON-safe form of how it looks."""
+    if style is None:
+        return None
+    return {
+        "title": style.title,
+        "palette": style.palette,
+        "series": style.series,
+        "show_values": style.show_values,
+        "show_legend": style.show_legend,
+        "sort": style.sort,
+        "top_n": style.top_n,
+        "height": style.height,
+    }
+
+
+def style_from_dict(raw: object) -> ChartStyle:
+    """Rebuilds how it looks, falling back to the untouched default for anything missing."""
+    if not isinstance(raw, dict):
+        return ChartStyle()
+
+    title = raw.get("title")
+    top_n = raw.get("top_n")
+    height = raw.get("height")
+    return ChartStyle(
+        title=str(title) if title else None,
+        palette=_one_of(raw.get("palette"), CHART_PALETTES, PALETTE_DEFAULT),
+        series=_one_of(raw.get("series"), SERIES_LABELS, SERIES_GROUPED),
+        show_values=bool(raw.get("show_values")),
+        show_legend=bool(raw.get("show_legend", True)),
+        sort=_one_of(raw.get("sort"), SORT_LABELS, SORT_AUTOMATIC),
+        top_n=int(top_n) if isinstance(top_n, int) and top_n > 0 else None,
+        height=min(max(int(height), MIN_CHART_HEIGHT), MAX_CHART_HEIGHT)
+        if isinstance(height, int)
+        else DEFAULT_CHART_HEIGHT,
+    )
