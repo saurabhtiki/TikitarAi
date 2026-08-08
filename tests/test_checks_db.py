@@ -5,6 +5,8 @@ the app that stores something a user authored at length, and a set readable by t
 account would be a real leak rather than an inconvenience.
 """
 
+import sqlite3
+
 import pytest
 
 from auth.db import create_user, init_db, seed_default_admin
@@ -103,3 +105,73 @@ class TestListingAndDeleting:
         init_check_sets_table(db_path)
         init_check_sets_table(db_path)
         assert list_sets(1, db_path=db_path) == []
+
+
+class TestChatTypeScope:
+    """Requirement 6.6: a set saved under a chat type is offered back under that chat type."""
+
+    def test_a_set_saved_under_a_chat_type_is_listed_there(self, db_path):
+        save_set(1, _set(), 5, db_path=db_path)
+        assert [row["name"] for row in list_sets(1, 5, db_path=db_path)] == ["Payroll checks"]
+
+    def test_it_is_not_listed_under_a_different_chat_type(self, db_path):
+        save_set(1, _set(), 5, db_path=db_path)
+        assert list_sets(1, 6, db_path=db_path) == []
+
+    def test_it_is_not_listed_among_the_unscoped_sets(self, db_path):
+        save_set(1, _set(), 5, db_path=db_path)
+        assert list_sets(1, db_path=db_path) == []
+
+    def test_every_scope_shows_them_all(self, db_path):
+        # The page's escape hatch, so a set saved before chat types existed is never
+        # stranded out of reach.
+        save_set(1, _set("Scoped"), 5, db_path=db_path)
+        save_set(1, _set("Unscoped"), db_path=db_path)
+        assert len(list_sets(1, 5, every_scope=True, db_path=db_path)) == 2
+
+    def test_the_same_name_can_exist_under_two_chat_types(self, db_path):
+        first = save_set(1, _set(), 5, db_path=db_path)
+        second = save_set(1, _set(), 6, db_path=db_path)
+        assert first.set_id != second.set_id
+
+    def test_saving_the_same_name_under_one_chat_type_still_updates(self, db_path):
+        first = save_set(1, _set(), 5, db_path=db_path)
+        again = save_set(1, _set(), 5, db_path=db_path)
+        assert again.set_id == first.set_id
+
+    def test_re_saving_a_loaded_set_adopts_it_into_the_active_chat_type(self, db_path):
+        saved = save_set(1, _set(), db_path=db_path)
+        loaded = load_set(saved.set_id, 1, db_path=db_path)
+
+        save_set(1, loaded, 5, db_path=db_path)
+
+        assert list_sets(1, db_path=db_path) == []
+        assert list_sets(1, 5, db_path=db_path)[0]["set_id"] == saved.set_id
+
+    def test_a_table_created_before_this_column_existed_is_migrated(self, tmp_path):
+        # Stage 8 shipped `check_sets` without `chat_type_id`, and there are live rows in
+        # `data/tikitarai.db`. The column has to arrive by migration, not only in CREATE.
+        path = tmp_path / "legacy.db"
+        init_db(path)
+        seed_default_admin(path)
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                "CREATE TABLE check_sets ("
+                "set_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, "
+                "name TEXT NOT NULL, checks_json TEXT NOT NULL, "
+                "created_at TEXT NOT NULL DEFAULT (datetime('now')), "
+                "updated_at TEXT NOT NULL DEFAULT (datetime('now')));"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX idx_check_sets_user_name ON check_sets (user_id, name COLLATE NOCASE);"
+            )
+            connection.execute(
+                "INSERT INTO check_sets (user_id, name, checks_json) VALUES (1, 'Old set', '{}');"
+            )
+
+        init_check_sets_table(path)
+
+        assert [row["name"] for row in list_sets(1, db_path=path)] == ["Old set"]
+        # The old index would refuse this — the same name under a different chat type.
+        save_set(1, _set("Old set"), 5, db_path=path)
+        assert len(list_sets(1, 5, every_scope=True, db_path=path)) == 2

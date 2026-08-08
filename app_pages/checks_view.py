@@ -29,6 +29,7 @@ from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 
+from chat_types import session as chat_type_session
 from checks import actions as checks_actions
 from checks import db as checks_db
 from checks import remarks as checks_remarks
@@ -135,16 +136,31 @@ def _dialog_add_check(payload: dict) -> None:
 @st.dialog("Load a saved criteria set", on_dismiss=_dismiss_dialog)
 def _dialog_load_set(payload: dict) -> None:
     user_id = payload["user_id"]
+    chat_type_id = chat_type_session.active_id()
+    chat_type_name = chat_type_session.active_name()
+
+    # Requirement 6.6: with a chat type selected, this offers that setup's sets. The toggle
+    # is the escape hatch — a set saved before chat types existed, or under a different
+    # setup, must never become unreachable.
+    every_scope = st.toggle(
+        "Show all my sets",
+        key="ck_load_set_all_scopes",
+        help="Off shows only the sets saved under the chat type you're using now.",
+    )
 
     try:
-        saved = checks_db.list_sets(user_id)
+        saved = checks_db.list_sets(user_id, chat_type_id, every_scope=every_scope)
     except ChecksStorageError as error:
         logger.exception("Could not list saved criteria sets for user %s.", user_id)
         st.error(str(error), icon=":material/error:")
         return
 
     if not saved:
-        st.info("You haven't saved any criteria sets yet.", icon=":material/info:")
+        scope = f" under **{chat_type_name}**" if chat_type_id is not None else " without a chat type"
+        st.info(
+            f"You haven't saved any criteria sets{'' if every_scope else scope} yet.",
+            icon=":material/info:",
+        )
         return
 
     chosen = st.selectbox(
@@ -214,15 +230,19 @@ def _render_set_bar(user_id: int) -> None:
             icon=":material/save:",
             width="stretch",
             disabled=not check_set.name.strip(),
-            help="Store these rules so you can run them again against next month's file.",
+            help="Store these rules so you can run them again against next month's file. Saved "
+            "under the chat type you're using, so it's offered back the next time you pick it.",
         ):
             try:
-                checks_db.save_set(user_id, check_set)
+                # A set always takes the scope it is saved under — see `checks.db.save_set`.
+                checks_db.save_set(user_id, check_set, chat_type_session.active_id())
             except ChecksStorageError as error:
                 logger.exception("Could not save criteria set for user %s.", user_id)
                 st.error(str(error), icon=":material/error:")
             else:
-                st.success(f"Saved “{check_set.display_name()}”.", icon=":material/check_circle:")
+                scope = chat_type_session.active_name()
+                where = f" under “{scope}”" if scope else ""
+                st.success(f"Saved “{check_set.display_name()}”{where}.", icon=":material/check_circle:")
     with load_column:
         if st.button(
             "Load set",

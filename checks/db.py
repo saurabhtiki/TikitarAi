@@ -27,21 +27,31 @@ DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
 
 _CREATE_CHECK_SETS_TABLE = """
 CREATE TABLE IF NOT EXISTS check_sets (
-    set_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    name        TEXT NOT NULL,
-    checks_json TEXT NOT NULL,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    set_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    chat_type_id INTEGER,
+    name         TEXT NOT NULL,
+    checks_json  TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 
-# One name per account, so "Save" on a set the user has already saved updates it instead of
-# quietly accumulating six sets called "Payroll checks" they then have to tell apart.
+# One name per account **per chat type** (requirement 6.6), so "Save" on a set the user has
+# already saved updates it instead of quietly accumulating six sets called "Payroll checks"
+# they then have to tell apart — while still allowing one of that name under each setup.
+#
+# `COALESCE(chat_type_id, 0)` rather than the bare column: SQLite treats NULLs as distinct
+# in a unique index, so a plain three-column index would stop de-duplicating exactly the
+# unscoped sets this index was written for.
 _CREATE_NAME_INDEX = """
-CREATE UNIQUE INDEX IF NOT EXISTS idx_check_sets_user_name
-ON check_sets (user_id, name COLLATE NOCASE);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_check_sets_user_scope_name
+ON check_sets (user_id, COALESCE(chat_type_id, 0), name COLLATE NOCASE);
 """
+
+# The index this replaced. Left in place it would refuse a second "Payroll checks" saved
+# under a different chat type, which is the whole point of the new one.
+_DROP_OLD_NAME_INDEX = "DROP INDEX IF EXISTS idx_check_sets_user_name;"
 
 
 @contextmanager
@@ -77,21 +87,60 @@ def init_check_sets_table(db_path: Path | str = DEFAULT_DB_PATH) -> None:
     """Creates the check_sets table if it doesn't already exist. Safe to call every process start."""
     with _get_connection(db_path) as connection:
         connection.execute(_CREATE_CHECK_SETS_TABLE)
+        _add_chat_type_column(connection)
+        connection.execute(_DROP_OLD_NAME_INDEX)
         connection.execute(_CREATE_NAME_INDEX)
 
 
-def list_sets(user_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> list[dict]:
-    """Every criteria set owned by user_id, newest edit first, without its JSON.
+def _add_chat_type_column(connection: sqlite3.Connection) -> None:
+    """Adds `chat_type_id` to a table created before requirement 6.6 existed.
+
+    There are live rows in `data/tikitarai.db` from Stage 8, so the column has to arrive by
+    migration rather than only in `CREATE TABLE`. Guarded on `PRAGMA table_info` because
+    SQLite has no `ADD COLUMN IF NOT EXISTS` and this runs on every process start.
+
+    No `REFERENCES chat_types(...)` clause: that would force `chat_types` to be created
+    before `check_sets` on every fresh database and in every test fixture, to buy an
+    `ON DELETE SET NULL` that `chat_types.db.delete_type` already does explicitly.
+    """
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(check_sets);").fetchall()}
+    if "chat_type_id" in columns:
+        return
+    connection.execute("ALTER TABLE check_sets ADD COLUMN chat_type_id INTEGER;")
+    logger.info("Added chat_type_id to check_sets.")
+
+
+def list_sets(
+    user_id: int,
+    chat_type_id: int | None = None,
+    *,
+    every_scope: bool = False,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> list[dict]:
+    """The criteria sets owned by user_id, newest edit first, without their JSON.
+
+    Scoped to one chat type by default (requirement 6.6): with a chat type selected the
+    picker offers that setup's sets, and with none selected it offers the sets that belong
+    to no setup. `every_scope=True` is the page's "show all my sets" escape hatch, so a set
+    saved before chat types existed never becomes unreachable.
 
     The JSON is left out because this feeds a picker: loading a dozen full recipes to draw
     a dropdown is work nobody asked for. `load_set` fetches the one that gets chosen.
     """
+    query = (
+        "SELECT set_id, user_id, chat_type_id, name, created_at, updated_at FROM check_sets WHERE user_id = ?"
+    )
+    parameters: list = [user_id]
+
+    if not every_scope:
+        if chat_type_id is None:
+            query += " AND chat_type_id IS NULL"
+        else:
+            query += " AND chat_type_id = ?"
+            parameters.append(chat_type_id)
+
     with _get_connection(db_path) as connection:
-        rows = connection.execute(
-            "SELECT set_id, user_id, name, created_at, updated_at FROM check_sets "
-            "WHERE user_id = ? ORDER BY updated_at DESC;",
-            (user_id,),
-        ).fetchall()
+        rows = connection.execute(f"{query} ORDER BY updated_at DESC;", parameters).fetchall()
         return [dict(row) for row in rows]
 
 
@@ -118,12 +167,22 @@ def load_set(set_id: int, user_id: int, db_path: Path | str = DEFAULT_DB_PATH) -
     return from_json(row["checks_json"], set_id=row["set_id"], name=row["name"])
 
 
-def save_set(user_id: int, check_set: CheckSet, db_path: Path | str = DEFAULT_DB_PATH) -> CheckSet:
+def save_set(
+    user_id: int,
+    check_set: CheckSet,
+    chat_type_id: int | None = None,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> CheckSet:
     """Inserts or updates a set, and returns it carrying the `set_id` it now has.
 
-    Matched on name rather than only on `set_id`, so that a set the user built from scratch
-    and then named the same as an existing one updates that one instead of hitting the
-    unique index with an error they can do nothing useful about.
+    Matched on name **within the chat type being saved under**, so that a set the user
+    built from scratch and then named the same as an existing one updates that one instead
+    of hitting the unique index with an error they can do nothing useful about — while the
+    same name under a different setup stays a different set.
+
+    A set always takes the scope it is saved under. Loading an unscoped set while "Salary
+    processing" is selected and pressing Save therefore adopts it into that chat type,
+    which is the only reading of Save that doesn't need a second control to explain it.
 
     Raises:
         ChecksStorageError: if the name is blank, or on a database failure.
@@ -136,22 +195,23 @@ def save_set(user_id: int, check_set: CheckSet, db_path: Path | str = DEFAULT_DB
 
     with _get_connection(db_path) as connection:
         existing = connection.execute(
-            "SELECT set_id FROM check_sets WHERE user_id = ? AND name = ? COLLATE NOCASE;",
-            (user_id, name),
+            "SELECT set_id FROM check_sets "
+            "WHERE user_id = ? AND COALESCE(chat_type_id, 0) = COALESCE(?, 0) AND name = ? COLLATE NOCASE;",
+            (user_id, chat_type_id, name),
         ).fetchone()
         target_id = existing["set_id"] if existing is not None else check_set.set_id
 
         if target_id is not None:
             _get_owned_set(connection, target_id, user_id)
             connection.execute(
-                "UPDATE check_sets SET name = ?, checks_json = ?, updated_at = datetime('now') "
-                "WHERE set_id = ? AND user_id = ?;",
-                (name, payload, target_id, user_id),
+                "UPDATE check_sets SET name = ?, checks_json = ?, chat_type_id = ?, "
+                "updated_at = datetime('now') WHERE set_id = ? AND user_id = ?;",
+                (name, payload, chat_type_id, target_id, user_id),
             )
         else:
             cursor = connection.execute(
-                "INSERT INTO check_sets (user_id, name, checks_json) VALUES (?, ?, ?);",
-                (user_id, name, payload),
+                "INSERT INTO check_sets (user_id, chat_type_id, name, checks_json) VALUES (?, ?, ?, ?);",
+                (user_id, chat_type_id, name, payload),
             )
             target_id = cursor.lastrowid
 

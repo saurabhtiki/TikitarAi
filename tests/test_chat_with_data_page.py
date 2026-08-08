@@ -20,6 +20,7 @@ from analyst import session as chat_session
 from analyst.exceptions import ChatStorageError
 from analyst.pipeline import Answer
 from auth.db import init_db, seed_default_admin
+from chat_types.db import init_chat_types_table
 from cleaner import session as cleaner_session
 from dashboard import session as dashboard_session
 from engine import columns as engine_columns
@@ -45,6 +46,7 @@ def _make_app(tmp_path, monkeypatch, role="normal_user"):
     init_db()
     seed_default_admin()
     init_llm_table()
+    init_chat_types_table()
     app = AppTest.from_file(PAGE_PATH, default_timeout=60)
     app.session_state["user_id"] = 1
     app.session_state["email"] = "admin@admin.com"

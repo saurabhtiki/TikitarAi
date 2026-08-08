@@ -54,6 +54,11 @@ from analyst.session import ChatMessage
 from app_pages.checks_view import render_checks
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
+from chat_types import db as chat_type_db
+from chat_types import matching
+from chat_types import model as chat_type_model
+from chat_types import session as chat_type_session
+from chat_types.exceptions import ChatTypeStorageError
 from checks import session as checks_session
 from dashboard import session as dashboard_session
 from engine import columns as engine_columns
@@ -140,6 +145,14 @@ def _render_upload() -> list[session.EngineTable]:
 
     _render_cleaner_handoff()
 
+    active_chat_type = chat_type_session.active()
+    if active_chat_type is not None:
+        expected = ", ".join(active_chat_type.table_names()) or "nothing yet"
+        st.caption(
+            f":grey[**{active_chat_type.display_name()}** expects: {expected}. "
+            "Upload this month's files — we'll check them against it.]"
+        )
+
     uploads = st.file_uploader(
         "Upload CSV or Excel files",
         type=["csv", "txt", "tsv", "xlsx", "xlsm"],
@@ -177,7 +190,10 @@ def _render_upload() -> list[session.EngineTable]:
             help="Each selected sheet becomes its own table you can query.",
         )
 
-    return session.sync_tables(uploads, sheet_selection)
+    # The saved column types go in with the files rather than being applied afterwards:
+    # whether a column can be read as a date is a question about the text in the file, and
+    # by the time a table is in DuckDB that text has already been converted once.
+    return session.sync_tables(uploads, sheet_selection, chat_type_session.declared_types())
 
 
 def _render_loaded_tables(tables: list[session.EngineTable]) -> None:
@@ -234,6 +250,247 @@ def _render_remove_buttons(tables: list[session.EngineTable]) -> None:
                     session.refresh_dictionary()
                     st.toast(f"Removed {removed}.", icon=":material/delete:")
                 st.rerun(scope="app")
+
+
+# --------------------------------------------------------------------------------------
+# Chat types (requirement 6.6)
+# --------------------------------------------------------------------------------------
+#
+# A saved Steps 1–3 setup, selected above everything else on the page because it decides
+# how the upload underneath it is read. Picking "new chat type" is every earlier stage's
+# behaviour, unchanged — which is why that is the default and why nothing here is required.
+
+
+def _saved_chat_types(user_id: int) -> list[dict]:
+    """The user's saved setups, or an empty list with the reason on screen."""
+    try:
+        return chat_type_db.list_types(user_id)
+    except ChatTypeStorageError as error:
+        logger.exception("Could not list saved chat types for user %s.", user_id)
+        st.error(str(error), icon=":material/error:")
+        return []
+
+
+def _render_chat_type_bar(user_id: int, loaded_tables: list[session.EngineTable]) -> tuple[str, list[dict]]:
+    """The picker, the name box and Save/Delete, on one row above everything else.
+
+    Draws the widgets and nothing else. Acting on a changed selection is `_sync_selection`,
+    which the page calls **after** Step 1 has rendered — see the note there. Returns what
+    the picker says and the rows behind it, so that call needs no second database read.
+    """
+    saved = _saved_chat_types(user_id)
+    names = [row["name"] for row in saved]
+    options = [chat_type_session.NEW_CHAT_TYPE, *names]
+
+    with st.container(horizontal=True, vertical_alignment="bottom", border=True, key="ct_bar"):
+        chosen = st.selectbox(
+            "Chat type",
+            options=options,
+            key=chat_type_session.CT_PICKER_KEY,
+            # Dropped when the widget stops being rendered, and a trip to the Dashboard
+            # does exactly that — without this, coming back would silently put the session
+            # onto the ad-hoc path while its tables were loaded under a chat type.
+            persist_state="session",
+            help="A saved setup: which files to expect, how they link, and what the columns mean. "
+            "Pick one and just upload this month's files.",
+        )
+
+        name = st.text_input(
+            "Name",
+            value=chat_type_session.active_name(),
+            placeholder="e.g. Salary processing",
+            key="ct_name_input",
+            help="Saving under a name you already have updates that chat type.",
+        )
+
+        active = chat_type_session.active()
+        st.button(
+            "Update chat type" if active is not None else "Save chat type",
+            key="ct_save_button",
+            icon=":material/save:",
+            type="primary",
+            disabled=not loaded_tables or not name.strip(),
+            on_click=_save_chat_type,
+            args=(user_id, name),
+            help="Store the tables, links and column descriptions as they stand now, so next "
+            "month you only have to upload the files.",
+        )
+
+        # if active is not None and active.chat_type_id is not None:
+        #     st.button(
+        #         #"Delete",
+        #         key="ct_delete_button",
+        #         icon=":material/delete:",
+        #         on_click=_delete_chat_type,
+        #         args=(user_id, active),
+        #         help="Permanently delete this chat type. Your loaded tables stay as they are, and "
+        #         "any criteria sets saved under it survive without one.",
+        #     )
+            
+
+    if not loaded_tables and chat_type_session.active() is None:
+        st.caption(
+            ":grey[No chat type selected — upload anything and set it up by hand, then save it "
+            "as a chat type to skip the setup next time.]"
+        )
+
+    return chosen, saved
+
+
+def _sync_selection(user_id: int, chosen: str, saved: list[dict]) -> None:
+    """Loads the picked chat type when the picker has moved off the active one.
+
+    Called from **after Step 1**, never from the bar itself, even though the bar is what
+    draws the picker. Selecting reruns, and a run that ends before `st.file_uploader` has
+    been created is a run in which that widget wasn't rendered — Streamlit then drops its
+    value, taking the files with it (the hazard this module's docstring opens with). By the
+    time this runs the uploader exists, so the rerun is free.
+
+    Guarded on the selection actually changing, because this reads the database: doing it
+    on every rerun would put a SQLite round trip behind every keystroke in the chat box.
+    """
+    if chosen == chat_type_session.NEW_CHAT_TYPE:
+        if chat_type_session.active() is not None:
+            chat_type_session.select(None)
+            st.rerun(scope="app")
+        return
+
+    if chosen == chat_type_session.active_name():
+        return
+
+    row = next((item for item in saved if item["name"] == chosen), None)
+    if row is None:
+        return
+
+    try:
+        chat_type_session.select(chat_type_db.load_type(row["chat_type_id"], user_id))
+    except ChatTypeStorageError as error:
+        logger.exception("Could not load chat type %s.", row["chat_type_id"])
+        st.error(str(error), icon=":material/error:")
+        return
+    st.rerun(scope="app")
+
+
+def _save_chat_type(user_id: int, name: str) -> None:
+    """Captures the setup as it stands and stores it.
+
+    A callback rather than acting on the button's return value, so the run that saves is
+    also the run that repaints the bar with the new name in it.
+    """
+    captured = chat_type_model.capture(
+        name,
+        session.semantic_types_by_table(),
+        session.get_relationships(),
+        session.get_dictionary(),
+        chat_type_id=chat_type_session.active_id(),
+    )
+    try:
+        saved = chat_type_db.save_type(user_id, captured)
+    except ChatTypeStorageError as error:
+        logger.exception("Could not save chat type '%s' for user %s.", name, user_id)
+        st.toast(str(error), icon=":material/error:")
+        return
+
+    chat_type_session.select(saved)
+    # Selecting cleared the applied marker, and the setup on screen *is* what was just
+    # saved — so mark it applied rather than letting the next run re-apply it over the
+    # user's own edits.
+    chat_type_session.apply_setup(saved, session.table_names())
+    st.session_state[chat_type_session.CT_PICKER_KEY] = saved.name
+    st.toast(f"Saved “{saved.display_name()}”.", icon=":material/check_circle:")
+
+
+def _delete_chat_type(user_id: int, chat_type: chat_type_model.ChatType) -> None:
+    try:
+        orphaned = chat_type_db.delete_type(chat_type.chat_type_id, user_id)
+    except ChatTypeStorageError as error:
+        logger.exception("Could not delete chat type %s.", chat_type.chat_type_id)
+        st.toast(str(error), icon=":material/error:")
+        return
+
+    chat_type_session.select(None)
+    st.session_state[chat_type_session.CT_PICKER_KEY] = chat_type_session.NEW_CHAT_TYPE
+    kept = f" {orphaned} criteria set(s) kept, without a chat type." if orphaned else ""
+    st.toast(f"Deleted “{chat_type.display_name()}”.{kept}", icon=":material/delete:")
+
+
+def _render_match_panel(loaded_tables: list[session.EngineTable]) -> matching.MatchReport | None:
+    """Checks this upload against the active chat type, and says what it found.
+
+    Rendered outside Step 1 rather than inside it, so it stays on screen after that step
+    auto-collapses — a blocking problem the user can't see is worse than no check at all.
+
+    Returns the report, or None on the ad-hoc path.
+    """
+    chat_type = chat_type_session.active()
+    if chat_type is None or not chat_type.tables:
+        return None
+
+    if not loaded_tables:
+        # Every uploaded file may have been discarded for not belonging to this chat type,
+        # in which case this note is the only thing standing between the user and a file
+        # that appeared to vanish on upload.
+        for note in _discarded_note():
+            st.caption(f":grey[{note}]")
+        return None
+
+    report = matching.check_upload(
+        chat_type, session.load_outcomes(), session.semantic_types_by_table()
+    )
+
+    if report.extra_tables:
+        _discard_extra_tables(report.extra_tables)
+        st.rerun(scope="app")
+
+    if report.ok and chat_type_session.needs_applying(chat_type, session.table_names()):
+        chat_type_session.apply_setup(chat_type, session.table_names())
+        st.rerun(scope="app")
+
+    with st.container(border=True, key="ct_match_panel"):
+        if report.ok:
+            st.success(report.summary(), icon=":material/check_circle:")
+        else:
+            st.error(report.summary(), icon=":material/error:")
+            for problem in report.problems():
+                st.markdown(f"- {problem}")
+            st.caption(
+                "Fix these in your file and upload it again, or switch to "
+                f"**{chat_type_session.NEW_CHAT_TYPE}** to carry on without this chat type."
+            )
+
+        # Read back rather than taken from `apply_setup` above: applying ends in a rerun,
+        # which destroys anything that run painted.
+        for warning in chat_type_session.apply_warnings():
+            st.warning(warning, icon=":material/error:")
+
+        for note in [*report.notes(), *_discarded_note()]:
+            st.caption(f":grey[{note}]")
+
+    return report
+
+
+def _discard_extra_tables(extra_tables: list[str]) -> None:
+    """Drops tables the chat type doesn't expect, so nothing unexpected reaches the agent.
+
+    `session.remove_table` also marks them dismissed, which is what stops the uploader —
+    still holding the file — reconciling them straight back in on the next run.
+    """
+    by_name = {table.table_name: table_id for table_id, table in session.get_tables().items()}
+    removed = [name for name in extra_tables if session.remove_table(by_name.get(name, "")) is not None]
+    if removed:
+        chat_type_session.note_discarded(removed)
+        session.refresh_dictionary()
+
+
+def _discarded_note() -> list[str]:
+    discarded = chat_type_session.discarded()
+    if not discarded:
+        return []
+    return [
+        f"{len(discarded)} file(s) not imported — this chat type doesn't expect them: "
+        f"{', '.join(f'**{name}**' for name in discarded)}. Switch to "
+        f"**{chat_type_session.NEW_CHAT_TYPE}** and upload again to use them."
+    ]
 
 
 # --------------------------------------------------------------------------------------
@@ -1329,6 +1586,10 @@ if profile is not None:
     )
     tables_before = set(session.get_tables())
 
+    # Above the view toggle, because a chat type decides how the files underneath it are
+    # read — it is the first choice on the page, not one of the things inside a view.
+    chosen_chat_type, saved_chat_types = _render_chat_type_bar(user_id, loaded_tables)
+
     # Rendered ahead of Step 1 so it reads as the page's primary navigation rather than
     # something found after scrolling past the upload block. On a brand-new session this
     # is a toggle with nothing loaded to switch to yet — a small price for Chat no longer
@@ -1385,6 +1646,16 @@ if profile is not None:
             session.collapse_once(session.STEP_UPLOAD)
         st.rerun(scope="app")
 
+    # Acted on here rather than where the picker is drawn: this can rerun, and a rerun
+    # before `st.file_uploader` has been created costs the uploaded files. See
+    # `_sync_selection`.
+    _sync_selection(user_id, chosen_chat_type, saved_chat_types)
+
+    # After Step 1 and outside it, so a blocking problem stays on screen once that step
+    # auto-collapses. None on the ad-hoc path, which is what leaves every view open below.
+    match_report = _render_match_panel(loaded_tables)
+    upload_matches = match_report is None or match_report.ok
+
     if view == "Setup":
         if len(loaded_tables) >= 2:
             link_summary = f"{relationship_count} link(s) confirmed" if relationship_count else "not set up yet"
@@ -1428,21 +1699,41 @@ if profile is not None:
                 # Sets saved to SQLite are recipes and deliberately survive: being able to
                 # run the same rules against a different file is the point of saving one.
                 checks_session.reset_checks()
+                # Only what was learned about *these* files. The chat type itself stays
+                # selected: discarding this month's data to upload next month's against
+                # the same setup is the normal way to use one.
+                chat_type_session.forget_upload()
                 st.rerun(scope="app")
 
     _render_pending_dialog()
 
     if loaded_tables and view == "Chat":
-        with st.container(border=True, key="an_chat_container1",):
-            _render_chat(user_id)
+        if upload_matches:
+            with st.container(border=True, key="an_chat_container1",):
+                _render_chat(user_id)
+        else:
+            # The panel above already lists what's wrong. Answering questions against a
+            # half-matched load is the one thing requirement 6.6 exists to prevent — a text
+            # date column returns wrong rows rather than an error.
+            st.info(
+                "Fix the problems above before asking questions — the answers wouldn't be "
+                "reliable until then.",
+                icon=":material/error:",
+            )
 
     if view == "Checks":
         # Gated on tables for the same reason Chat is: every criteria is written against
         # the loaded schema, and an empty session has nothing to write a rule about.
-        if loaded_tables:
-            render_checks(user_id)
-        else:
+        if not loaded_tables:
             st.info(
                 "Upload your data first — criteria are written against the columns you load.",
                 icon=":material/upload_file:",
             )
+        elif not upload_matches:
+            st.info(
+                "Fix the problems above before running criteria — a wrong Yes/No goes "
+                "straight onto your Dashboard as a report.",
+                icon=":material/error:",
+            )
+        else:
+            render_checks(user_id)

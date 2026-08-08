@@ -442,6 +442,66 @@ standing business rules and reports the exceptions.
   gone once the session ends. A reloaded set is re-tested against whatever
   is uploaded now.
 
+### 6.6 Chat Types — Saved Setups
+
+Sections 6.1–6.3 are deliberately session-only, and that is right for a
+one-off exploration. It is wrong for the work people actually repeat: the
+same files, with the same columns, arriving every month. Retyping the links
+and the column descriptions each time is the same objection requirement 6.5
+raises about retyping criteria, and it has the same answer — save the recipe.
+
+A **chat type** (e.g. "Salary processing") is a saved Steps 1–3 setup. It is
+a recipe, never data: the expected shape of the files, how they link, and
+what the columns mean. No rows, no chat transcript.
+
+- **Selecting one** — a picker above the Setup / Chat / Checks control offers
+  the user's saved chat types plus "new chat type". Choosing "new" is the
+  behaviour of every version before this one, so nothing about the ad-hoc
+  path changes.
+- **What is stored** — per expected table: its name and its columns with each
+  column's semantic type; the confirmed relationships; and every column
+  description and synonym list. Calculated-column statements are **not**
+  part of a chat type; they belong to the Task recipe of Section 7.5.
+- **Saving** — offered once tables are loaded, under a name unique per
+  account. Saving under an existing name updates it, as with a criteria set.
+- **Matching an upload** — with a chat type selected, the user uploads files
+  and the load is checked against the saved shape before anything else
+  happens. Matching is on the engine's table name, not the raw filename, so
+  the same table is recognised whether it arrives as `Salary Master.xlsx`,
+  `salary_master.csv`, or a handoff from the Data Cleaner.
+
+  | Difference | Outcome |
+  |---|---|
+  | Expected table not uploaded | Blocking error, naming the table |
+  | Expected column missing | Blocking error, naming column and table |
+  | Column's type differs from the saved one | The **saved** type is applied (see below) |
+  | Extra column | Dropped from the table, reported as a note |
+  | Extra table | Not imported, reported as a note |
+  | Column order differs | Ignored |
+
+- **Types are fixed or refused, never tolerated.** A semantic type is not a
+  label — it decides the real DuckDB column type, so a date column loaded as
+  text turns `joining_date < '2024-04-01'` into a string comparison that
+  returns wrong rows with no error at all. Silently wrong output is worse
+  than a failed load, and worse still in Section 6.5, where it becomes a
+  wrong Yes/No in a report. So on a mismatch the saved type is applied as a
+  declared type, overruling detection exactly as a Data Cleaner recipe does.
+  If the column converts, it loads correctly and the conversion is reported.
+  If it does not, the load is refused with the values that would not convert
+  named, so the user can fix the file or clean it first.
+- **Pre-filled setup** — once the files match, Step 2's links and Step 3's
+  descriptions are restored from the chat type and are fully editable. The
+  user may update the chat type with their changes, or leave it untouched
+  and simply carry on to Chat.
+- **Criteria sets belong to a chat type** — a set saved from Section 6.5
+  while a chat type is selected is stored against it, and Load set offers
+  that chat type's sets. Sets saved without a chat type stay reachable.
+  Deleting a chat type does not delete its criteria sets; they revert to
+  unscoped, because a set is expensive to rebuild.
+- **Storage** — SQLite table `chat_types` (`chat_type_id`, `user_id`,
+  `name`, `config_json`, timestamps), owned by its creator and never visible
+  to another account. `check_sets` gains a nullable `chat_type_id`.
+
 ---
 
 ## 7. Task Builder
@@ -618,7 +678,9 @@ The following are explicitly not part of this build:
 7. Criteria-Based Exceptional Reporting (persona, criteria → SQL, refine
    loop, auto-pin to the Dashboard, saved criteria sets, drafted follow-up
    actions)
-8. Task Builder (cleaning-step capture, structure-first report building,
+8. Chat Types (saved Steps 1–3 setups, schema matching on upload, criteria
+   sets scoped to a chat type)
+9. Task Builder (cleaning-step capture, structure-first report building,
    knowledge base, save/reorder controls, full export formats)
-9. Run a Task (schema matching, sample-file generator, replay execution,
-   preview screen)
+10. Run a Task (schema matching, sample-file generator, replay execution,
+    preview screen)

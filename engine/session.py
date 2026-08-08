@@ -39,6 +39,7 @@ DE_AUTOCOLLAPSED_KEY = "de_autocollapsed_steps"
 DE_REBUILD_KEY = "de_rebuild_count"
 DE_START_OVER_KEY = "de_start_over_pending"
 DE_DISMISSED_KEY = "de_dismissed_tables"
+DE_LOAD_OUTCOMES_KEY = "de_load_outcomes"
 
 STEP_UPLOAD = "de_step_upload"
 STEP_LINKS = "de_step_links"
@@ -291,7 +292,11 @@ def detach_uploader_tables() -> int:
     return len(detached)
 
 
-def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[EngineTable]:
+def sync_tables(
+    uploaded_files,
+    sheet_selection: dict[str, list[str]],
+    declared_types: dict[str, dict[str, str]] | None = None,
+) -> list[EngineTable]:
     """Reconciles the loaded tables with what is currently in the uploader.
 
     Runs in **both** directions every rerun, exactly as the Data Cleaner's equivalent
@@ -303,6 +308,12 @@ def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[E
     the Data Cleaner have no uploader entry at all, and tables detached by
     `detach_uploader_tables` no longer have one either — a one-directional read of the
     uploader would wrongly delete both. Those are removed with `remove_table` instead.
+
+    `declared_types` is the active chat type's saved column types, keyed by table name
+    (requirement 6.6). A table named there is loaded through
+    `loading.prepare_declared_table` instead of plain detection, and what that found is
+    stored in `load_outcomes()` for the page to report. Passing nothing is the ad-hoc path
+    every earlier stage used, unchanged.
 
     Returns the loaded tables. Never raises: a file that can't be read is skipped with an
     error on screen, and the others still load.
@@ -335,8 +346,8 @@ def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[E
             base_label = sheet_name or uploaded_file.name.rsplit(".", 1)[0]
             table_name = duckdb_session.slugify_table_name(base_label, taken)
             try:
-                frame, semantic_types = loading.prepare_table(
-                    uploaded_file.getvalue(), uploaded_file.name, sheet_name
+                frame, semantic_types = _prepare_upload(
+                    uploaded_file, sheet_name, table_name, declared_types or {}
                 )
                 reconciled[table_id] = _register(
                     table_id,
@@ -355,6 +366,81 @@ def sync_tables(uploaded_files, sheet_selection: dict[str, list[str]]) -> list[E
     _drop_removed(existing, reconciled)
     st.session_state[DE_TABLES_KEY] = reconciled
     return list(reconciled.values())
+
+
+def _prepare_upload(
+    uploaded_file, sheet_name: str | None, table_name: str, declared_types: dict[str, dict[str, str]]
+) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Reads one upload, under the active chat type's saved types where it names this table.
+
+    The outcome is recorded whether or not the chat type accepted the table, because "this
+    loaded exactly as saved" and "this loaded by detection because a column is missing" are
+    the same-looking table with very different meanings, and only the page can say so.
+    """
+    declared = _declared_for(declared_types, table_name)
+    if not declared:
+        return loading.prepare_table(uploaded_file.getvalue(), uploaded_file.name, sheet_name)
+
+    raw = loading.read_raw(uploaded_file.getvalue(), uploaded_file.name, sheet_name)
+    frame, semantic_types, outcome = loading.prepare_declared_table(
+        raw, declared, source=f"'{uploaded_file.name}'"
+    )
+    load_outcomes()[table_name] = outcome
+    return frame, semantic_types
+
+
+def _declared_for(declared_types: dict[str, dict[str, str]], table_name: str) -> dict[str, str]:
+    """The saved types for this table, matched however the file was capitalised."""
+    wanted = table_name.strip().lower()
+    for name, types in declared_types.items():
+        if name.strip().lower() == wanted:
+            return types
+    return {}
+
+
+def load_outcomes() -> dict:
+    """What the declared load found, per table name — `{table_name: loading.DeclaredLoad}`.
+
+    Written by `sync_tables` and read by the page's match panel. Kept here rather than
+    hung off `EngineTable` because it describes one *load attempt* against one chat type,
+    not the table: switching chat type makes every entry stale at once, which is exactly
+    what `clear_load_outcomes` is for.
+    """
+    return st.session_state.setdefault(DE_LOAD_OUTCOMES_KEY, {})
+
+
+def clear_load_outcomes() -> None:
+    """Forgets what the last chat type made of these files. Call when it changes."""
+    st.session_state.pop(DE_LOAD_OUTCOMES_KEY, None)
+
+
+def reload_uploaded_tables() -> int:
+    """Drops every table the uploader still holds the file for, so the next
+    `sync_tables` reads them again.
+
+    The chat type's saved types are applied **while the file is being read**, which means a
+    table already sitting in DuckDB cannot be brought under a chat type selected afterwards
+    — it was typed by detection and the text it was typed from is gone. Re-reading is the
+    only honest fix, and the uploader still has the bytes.
+
+    Unlike `remove_table`, these are not marked dismissed: the whole point is for the very
+    next run to load them again. Tables the uploader no longer manages (adopted from the
+    Data Cleaner, or detached by `detach_uploader_tables`) are left alone — there is no
+    file to re-read — and `chat_types.matching` checks their types as they stand instead.
+
+    Returns:
+        How many tables were dropped for re-reading.
+    """
+    existing = get_tables()
+    reconciled = {table_id: table for table_id, table in existing.items() if not table.uploader_managed}
+    if len(reconciled) == len(existing):
+        return 0
+
+    _drop_removed(existing, reconciled)
+    st.session_state[DE_TABLES_KEY] = reconciled
+    dropped = len(existing) - len(reconciled)
+    logger.info("Dropped %d uploaded table(s) to re-read them under a chat type.", dropped)
+    return dropped
 
 
 def dismissed_table_ids() -> set[str]:
@@ -405,6 +491,10 @@ def _drop_removed(existing: dict[str, EngineTable], reconciled: dict[str, Engine
         return
 
     removed_names = {table.table_name for table in removed}
+    for name in removed_names:
+        # Otherwise the match panel keeps reporting on a table that is no longer loaded.
+        load_outcomes().pop(name, None)
+
     surviving = [
         relationship
         for relationship in get_relationships()
@@ -593,6 +683,7 @@ def reset_engine() -> None:
         DE_PENDING_STEPS_KEY,
         DE_AUTOCOLLAPSED_KEY,
         DE_DISMISSED_KEY,
+        DE_LOAD_OUTCOMES_KEY,
     ):
         st.session_state.pop(key, None)
 

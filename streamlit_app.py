@@ -6,6 +6,8 @@ from auth.db import init_db, seed_default_admin
 from auth.exceptions import AuthDatabaseError
 from auth.service import is_authenticated
 from branding import LOGO_PATH
+from chat_types.db import init_chat_types_table
+from chat_types.exceptions import ChatTypeStorageError
 from checks.db import init_check_sets_table
 from checks.exceptions import ChecksStorageError
 from llm.db import init_llm_table
@@ -29,8 +31,10 @@ def bootstrap_database() -> bool:
         init_db()
         seed_default_admin()
         init_llm_table()
+        # Before `check_sets`, whose `chat_type_id` refers to it (requirement 6.6).
+        init_chat_types_table()
         init_check_sets_table()
-    except (AuthDatabaseError, LLMDatabaseError, ChecksStorageError):
+    except (AuthDatabaseError, LLMDatabaseError, ChecksStorageError, ChatTypeStorageError):
         logger.exception("Failed to bootstrap the application database.")
         raise
     return True

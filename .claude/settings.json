@@ -47,7 +47,15 @@
       "PowerShell(git stash push -- app_pages checks tests dashboard 2>&1)",
       "PowerShell(uv run pytest \"tests/test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body\" \"tests/test_chat_with_data_page.py::TestRelationships::test_confirming_a_bad_link_keeps_it_declared_but_unenforced\" -q 2>&1)",
       "PowerShell(git stash push -- app_pages/dashboard.py 2>&1)",
-      "Bash(python -c \"import streamlit,inspect;from streamlit.elements.widgets.button_group import ButtonGroupMixin as B;print\\(streamlit.__version__\\);print\\(inspect.signature\\(B.segmented_control\\)\\)\")"
+      "Bash(python -c \"import streamlit,inspect;from streamlit.elements.widgets.button_group import ButtonGroupMixin as B;print\\(streamlit.__version__\\);print\\(inspect.signature\\(B.segmented_control\\)\\)\")",
+      "PowerShell(uv run pytest tests/test_chat_type_model.py -q 2>&1)",
+      "PowerShell(uv run pytest tests/test_chat_type_db.py tests/test_checks_db.py -q 2>&1)",
+      "PowerShell(uv run pytest tests/test_chat_type_matching.py -q 2>&1)",
+      "PowerShell(uv run pytest tests/test_chat_type_page.py -q -x 2>&1)",
+      "PowerShell(uv run pytest tests/test_chat_type_page.py -q 2>&1)",
+      "Bash(python -m pytest tests/test_chat_type_db.py tests/test_checks_db.py -q)",
+      "PowerShell(uv run pytest tests/test_chat_type_page.py tests/test_chat_type_matching.py tests/test_chat_type_db.py tests/test_chat_type_model.py -q 2>&1)",
+      "PowerShell(uv run pytest \"tests/test_chat_type_page.py::TestSelectingAfterTheFilesAreLoaded::test_the_saved_types_are_applied_to_files_uploaded_first\" -q 2>&1)"
     ]
   }
 }
