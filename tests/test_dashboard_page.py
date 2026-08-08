@@ -162,6 +162,33 @@ class TestPlacing:
         app.button(key="db_pool_discard_a").click().run()
         assert _report(app).pool == []
 
+    def test_an_item_a_producer_owns_offers_no_discard(self, tmp_path, monkeypatch):
+        """A criteria's item is removed from the Checks tab that made it, not here.
+
+        Discarding it here would leave that tab still showing "Saved to report" for something
+        no longer in the report, and its next refine would pin a second copy. Nothing is lost
+        by leaving it: the exports walk the section tree, so an unplaced item is already out
+        of the report.
+        """
+        report = _pooled_report(PinnedItem(item_id="a", source_id="check:abc123"))
+        app = _make_app(tmp_path, monkeypatch, report=report)
+
+        assert not _has_button(app, "db_pool_discard_a")
+        # Still fully usable otherwise — this is not a locked item, just an undiscardable one.
+        assert _has_button(app, "db_pool_preview_a")
+
+    def test_a_chat_pin_beside_it_keeps_its_discard(self, tmp_path, monkeypatch):
+        """The gate is `source_id`, not "the pool contains a criteria" — an ordinary pinned
+        answer sitting next to one must still be throwable away."""
+        report = _pooled_report(
+            PinnedItem(item_id="a", source_id="check:abc123"),
+            PinnedItem(item_id="b"),
+        )
+        app = _make_app(tmp_path, monkeypatch, report=report)
+
+        app.button(key="db_pool_discard_b").click().run()
+        assert [item.item_id for item in _report(app).pool] == ["a"]
+
     def test_an_items_heading_is_editable_and_defaults_to_the_question(self, tmp_path, monkeypatch):
         report = _placed_report(PinnedItem(item_id="a", question="Sales by region", frame=FRAME))
         app = _make_app(tmp_path, monkeypatch, report=report)

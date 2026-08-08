@@ -51,8 +51,10 @@ from analyst import charts, pipeline, routing
 from analyst import session as chat_session
 from analyst.exceptions import ChatStorageError
 from analyst.session import ChatMessage
+from app_pages.checks_view import render_checks
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
+from checks import session as checks_session
 from dashboard import session as dashboard_session
 from engine import columns as engine_columns
 from engine import dictionary, duckdb_session, relationships, session
@@ -1333,7 +1335,7 @@ if profile is not None:
     # sitting below a full upload panel on every later visit.
     view = st.segmented_control(
         "View",
-        options=["Setup", "Chat"],
+        options=["Setup", "Chat", "Checks"],
         key="de_view",
         default="Setup",
         required=True,
@@ -1342,7 +1344,10 @@ if profile is not None:
         # the Dashboard does that — so without this, coming back to ask one more question
         # lands on Setup with the chat apparently gone.
         persist_state="session",
-        help="Setup: links and column descriptions. Chat: ask questions about your data.",
+        help=(
+            "Setup: links and column descriptions. Chat: ask questions about your data. "
+            "Checks: test business rules and report the exceptions."
+        ),
         width="stretch",
     )
 
@@ -1419,6 +1424,10 @@ if profile is not None:
                 # whatever is loaded next.
                 chat_session.reset_chat()
                 dashboard_session.reset_dashboard()
+                # The criteria in session go with the tables they were written against.
+                # Sets saved to SQLite are recipes and deliberately survive: being able to
+                # run the same rules against a different file is the point of saving one.
+                checks_session.reset_checks()
                 st.rerun(scope="app")
 
     _render_pending_dialog()
@@ -1426,3 +1435,14 @@ if profile is not None:
     if loaded_tables and view == "Chat":
         with st.container(border=True, key="an_chat_container1",):
             _render_chat(user_id)
+
+    if view == "Checks":
+        # Gated on tables for the same reason Chat is: every criteria is written against
+        # the loaded schema, and an empty session has nothing to write a rule about.
+        if loaded_tables:
+            render_checks(user_id)
+        else:
+            st.info(
+                "Upload your data first — criteria are written against the columns you load.",
+                icon=":material/upload_file:",
+            )

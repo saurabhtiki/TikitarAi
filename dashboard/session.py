@@ -22,7 +22,7 @@ import logging
 import streamlit as st
 
 from analyst.session import ChatMessage
-from dashboard.model import PinnedItem, Report, find_item
+from dashboard.model import PinnedItem, Report, find_item, find_item_by_source, remove_item
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,76 @@ def pinned_item(message: ChatMessage) -> PinnedItem | None:
     if not message.pinned_item_id:
         return None
     return find_item(get_report(), message.pinned_item_id)
+
+
+def pin_result(
+    source_id: str,
+    *,
+    heading: str,
+    comment: str = "",
+    sql: str | None = None,
+    frame=None,
+    figure=None,
+    outputs: set[str] | None = None,
+) -> PinnedItem:
+    """Puts a result into the report on its producer's behalf, and keeps it up to date.
+
+    This is `pin`'s sibling for requirement 6.5's criteria, which differ from a chat answer
+    in one way that matters: a criteria is **re-run**. The user refines the rule, tests it
+    again and saves again, and the report must then show the new numbers rather than the old
+    ones sitting next to them. So this is idempotent on `source_id`:
+
+    - An item this producer already owns is updated **where it is**. If the user has filed
+      it into a subsection, it stays there — pulling it back to the pool on every refine
+      would undo the arrangement they built, which is the opposite of helpful.
+    - An item the user removed on the Dashboard comes back as a new one. Saving again is an
+      unambiguous request for it to be in the report, and a silently-dropped save would
+      leave the user pressing a button that appears to do nothing.
+
+    `png` is cleared on every update, because it is a cache of the *previous* figure and
+    keeping it would export a chart of last run's numbers.
+
+    The frame is copied, for the reason this module's docstring gives.
+    """
+    existing = find_item_by_source(get_report(), source_id)
+    copied = None if frame is None else frame.copy()
+
+    if existing is not None:
+        existing.heading = heading
+        existing.comment = comment
+        existing.sql = sql
+        existing.frame = copied
+        existing.figure = figure
+        existing.outputs = set(outputs or set())
+        existing.png = None
+        logger.info("Updated dashboard item %s from source %s.", existing.item_id, source_id)
+        return existing
+
+    item = PinnedItem(
+        question=heading,
+        heading=heading,
+        comment=comment,
+        sql=sql,
+        frame=copied,
+        figure=figure,
+        outputs=set(outputs or set()),
+        source_id=source_id,
+    )
+    get_report().pool.append(item)
+    logger.info("Pinned a result from source %s to the dashboard (item %s).", source_id, item.item_id)
+    return item
+
+
+def unpin_source(source_id: str) -> bool:
+    """Removes the item a producer owns, if it is still in the report.
+
+    Used when a criteria's result stops being something the user wants reported — clearing
+    a saved run — rather than leaving an orphan tile that no longer corresponds to anything.
+    """
+    item = find_item_by_source(get_report(), source_id)
+    if item is None:
+        return False
+    return remove_item(get_report(), item.item_id)
 
 
 def pool_count() -> int:

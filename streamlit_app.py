@@ -6,6 +6,8 @@ from auth.db import init_db, seed_default_admin
 from auth.exceptions import AuthDatabaseError
 from auth.service import is_authenticated
 from branding import LOGO_PATH
+from checks.db import init_check_sets_table
+from checks.exceptions import ChecksStorageError
 from llm.db import init_llm_table
 from llm.exceptions import LLMDatabaseError
 
@@ -27,7 +29,8 @@ def bootstrap_database() -> bool:
         init_db()
         seed_default_admin()
         init_llm_table()
-    except (AuthDatabaseError, LLMDatabaseError):
+        init_check_sets_table()
+    except (AuthDatabaseError, LLMDatabaseError, ChecksStorageError):
         logger.exception("Failed to bootstrap the application database.")
         raise
     return True
@@ -35,7 +38,7 @@ def bootstrap_database() -> bool:
 
 try:
     bootstrap_database()
-except (AuthDatabaseError, LLMDatabaseError):
+except (AuthDatabaseError, LLMDatabaseError, ChecksStorageError):
     st.error("The application couldn't start because the database is unavailable.")
     st.stop()
 

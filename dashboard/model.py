@@ -61,6 +61,9 @@ class PinnedItem:
         outputs: which of requirement 6.2's output types this item renders.
         png: the rasterized chart, cached after the first export so HTML and Excel
             downloads of the same report don't rasterize it twice.
+        source_id: what produced this item, for things that own their report item and
+            re-save it — a criteria in `checks/` (requirement 6.5). None for anything
+            pinned from the chat, where each pin is its own one-off snapshot.
     """
 
     item_id: str = field(default_factory=new_id)
@@ -72,6 +75,7 @@ class PinnedItem:
     figure: Any = None
     outputs: set[str] = field(default_factory=set)
     png: bytes | None = None
+    source_id: str | None = None
 
     def display_heading(self) -> str:
         """What to print above this item. Never empty."""
@@ -185,29 +189,44 @@ def find_section(report: Report, node_id: str) -> Section | None:
     return None
 
 
-def find_item(report: Report, item_id: str) -> PinnedItem | None:
-    """The item with this id, wherever it lives — pool or any subsection."""
-    for item in report.pool:
-        if item.item_id == item_id:
-            return item
+def iter_items(report: Report):
+    """Every item in the report as `(container, position, item)`, pool first.
+
+    One traversal for every lookup there is. `container` and `position` come along because
+    removing an item needs them, and a finder that walked the tree a second way to support
+    that is how three near-identical loops appeared here in the first place.
+    """
+    for position, item in enumerate(report.pool):
+        yield report.pool, position, item
     for section in report.sections:
         for subsection in section.subsections:
-            for item in subsection.items:
-                if item.item_id == item_id:
-                    return item
-    return None
+            for position, item in enumerate(subsection.items):
+                yield subsection.items, position, item
+
+
+def find_item(report: Report, item_id: str) -> PinnedItem | None:
+    """The item with this id, wherever it lives — pool or any subsection."""
+    return next((item for _, _, item in iter_items(report) if item.item_id == item_id), None)
+
+
+def find_item_by_source(report: Report, source_id: str) -> PinnedItem | None:
+    """The item a given producer owns, wherever it lives — pool or any subsection.
+
+    Searched by `source_id` rather than by a remembered `item_id` for the same reason
+    `session.pinned_item` re-looks-up rather than trusting what it stored: the user may have
+    removed the item on this page, and an owner that keeps updating a deleted item would be
+    writing into nothing.
+    """
+    if not source_id:
+        return None
+    return next((item for _, _, item in iter_items(report) if item.source_id == source_id), None)
 
 
 def _detach_item(report: Report, item_id: str) -> PinnedItem | None:
     """Removes an item from wherever it currently is and returns it."""
-    for position, item in enumerate(report.pool):
+    for container, position, item in iter_items(report):
         if item.item_id == item_id:
-            return report.pool.pop(position)
-    for section in report.sections:
-        for subsection in section.subsections:
-            for position, item in enumerate(subsection.items):
-                if item.item_id == item_id:
-                    return subsection.items.pop(position)
+            return container.pop(position)
     return None
 
 

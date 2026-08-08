@@ -599,6 +599,26 @@ def test_start_over_discards_every_table(tmp_path, monkeypatch):
     assert app.session_state[session.DC_TABLES_KEY] == {}
 
 
+def test_rounding_offers_only_numeric_columns_and_records_the_step(tmp_path, monkeypatch):
+    """`dept` holds words, so rounding can't reach it and the picker shouldn't offer it.
+    `amount` is numeric by the time the dialog opens — detected types are applied on
+    upload — so "$1,200.50" is already 1200.5 here."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    table_id = _only_table(app).table_id
+
+    _open(app, table_id, "round_numbers")
+    assert app.multiselect(key=f"dc_round_columns_{table_id}").options == ["amount"]
+    app.multiselect(key=f"dc_round_columns_{table_id}").set_value(["amount"]).run()
+    app.number_input(key=f"dc_round_decimals_{table_id}").set_value(0).run()
+    app.segmented_control(key=f"dc_round_direction_{table_id}").set_value("down").run()
+    _click_and_settle(app, f"dc_apply_round_numbers_{table_id}")
+
+    assert not app.exception
+    cleaned = _cleaned(_only_table(app), SALARIES_CSV)
+    assert list(cleaned["amount"])[:2] == [1200.0, -300.0]
+    assert _only_table(app).steps[-1]["action"] == "round_numbers"
+
+
 # --------------------------------------------------------------------------------------
 # Regression
 # --------------------------------------------------------------------------------------

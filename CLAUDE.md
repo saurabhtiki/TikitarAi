@@ -19,13 +19,30 @@ Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- update this line each time a phase is completed -->
-Stage 7: Pin to Dashboard (6.1), the Dashboard page (6.3) and HTML + Excel export
-(6.4) — complete. Build-order item 6 is done; Chat with Data now runs end to end.
+Stage 8: Criteria-Based Exceptional Reporting (requirement 6.5, written up from
+`docs/addtion.md`) — complete. Build-order item 7. The new `checks/` package plus
+`app_pages/checks_view.py` add a third view to the Chat page: business rules in plain
+language become guarded SQL, and **saving a result auto-pins it to the Dashboard, which is
+the report** — there is no separate report screen. Two deliberate departures from
+`addtion.md` step 5: a criteria has **no chart of its own** (one stacked summary chart at the
+foot of the Design tab compares every saved criteria instead, with an AI overview under it),
+and Save pins **whichever of All / Failures / Passes is on screen** while the saved run keeps
+every row — the counts, the remarks and the action drafts all read from the full run. Report
+items a criteria owns can only be removed from the Checks tab; the Dashboard no longer
+discards anything carrying a `source_id`. A criteria that already has SQL offers **Run saved
+SQL** (no provider call — the stored statement is the recipe) beside **Regenerate SQL**, so
+re-running a set against next month's file is free; a run that fails reports the error and
+leaves regenerating to the user. The overview pins `summary.combined_chart` — counts and
+shares as two panels of one figure, because a `PinnedItem` holds only one.
+Follow-up emails, meetings and tasks are
+drafted and downloadable as `.eml` / `.ics`; **nothing is sent — there is no SMTP anywhere
+in this app**.
 
-Since then, out of band: the Data Cleaner gained Summarise / Pivot / Unpivot, which save a
-derived table rather than recording a step. See the addendum at the end of `docs/plan.md`.
+Out of band, earlier: the Data Cleaner gained Summarise / Pivot / Unpivot, which save a
+derived table rather than recording a step.
 
-Next: Stage 8 — Task Builder (requirement 7), build-order item 7.
+Next: Stage 9 — Task Builder (requirement 7), build-order item 8. It should reuse
+`checks.model`'s JSON, already shaped as a recipe, for §7.5's `task_json`.
 
 # Library docs (Agno, Streamlit)
 

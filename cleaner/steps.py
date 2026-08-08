@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
+import numpy as np
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
 
@@ -46,6 +47,18 @@ MAX_REGEX_LENGTH = 500
 _WARNING_SAMPLE_SIZE = 5
 
 CASE_CHOICES = ["upper", "lower", "title"]
+
+# Rounding directions. "up" is the ceiling and "down" the floor — both toward a fixed
+# side of the number line, so -1.234 rounded up to 2dp is -1.23. That is not Excel's
+# ROUNDUP, which goes away from zero; the dialog says which one this is.
+ROUNDING_DIRECTIONS = ["nearest", "up", "down"]
+MAX_ROUNDING_DECIMALS = 10
+# Scaling by a power of ten leaves binary floating-point residue — 1.1 * 10 is
+# 11.000000000000002, whose ceiling is 12, so "round 1.1 up to 1dp" would return 1.2.
+# Nudging the scaled value back to this many digits erases the residue while staying far
+# below the ~15 significant digits a float actually carries.
+_ROUNDING_GUARD_DIGITS = 9
+
 # "custom" absorbed what used to be a separate "unknown" strategy — that was a custom
 # fill with the word hardcoded, and two entries for one idea is one too many. The dialog
 # still pre-fills "Unknown", so it stays a zero-typing default.
@@ -425,6 +438,78 @@ def _validate_fix_numeric_text(params: dict, columns: list[str]) -> None:
 
 
 # --------------------------------------------------------------------------------------
+# round_numbers
+# --------------------------------------------------------------------------------------
+
+
+def _round_series(series: pd.Series, decimals: int, direction: str) -> pd.Series:
+    """Rounds one numeric column, preserving blanks and the column's own dtype."""
+    scale = 10**decimals
+    scaled = (series * scale).round(_ROUNDING_GUARD_DIGITS)
+
+    if direction == "up":
+        rounded = np.ceil(scaled)
+    elif direction == "down":
+        rounded = np.floor(scaled)
+    else:
+        # Half away from zero, the way a spreadsheet rounds. pandas' own `.round` is
+        # half-to-even, which turns 2.5 into 2 and surprises anyone who checked the
+        # figure in Excel first.
+        rounded = np.sign(scaled) * np.floor(np.abs(scaled) + 0.5)
+
+    return rounded / scale
+
+
+def _apply_round_numbers(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    existing, missing = _present(frame, params.get("columns", []))
+    decimals = int(params.get("decimals", 0))
+    direction = params.get("direction", "nearest")
+    result = frame.copy()
+    warnings_out = _missing_warning(missing)
+
+    for column in existing:
+        series = result[column]
+        if not is_numeric_dtype(series):
+            warnings_out.append(
+                f"'{column}' isn't a numeric column, so it was left alone. Set its type, or run "
+                f"'Fix numbers stored as text' on it, first."
+            )
+            continue
+        # Whole numbers are already rounded to any of the decimal places on offer, and
+        # rounding one would only turn an integer column into a float.
+        if pd.api.types.is_integer_dtype(series):
+            continue
+        result[column] = _round_series(series, decimals, direction)
+
+    return result, warnings_out
+
+
+def _describe_round_numbers(params: dict) -> str:
+    direction = params.get("direction", "nearest")
+    phrase = {"up": "up", "down": "down"}.get(direction, "to the nearest value")
+    decimals = params.get("decimals", 0)
+    return (
+        f"Rounded {phrase} to {decimals} decimal place(s): {', '.join(params.get('columns', []))}"
+    )
+
+
+def _validate_round_numbers(params: dict, columns: list[str]) -> None:
+    _require_keys(params, {"columns", "decimals", "direction"}, "Round numbers")
+    _require_columns_exist(params.get("columns", []), columns, "Round numbers")
+
+    decimals = params.get("decimals")
+    if not isinstance(decimals, int) or isinstance(decimals, bool) or not 0 <= decimals <= MAX_ROUNDING_DECIMALS:
+        raise InvalidStepError(
+            f"Round numbers: decimal places must be a whole number between 0 and {MAX_ROUNDING_DECIMALS}."
+        )
+    if params.get("direction") not in ROUNDING_DIRECTIONS:
+        raise InvalidStepError(
+            f"Round numbers: '{params.get('direction')}' isn't a rounding direction. "
+            f"Choose one of {', '.join(ROUNDING_DIRECTIONS)}."
+        )
+
+
+# --------------------------------------------------------------------------------------
 # trim_whitespace
 # --------------------------------------------------------------------------------------
 
@@ -762,13 +847,66 @@ def _flatten_label(label) -> str:
 
 
 def _coerce_fill_value(value):
-    """Reads a typed-in fill value as a number when it looks like one, else as text."""
+    """Reads a typed-in fill value as a number when it looks like one, else as text.
+
+    Whole numbers come back as `int`, not `float`. A pivot of a whole-number column is
+    itself whole-number (pandas' nullable `Int64`, since the cleaner parses numbers out of
+    text), and such a column cannot hold `0.0` — the difference decides whether the fill
+    lands or the column has to be widened.
+    """
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        number = float(value)
     except (TypeError, ValueError):
         return value
+    return int(number) if number.is_integer() else number
+
+
+def _fill_pivot_gaps(frame: pd.DataFrame, labels: list[str], fill_value) -> list[str]:
+    """Fills the empty cells a pivot leaves behind, in place, one column at a time.
+
+    Done here rather than through `pivot_table(fill_value=...)`, which fills the whole
+    result in one go and raises an unreadable `KeyError: dtype('float64')` out of pandas'
+    internals whenever the value doesn't fit the column's dtype — `0` into a whole-number
+    column being the obvious case a person would type.
+
+    A column that can't hold the value is widened rather than left with gaps: to `Float64`
+    when a whole-number column is asked to hold a fraction, otherwise to text. Both are
+    reported back as warnings, since a numeric column turning into text changes what can
+    be charted or summed downstream.
+    """
+    warnings_out: list[str] = []
+    widened: list[str] = []
+    to_text: list[str] = []
+
+    for label in labels:
+        column = frame[label]
+        if not column.isna().any():
+            continue
+        try:
+            frame[label] = column.fillna(fill_value)
+            continue
+        except (TypeError, ValueError):
+            logger.info("Fill value %r doesn't fit column '%s' (%s).", fill_value, label, column.dtype)
+
+        if isinstance(fill_value, (int, float)) and not isinstance(fill_value, bool) and is_numeric_dtype(column):
+            frame[label] = column.astype("Float64").fillna(float(fill_value))
+            widened.append(label)
+        else:
+            frame[label] = column.astype("string").fillna(str(fill_value))
+            to_text.append(label)
+
+    if widened:
+        warnings_out.append(
+            f"'{fill_value}' isn't a whole number, so these columns now hold decimals: {', '.join(widened)}."
+        )
+    if to_text:
+        warnings_out.append(
+            f"'{fill_value}' isn't a number, so these columns became text and can no longer be "
+            f"totalled or charted: {', '.join(to_text)}."
+        )
+    return warnings_out
 
 
 def _aggregation_label(column: str, function: str) -> str:
@@ -890,11 +1028,16 @@ def _apply_pivot(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, list[
         columns=pivot_column,
         values=value_column,
         aggfunc=PANDAS_AGGREGATIONS[function],
-        fill_value=_coerce_fill_value(params.get("fill_value")),
         dropna=False,
         observed=True,
     ).reset_index()
     result.columns = _dedupe_columns([_flatten_label(label) for label in result.columns])
+
+    fill_value = _coerce_fill_value(params.get("fill_value"))
+    if fill_value is not None:
+        # Everything past the row columns, taken by position: `_dedupe_columns` may have
+        # renamed a spread-across column that clashed with a row column's name.
+        warnings_out.extend(_fill_pivot_gaps(result, list(result.columns)[len(existing_index) :], fill_value))
 
     if len(result.columns) > MAX_PIVOT_COLUMNS:
         warnings_out.append(
@@ -1072,6 +1215,14 @@ STEP_REGISTRY: dict[str, StepSpec] = {
         apply=_apply_fix_numeric_text,
         describe=_describe_fix_numeric_text,
         validate=_validate_fix_numeric_text,
+        required_columns=_columns_param,
+    ),
+    "round_numbers": StepSpec(
+        action="round_numbers",
+        label="Round numbers",
+        apply=_apply_round_numbers,
+        describe=_describe_round_numbers,
+        validate=_validate_round_numbers,
         required_columns=_columns_param,
     ),
     "trim_whitespace": StepSpec(

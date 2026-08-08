@@ -245,7 +245,15 @@ def _render_pool(report: Report) -> None:
                     dashboard_session.open_dialog("preview", {"item_id": item.item_id})
                     st.rerun(scope="app")
 
-                if st.button(
+                # No Discard for an item a producer owns. `source_id` is set only by things
+                # that re-save their item — a criteria in `checks/` — and those keep their
+                # own Remove beside the Save that created it, where the rule it belongs to
+                # is on screen. Discarding it here would leave that page still showing
+                # "Saved to report" for something no longer in the report, and the next
+                # refine would silently pin a second copy. An unplaced item is not in the
+                # report anyway: the exports walk the section tree only, so leaving one in
+                # the pool costs nothing.
+                if item.source_id is None and st.button(
                     "Discard",
                     key=f"db_pool_discard_{item.item_id}",
                     icon=":material/delete:",
@@ -253,6 +261,12 @@ def _render_pool(report: Report) -> None:
                 ):
                     remove_item(report, item.item_id)
                     st.rerun(scope="app")
+
+            if item.source_id is not None:
+                st.caption(
+                    ":grey[Leave it unplaced to keep it out of the report, or remove it from "
+                    "the Checks tab that made it.]"
+                )
 
 
 # --------------------------------------------------------------------------------------

@@ -33,7 +33,9 @@ from cleaner.steps import (
     DUPLICATE_KEEP_CHOICES,
     FILL_STRATEGIES,
     MAX_PIVOT_COLUMNS,
+    MAX_ROUNDING_DECIMALS,
     RESHAPE_ACTIONS,
+    ROUNDING_DIRECTIONS,
     get_spec,
 )
 from engine import session as engine_session
@@ -70,6 +72,12 @@ _FILL_LABELS = {
     "drop_rows": "Drop affected rows",
 }
 
+_ROUNDING_LABELS = {
+    "nearest": "Nearest",
+    "up": "Up",
+    "down": "Down",
+}
+
 # Command bar layout: which actions appear under which heading, and the face each shows
 # in its segmented control. Order here is the order people actually clean in.
 COMMAND_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
@@ -90,6 +98,7 @@ COMMAND_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
             ("set_column_types", "Column types", ":material/category:"),
             ("fill_missing", "Missing values", ":material/water_drop:"),
             ("fix_numeric_text", "Numbers as text", ":material/functions:"),
+            ("round_numbers", "Round numbers", ":material/123:"),
         ],
     ),
     (
@@ -144,6 +153,7 @@ DIALOG_TITLES = {
     "set_column_types": "Set column types",
     "fill_missing": "Handle missing values",
     "fix_numeric_text": "Fix numbers stored as text",
+    "round_numbers": "Round numbers",
     "trim_whitespace": "Trim whitespace",
     "remove_special_characters": "Remove special characters",
     "change_case": "Change letter case",
@@ -510,6 +520,50 @@ def _dialog_fix_numeric_text(table, frame) -> None:
     if columns:
         _impact_caption(frame, "fix_numeric_text", params)
     _footer(table.table_id, "fix_numeric_text", params, disabled=not columns)
+
+
+def _dialog_round_numbers(table, frame) -> None:
+    columns = st.multiselect(
+        "Columns to round",
+        options=profiling.numeric_columns(frame),
+        key=f"dc_round_columns_{table.table_id}",
+        help="Only numeric columns can be rounded — run 'Numbers as text' first if yours is still text.",
+    )
+    decimals_column, direction_column = st.columns(2)
+    with decimals_column:
+        decimals = st.number_input(
+            "Decimal places",
+            min_value=0,
+            max_value=MAX_ROUNDING_DECIMALS,
+            value=2,
+            step=1,
+            key=f"dc_round_decimals_{table.table_id}",
+            help="0 gives whole numbers, 2 gives figures like 1234.57.",
+        )
+    with direction_column:
+        direction = st.segmented_control(
+            "Round",
+            options=ROUNDING_DIRECTIONS,
+            format_func=lambda choice: _ROUNDING_LABELS[choice],
+            default="nearest",
+            # Without this a second click on the selected option clears it, and the step
+            # would fall back to a direction nobody chose.
+            required=True,
+            key=f"dc_round_direction_{table.table_id}",
+            help=(
+                "Nearest rounds .5 away from zero, as a spreadsheet does. Up and down go "
+                "toward larger and smaller values, so -1.234 rounds up to -1.23."
+            ),
+        )
+
+    params = {
+        "columns": columns,
+        "decimals": int(decimals),
+        "direction": direction,
+    }
+    if columns:
+        _impact_caption(frame, "round_numbers", params)
+    _footer(table.table_id, "round_numbers", params, disabled=not columns)
 
 
 def _dialog_trim_whitespace(table, frame) -> None:
@@ -957,6 +1011,7 @@ DIALOG_BODIES = {
     "set_column_types": _dialog_set_column_types,
     "fill_missing": _dialog_fill_missing,
     "fix_numeric_text": _dialog_fix_numeric_text,
+    "round_numbers": _dialog_round_numbers,
     "trim_whitespace": _dialog_trim_whitespace,
     "remove_special_characters": _dialog_remove_special_characters,
     "change_case": _dialog_change_case,

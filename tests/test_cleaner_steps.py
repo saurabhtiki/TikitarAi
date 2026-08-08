@@ -374,6 +374,101 @@ def test_fix_numeric_text_converts_and_reports():
     assert "1 of 2 values" in warnings_out[0]
 
 
+# --------------------------------------------------------------------------------------
+# round_numbers
+# --------------------------------------------------------------------------------------
+
+
+def round_numbers(frame: pd.DataFrame, columns: list[str], decimals: int, direction: str):
+    return run("round_numbers", frame, {"columns": columns, "decimals": decimals, "direction": direction})
+
+
+def test_rounding_up_and_down_go_toward_larger_and_smaller_values():
+    frame = pd.DataFrame({"amount": [1.234, 1.235, -1.234]})
+
+    up, _ = round_numbers(frame, ["amount"], 2, "up")
+    down, _ = round_numbers(frame, ["amount"], 2, "down")
+
+    assert list(up["amount"]) == [1.24, 1.24, -1.23]
+    assert list(down["amount"]) == [1.23, 1.23, -1.24]
+
+
+def test_rounding_to_nearest_sends_a_half_away_from_zero():
+    """pandas' own `.round` is half-to-even, which would give 2.0 and -2.0 here."""
+    frame = pd.DataFrame({"amount": [2.5, 3.5, -2.5]})
+    result, _ = round_numbers(frame, ["amount"], 0, "nearest")
+
+    assert list(result["amount"]) == [3.0, 4.0, -3.0]
+
+
+def test_rounding_up_is_not_thrown_off_by_floating_point_residue():
+    """1.1 * 10 is 11.000000000000002 in binary floating point; its ceiling is 12."""
+    frame = pd.DataFrame({"amount": [1.1, 2.67, 8.7]})
+    result, _ = round_numbers(frame, ["amount"], 1, "up")
+
+    assert list(result["amount"]) == [1.1, 2.7, 8.7]
+
+
+def test_rounding_leaves_blanks_blank():
+    frame = pd.DataFrame({"amount": [1.234, np.nan]})
+    result, _ = round_numbers(frame, ["amount"], 2, "down")
+
+    assert result.loc[0, "amount"] == 1.23
+    assert pd.isna(result.loc[1, "amount"])
+
+
+def test_rounding_reports_a_non_numeric_column_instead_of_failing():
+    frame = pd.DataFrame({"amount": ["1.234", "2.345"]})
+    result, warnings_out = round_numbers(frame, ["amount"], 2, "up")
+
+    assert list(result["amount"]) == ["1.234", "2.345"]
+    assert "isn't a numeric column" in warnings_out[0]
+
+
+def test_rounding_leaves_a_whole_number_column_as_whole_numbers():
+    frame = pd.DataFrame({"count": [1, 2, 3]})
+    result, warnings_out = round_numbers(frame, ["count"], 2, "up")
+
+    assert list(result["count"]) == [1, 2, 3]
+    assert result["count"].dtype == frame["count"].dtype
+    assert warnings_out == []
+
+
+def test_rounding_skips_a_column_an_earlier_step_removed():
+    frame = pd.DataFrame({"amount": [1.234]})
+    result, warnings_out = round_numbers(frame, ["amount", "gone"], 1, "nearest")
+
+    assert list(result["amount"]) == [1.2]
+    assert "Skipped missing column" in warnings_out[0]
+
+
+def test_the_rounding_log_line_names_the_direction_and_the_columns():
+    line = get_spec("round_numbers").describe({"columns": ["amount"], "decimals": 2, "direction": "down"})
+
+    assert line == "Rounded down to 2 decimal place(s): amount"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"columns": [], "decimals": 2, "direction": "up"},
+        {"columns": ["nope"], "decimals": 2, "direction": "up"},
+        {"columns": ["amount"], "decimals": -1, "direction": "up"},
+        {"columns": ["amount"], "decimals": 99, "direction": "up"},
+        {"columns": ["amount"], "decimals": 2.5, "direction": "up"},
+        {"columns": ["amount"], "decimals": 2, "direction": "sideways"},
+        {"columns": ["amount"], "decimals": 2, "direction": "up", "extra": 1},
+    ],
+)
+def test_a_malformed_rounding_step_is_rejected(params):
+    with pytest.raises(InvalidStepError):
+        get_spec("round_numbers").validate(params, ["amount"])
+
+
+def test_a_well_formed_rounding_step_validates():
+    get_spec("round_numbers").validate({"columns": ["amount"], "decimals": 0, "direction": "nearest"}, ["amount"])
+
+
 def test_duplicates_are_removed_on_a_column_subset():
     frame = pd.DataFrame({"id": ["1", "1", "2"], "note": ["a", "b", "c"]})
     result, _ = run("drop_duplicates", frame, {"columns": ["id"], "keep": "first"})
@@ -526,6 +621,50 @@ def test_pivot_fills_empty_cells_with_a_typed_in_number():
     assert result.set_index("region").loc["N", "Feb"] == 0.0
 
 
+def whole_number_sales_frame() -> pd.DataFrame:
+    """Sales with the *nullable* `Int64` amounts a cleaned upload really carries.
+
+    Files are read as text and the numeric type step runs `parse_numeric_series`, so a
+    column of whole numbers arrives as pandas' masked `Int64` rather than plain `float64`.
+    That distinction is the whole point of these tests: an `Int64` column cannot hold
+    `0.0`, and pandas' own `pivot_table(fill_value=...)` reports the mismatch as
+    `KeyError: dtype('float64')` from deep inside its internals.
+    """
+    amount, _ = parse_numeric_series(pd.Series(["10", "20", "30"], dtype="string"))
+    return pd.DataFrame({"region": ["N", "S", "N"], "month": ["Jan", "Feb", "Feb"], "amount": amount})
+
+
+def pivot_with_fill(fill_value: str) -> tuple[pd.DataFrame, list[str]]:
+    return run(
+        "pivot",
+        whole_number_sales_frame(),
+        {"index": ["region"], "columns": "month", "values": "amount", "function": "sum", "fill_value": fill_value},
+    )
+
+
+def test_pivot_fills_a_whole_number_column_without_widening_it():
+    result, warnings_out = pivot_with_fill("0")
+
+    assert str(result["Jan"].dtype) == "Int64"
+    assert result.set_index("region").loc["S", "Jan"] == 0
+    assert warnings_out == []
+
+
+def test_pivot_widens_a_whole_number_column_asked_to_hold_a_fraction():
+    result, warnings_out = pivot_with_fill("0.5")
+
+    assert str(result["Jan"].dtype) == "Float64"
+    assert result.set_index("region").loc["S", "Jan"] == 0.5
+    assert "decimals" in warnings_out[0]
+
+
+def test_pivot_falls_back_to_text_for_a_non_numeric_fill_and_says_so():
+    result, warnings_out = pivot_with_fill("n/a")
+
+    assert result.set_index("region").loc["S", "Jan"] == "n/a"
+    assert "became text" in warnings_out[0]
+
+
 def test_pivot_refuses_to_sum_a_text_column_and_leaves_the_table_alone():
     frame = sales_frame()
     result, warnings_out = run(
@@ -642,6 +781,7 @@ def test_every_registered_action_leaves_its_input_frame_untouched():
         "delete_columns": {"columns": ["note"]},
         "rename_columns": {"renames": {"note": "comment"}},
         "fix_numeric_text": {"columns": ["amount"], "decimal_separator": ".", "parentheses_are_negative": True},
+        "round_numbers": {"columns": ["amount"], "decimals": 2, "direction": "nearest"},
         "trim_whitespace": {"collapse_internal": True},
         "remove_special_characters": {"keep_pattern": DEFAULT_KEEP_PATTERN, "replacement": ""},
         "change_case": {"by_column": {"note": "upper"}},

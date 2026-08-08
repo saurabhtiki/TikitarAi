@@ -22,6 +22,7 @@ from pathlib import Path
 
 from agno.agent import Agent
 from agno.models.openai.like import OpenAILike
+from pydantic import ValidationError
 
 from llm.crypto import decrypt_api_key
 from llm.exceptions import LLMDatabaseError
@@ -146,6 +147,7 @@ def run_structured(
     output_schema,
     *,
     instructions: str | None = None,
+    text_field: str | None = None,
     key_path: Path | str | None = None,
 ):
     """Runs one narrow, structured task and returns the parsed Pydantic object.
@@ -153,6 +155,13 @@ def run_structured(
     Used for the small auxiliary calls requirement 3.2 designates the Light Model for.
     Kept deliberately single-purpose — no tools, no history, no session storage — because
     each call having one job is what makes it reliable enough to run unattended.
+
+    Args:
+        text_field: which field a plain-text reply should be read as, for callers whose
+            schema has one obvious answer field. Reasoning models in particular tend to
+            answer the question and ignore the envelope, and discarding a correct answer
+            over its packaging leaves the user with an error they cannot act on. See
+            `_recover_structure`. Leave it None when no single field could carry the reply.
 
     Raises:
         LLMConnectionError: if the provider fails or returns something unparseable.
@@ -172,15 +181,80 @@ def run_structured(
         raise LLMConnectionError(_readable_error(error)) from error
 
     content = getattr(response, "content", None)
-    if not isinstance(content, output_schema):
-        logger.warning(
-            "Structured call returned %s rather than %s.", type(content).__name__, output_schema.__name__
+    if isinstance(content, output_schema):
+        return content
+
+    recovered = _recover_structure(content, output_schema, text_field)
+    if recovered is not None:
+        logger.info(
+            "Structured call returned %s; recovered it as %s.",
+            type(content).__name__,
+            output_schema.__name__,
         )
-        raise LLMConnectionError(
-            f"{profile.get('default_model')} didn't return the expected structure. "
-            "A larger or more capable light model usually fixes this."
-        )
-    return content
+        return recovered
+
+    logger.warning(
+        "Structured call returned %s rather than %s.", type(content).__name__, output_schema.__name__
+    )
+    raise LLMConnectionError(
+        f"{profile.get('default_model')} didn't return the expected structure. "
+        "A larger or more capable light model usually fixes this."
+    )
+
+
+def _strip_code_fence(text: str) -> str:
+    """Drops the ``` fencing models wrap an answer in when asked for one thing only."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = [line for line in stripped.splitlines() if not line.strip().startswith("```")]
+    return "\n".join(lines).strip()
+
+
+def _recover_structure(content, output_schema, text_field: str | None):
+    """Rescues an answer that is right but arrived in the wrong envelope, or None.
+
+    Two things go wrong often enough to be worth handling rather than reporting:
+
+    - **The schema is honoured but sent as text.** Providers without real structured-output
+      support return the JSON in the message body, sometimes fenced. Parsing it is exact —
+      the fields are all there — so there is nothing to second-guess.
+    - **The schema is ignored and the question is simply answered.** A model asked for one
+      SQL statement replies with the statement. `text_field` is the caller saying which
+      field that answer belongs in; without it the reply is genuinely unusable and this
+      returns None.
+
+    Recovery is not trust. Every caller validates what comes back — the SQL path still has
+    to pass `assert_safe_sql`, DuckDB and the result contract — so a wrong guess here fails
+    the same way a wrong structured answer would.
+    """
+    if isinstance(content, dict):
+        try:
+            return output_schema.model_validate(content)
+        except ValidationError:
+            return None
+
+    if not isinstance(content, str) or not content.strip():
+        return None
+
+    text = _strip_code_fence(content)
+    if text.startswith("{"):
+        try:
+            return output_schema.model_validate_json(text)
+        except ValidationError:
+            # Falls through to `text_field`: a reply that opens with a brace but doesn't fit
+            # the schema may still be the answer itself, and a JSON-shaped answer is no
+            # worse a candidate than any other text.
+            pass
+
+    if not text_field:
+        return None
+
+    try:
+        return output_schema(**{text_field: text})
+    except ValidationError:
+        logger.info("A plain-text reply did not fit %s.%s.", output_schema.__name__, text_field)
+        return None
 
 
 def _readable_error(error: Exception) -> str:

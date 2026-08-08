@@ -397,6 +397,51 @@ session storage.
   no row limits.
 - No PDF or Word export is available for the Dashboard.
 
+### 6.5 Criteria-Based Exceptional Reporting
+
+A third view on the Chat with Data page — **Setup | Chat | Checks** —
+sharing the same loaded tables, confirmed relationships and column
+dictionary. Where chat answers one question at a time, this tests a set of
+standing business rules and reports the exceptions.
+
+- **Persona** — set once per criteria set: who the AI is acting as, plus
+  any background it should apply. Passed as the `knowledge_base` argument
+  of the commentary-generation call (Section 7.2's slot, used here first).
+- **Criteria** — each is a rule written in plain language ("bonus must be
+  at most 5% of basic if department = HR"), with optional table/column
+  hints. The hints are a suggestion, not a constraint: the AI also
+  receives the real schema and corrects a wrong guess rather than failing
+  on it.
+- **Generated SQL** — one narrow LLM call, distinct from the chat agent,
+  guarded by the same read-only rules as Section 5.5. Its result must
+  carry, per row: the columns identifying the record, `criteria_result`
+  (the value the rule turns on) and `criteria_met` (the literal `Yes` or
+  `No`). A result that breaks that contract is repaired automatically once
+  before the reason is shown to the user.
+- **Refine loop** — editing the rule and re-testing regenerates *from the
+  previous statement*, so a query the user has already tuned is adjusted
+  rather than rewritten.
+- **Review** — the full result with an All / Failures / Passes filter, and
+  an optional chart.
+- **Save to report** — freezes the run, generates a point-wise remark on
+  the failures, and pins the result to the Dashboard (Section 6.3)
+  automatically. There is no separate report screen: the Dashboard already
+  arranges, renames, re-comments, reorders, removes and exports pinned
+  items. Re-saving after a refine updates that same item in place, wherever
+  the user has filed it.
+- **Follow-up actions** — for a saved criteria, the AI drafts an email,
+  meeting agenda, task description or free-form note from the failing rows.
+  Every one is a **draft**: it is reviewed and edited, and confirming it
+  places it in the report. **Nothing is sent from this app.** A confirmed
+  draft can be downloaded as `.eml` or `.ics` for the user's own mail or
+  calendar client. Outbound sending (SMTP, calendar APIs) is out of scope.
+- **Storage** — unlike the Dashboard, a criteria set persists: SQLite table
+  `check_sets` (`set_id`, `user_id`, `name`, `checks_json`, timestamps),
+  owned by its creator. What is stored is the recipe — persona, criteria
+  text, hints, SQL — never the result rows, which describe data that is
+  gone once the session ends. A reloaded set is re-tested against whatever
+  is uploaded now.
+
 ---
 
 ## 7. Task Builder
@@ -570,7 +615,10 @@ The following are explicitly not part of this build:
    type logic)
 6. Chat with Data (chat UI, pin-to-dashboard, Dashboard page, HTML + Excel
    export)
-7. Task Builder (cleaning-step capture, structure-first report building,
+7. Criteria-Based Exceptional Reporting (persona, criteria → SQL, refine
+   loop, auto-pin to the Dashboard, saved criteria sets, drafted follow-up
+   actions)
+8. Task Builder (cleaning-step capture, structure-first report building,
    knowledge base, save/reorder controls, full export formats)
-8. Run a Task (schema matching, sample-file generator, replay execution,
+9. Run a Task (schema matching, sample-file generator, replay execution,
    preview screen)

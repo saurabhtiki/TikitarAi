@@ -190,6 +190,65 @@ class TestRunStructured:
             client.run_structured(local_profile, "q", Reply)
 
 
+class TestRecoveringAnAnswerInTheWrongEnvelope:
+    """Providers without real structured output, and reasoning models that simply answer.
+
+    The question in every one of these is the same: the model got the task right, so is the
+    packaging alone reason enough to tell the user it failed?
+    """
+
+    def test_json_sent_as_text_is_parsed(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response('{"answer": "42"}'))
+        assert client.run_structured(local_profile, "q", Reply).answer == "42"
+
+    def test_json_inside_a_code_fence_is_parsed(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response('```json\n{"answer": "42"}\n```'))
+        assert client.run_structured(local_profile, "q", Reply).answer == "42"
+
+    def test_a_dict_reply_is_parsed(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response({"answer": "42"}))
+        assert client.run_structured(local_profile, "q", Reply).answer == "42"
+
+    def test_plain_prose_becomes_the_named_field(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response("just some prose"))
+        recovered = client.run_structured(local_profile, "q", Reply, text_field="answer")
+        assert recovered.answer == "just some prose"
+
+    def test_a_fenced_answer_loses_its_fence(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response("```sql\nSELECT 1\n```"))
+        recovered = client.run_structured(local_profile, "q", Reply, text_field="answer")
+        assert recovered.answer == "SELECT 1"
+
+    def test_without_a_named_field_prose_is_still_a_failure(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response("just some prose"))
+        with pytest.raises(client.LLMConnectionError, match="expected structure"):
+            client.run_structured(local_profile, "q", Reply)
+
+    def test_json_that_does_not_fit_the_schema_falls_back_to_the_named_field(
+        self, monkeypatch, local_profile
+    ):
+        _patch_agent(monkeypatch, _Response('{"reply": "42"}'))
+        recovered = client.run_structured(local_profile, "q", Reply, text_field="answer")
+        assert recovered.answer == '{"reply": "42"}'
+
+    def test_json_that_does_not_fit_the_schema_raises_without_a_named_field(
+        self, monkeypatch, local_profile
+    ):
+        _patch_agent(monkeypatch, _Response('{"reply": "42"}'))
+        with pytest.raises(client.LLMConnectionError, match="expected structure"):
+            client.run_structured(local_profile, "q", Reply)
+
+    def test_an_empty_reply_is_not_recovered(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response("   "))
+        with pytest.raises(client.LLMConnectionError, match="expected structure"):
+            client.run_structured(local_profile, "q", Reply, text_field="answer")
+
+    def test_a_named_field_the_schema_does_not_have_is_not_forced(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response("just some prose"))
+        with pytest.raises(client.LLMConnectionError, match="expected structure"):
+            client.run_structured(local_profile, "q", Reply, text_field="nonexistent")
+
+
 class TestDescribeProfile:
     def test_it_reads_as_a_label(self, cloud_profile):
         assert client.describe_profile(cloud_profile) == "My OpenAI (gpt-4o-mini)"
