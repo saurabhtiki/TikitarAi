@@ -59,7 +59,10 @@
       "PowerShell(uv run pytest tests/test_analyst_agent.py -q 2>&1)",
       "PowerShell(uv run pytest tests/test_chat_with_data_page.py tests/test_analyst_routing.py tests/test_analyst_charts.py -q 2>&1)",
       "PowerShell(uv run pytest tests/test_analyst_last_result.py -q 2>&1)",
-      "PowerShell(uv run pytest tests/test_llm_db.py tests/test_llm_models.py tests/test_llm_session.py tests/test_settings_page.py -q 2>&1)"
+      "PowerShell(uv run pytest tests/test_llm_db.py tests/test_llm_models.py tests/test_llm_session.py tests/test_settings_page.py -q 2>&1)",
+      "Bash(python -c \"import agno; print\\(agno.__file__\\)\")",
+      "Read(//c//**)",
+      "Bash(pip show *)"
     ]
   }
 }

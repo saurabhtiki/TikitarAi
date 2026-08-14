@@ -95,6 +95,20 @@ class QueryResult:
         return self.frame is not None and not self.frame.empty
 
 
+def _strip_unsupported_function_flags(toolkit: SessionDuckDbTools) -> None:
+    """Works around an Agno 2.8.6 bug: `Toolkit.register_tool` always sets a registered
+    function's `requires_confirmation`/`external_execution` to `False` rather than `None`,
+    so `Function.to_dict()` (which excludes only `None`) serialises them into every tool
+    schema. OpenAI ignores the extra keys; Gemini's OpenAI-compatible endpoint — reached via
+    `OpenAILike` for every provider, per `llm/client.py` — validates strictly and rejects the
+    request with "Unknown name requires_confirmation/external_execution". None of this
+    toolkit's tools use confirmation or external execution, so clearing the flags is safe.
+    """
+    for function in {**toolkit.functions, **toolkit.async_functions}.values():
+        function.requires_confirmation = None
+        function.external_execution = None
+
+
 def build_analyst(
     profile: dict,
     connection: duckdb.DuckDBPyConnection,
@@ -127,6 +141,7 @@ def build_analyst(
         raise AgentRunError(str(error)) from error
 
     toolkit = SessionDuckDbTools(connection)
+    _strip_unsupported_function_flags(toolkit)
     agent = Agent(
         model=model,
         tools=[toolkit],
