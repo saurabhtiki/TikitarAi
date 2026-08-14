@@ -12,6 +12,9 @@ from checks.db import init_check_sets_table
 from checks.exceptions import ChecksStorageError
 from llm.db import init_llm_table
 from llm.exceptions import LLMDatabaseError
+from meetings.db import init_meetings_tables
+from meetings.exceptions import MeetingStorageError
+from meetings.session import invitee_route_params
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,7 +37,14 @@ def bootstrap_database() -> bool:
         # Before `check_sets`, whose `chat_type_id` refers to it (requirement 6.6).
         init_chat_types_table()
         init_check_sets_table()
-    except (AuthDatabaseError, LLMDatabaseError, ChecksStorageError, ChatTypeStorageError):
+        init_meetings_tables()
+    except (
+        AuthDatabaseError,
+        LLMDatabaseError,
+        ChecksStorageError,
+        ChatTypeStorageError,
+        MeetingStorageError,
+    ):
         logger.exception("Failed to bootstrap the application database.")
         raise
     return True
@@ -42,8 +52,19 @@ def bootstrap_database() -> bool:
 
 try:
     bootstrap_database()
-except (AuthDatabaseError, LLMDatabaseError, ChecksStorageError):
+except (AuthDatabaseError, LLMDatabaseError, ChecksStorageError, MeetingStorageError):
     st.error("The application couldn't start because the database is unavailable.")
+    st.stop()
+
+# An invitee link is answered before the login gate: an invitee has no account, and their
+# token is their identity (requirement 6.7, spec 2). Checked after the database is ready,
+# because the page it renders reads from it immediately. A malformed or absent link returns
+# None and falls through to the ordinary app.
+_invitee_route = invitee_route_params()
+if _invitee_route is not None:
+    from app_pages.meeting_invitee import render_invitee_page
+
+    render_invitee_page(*_invitee_route)
     st.stop()
 
 if not is_authenticated():
@@ -58,6 +79,11 @@ else:
             # Directly after the chat, because pinning an answer there is the only way
             # anything gets here — the two pages are one workflow (requirement 6.1–6.3).
             st.Page("app_pages/dashboard.py", title="Dashboard", icon=":material/dashboard:"),
+        ],
+        # Its own section rather than part of Explore: a meeting is a workflow with two
+        # sides (creator here, invitee on a link), not a data-exploration tool.
+        "Meetings": [
+            st.Page("app_pages/meetings.py", title="Meetings", icon=":material/groups:")
         ],
         "Utilities": [
             st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon=":material/cleaning_services:")

@@ -175,9 +175,56 @@ Known pre-existing failures, not from this stage (they fail with Stage 9's page 
 stashed): `test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body`
 and `TestRelationships::test_confirming_a_bad_link_keeps_it_declared_but_unenforced`.
 
-Next: Stage 10 — Task Builder (requirement 7), build-order item 9. It should reuse
-`checks.model`'s JSON, already shaped as a recipe, for §7.5's `task_json`, and
-`chat_types.model` for the schema signature §7.4 asks a Task to capture.
+Stage 10 (current): Meeting Chatbot, Phase 1 (requirement 6.7, written up from
+`docs/projectAI ChatDynamic.md`) — complete. Task Builder is deferred; this was taken up
+ahead of it at the user's request. The new `meetings/` package plus `app_pages/meetings.py`
+(registered) and `app_pages/meeting_invitee.py` (**not** registered — rendered by direct
+call, as `checks_view.py` is) add a second, parallel product to the app: an employee creates
+a subject-based meeting with a persona, context, SOP and agenda, and each invitee gets a
+private token link to chat with that persona and close it into a point-wise MoM.
+
+Phase 1 is **discussion agenda items only**. Table items (spec 3a), evaluation fields (3b)
+and every cross-invitee comparison matrix are later phases. `AgendaItem` stores its `type`
+regardless, and `agenda_from_json` drops anything that isn't `"discussion"`, so those arrive
+as a new table rather than a migration of every `agenda_json` already written.
+
+Two load-bearing decisions. **The MoM is built from the full stored transcript, never from
+`running_summary`.** That rolling fold exists only to keep a live conversation inside a
+context window; it is lossy and compounds, so a permanent record built on it would quietly
+degrade the longer the conversation ran. The mechanism is the signature:
+`summary_agent.generate_summary` takes a `list[ChatMessage]`, so no argument on it could
+carry a summary instead — and `test_meetings_summary_agent.py::TestFullHistoryIsTheSource`
+exists to keep it that way. And **there is still no SMTP anywhere.** The Share tab prints
+each invitee's link and 6-digit code in `st.code()` blocks for the creator to send
+themselves; `checks/actions.py`'s "nothing here sends anything" philosophy is unchanged, and
+whether to break it was left open rather than decided by this stage.
+
+The invitee side has **no user_id to scope by** — the token is the whole identity — so
+`meetings/db.py` keeps the two families of query textually apart, and `resolve_token`
+*returns* the meeting id rather than accepting one: the `m=` in the URL is a readability
+convenience, and editing it by hand must not open a different meeting. `streamlit_app.py`
+answers an invitee link after `bootstrap_database()` but **before** `is_authenticated()`,
+and `invitee_route_params` lives in `meetings/session.py` rather than inline so that routing
+decision is testable without booting the app; anything malformed returns None and falls
+through to the ordinary login page.
+
+Access codes are **encrypted, not hashed** — the one deliberate departure from how `auth/`
+treats a password, because the creator's Share screen has to show the code again. It reuses
+`llm.crypto`'s Fernet key via two aliases. The lockout (5 attempts, 15 minutes) is per
+*invitee row*, since the 24-byte token is not worth attacking and the real threat is someone
+with a forwarded link guessing six digits. An unreadable `locked_until` fails **open**:
+failing closed would strand a legitimate invitee with no appeal.
+
+Table names are all `meeting_`-prefixed (`meeting_sessions`, `meeting_messages`,
+`meeting_contacts`…) because `sessions`/`messages`/`contacts`/`files` are too generic to
+claim in a database four other domains already share. `BASE_URL` reads an env var, not
+`st.secrets`, which raises outright when no secrets file exists.
+
+Next: Meeting Chatbot Phase 2 — table agenda items (spec 3a) and evaluation fields (3b),
+both of which then feed the comparison matrices in spec 8. After that, Stage 11 — Task
+Builder (requirement 7), build-order item 9, which should reuse `checks.model`'s JSON,
+already shaped as a recipe, for §7.5's `task_json`, and `chat_types.model` for the schema
+signature §7.4 asks a Task to capture.
 
 # Library docs (Agno, Streamlit)
 

@@ -62,7 +62,11 @@
       "PowerShell(uv run pytest tests/test_llm_db.py tests/test_llm_models.py tests/test_llm_session.py tests/test_settings_page.py -q 2>&1)",
       "Bash(python -c \"import agno; print\\(agno.__file__\\)\")",
       "Read(//c//**)",
-      "Bash(pip show *)"
+      "Bash(pip show *)",
+      "Bash(curl -s -o /dev/null -w \"root=%{http_code}\\\\n\" http://localhost:8577/)",
+      "Bash(curl -s -o /dev/null -w \"invitee_link=%{http_code}\\\\n\" \"http://localhost:8577/?m=1&t=sometoken\")",
+      "Bash(curl -s -o /dev/null -w \"invitee-link:%{http_code}\\\\n\" \"http://localhost:8599/?m=1&t=sometoken\")",
+      "Bash(curl -s http://localhost:8599/healthz)"
     ]
   }
 }
