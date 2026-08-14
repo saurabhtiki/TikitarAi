@@ -7,8 +7,18 @@ from auth.db import get_user_by_id, update_own_password, update_own_profile
 from auth.exceptions import AuthDatabaseError, InvalidPasswordError, PhotoProcessingError
 from auth.photos import save_user_photo
 from llm.client import LLMConnectionError, test_connection
-from llm.db import create_profile, delete_profile, list_profiles, set_light_model, unset_light_model, update_profile
+from llm.db import (
+    create_profiles,
+    delete_profile,
+    list_profiles,
+    set_default_model,
+    set_light_model,
+    unset_default_model,
+    unset_light_model,
+    update_profile,
+)
 from llm.exceptions import LLMDatabaseError
+from llm.models import parse_model_names
 from sidebar import photo_data_uri, render_sidebar
 
 logger = logging.getLogger(__name__)
@@ -167,32 +177,60 @@ def _open_add_profile_dialog(user_id: int) -> None:
                 key="settings_add_api_key",
                 help="Stored encrypted. Leave blank if this provider doesn't need one.",
             )
-        default_model = st.text_input(
-            "Default model", key="settings_add_default_model", help="Free-text model name, e.g. 'gpt-4o-mini'."
+        models_raw = st.text_area(
+            "Models",
+            key="settings_add_models",
+            help=(
+                "One model per line, or comma-separated — e.g. gpt-4o-mini, gpt-4o. "
+                "A separate profile is saved for each, sharing this nickname, URL and key."
+            ),
         )
-        submitted = st.form_submit_button("Save", icon=":material/save:", help="Create this profile.",type="primary")
+        st.caption(
+            "The key is stored on each saved profile, so changing it later means editing "
+            "every profile in the group."
+        )
+        submitted = st.form_submit_button("Save", icon=":material/save:", help="Create these profiles.",type="primary")
 
     if submitted:
-        _handle_create_profile(user_id, nickname, provider_type, base_url, api_key, default_model)
+        _handle_create_profile(user_id, nickname, provider_type, base_url, api_key, models_raw)
 
 
 def _handle_create_profile(
-    user_id: int, nickname: str, provider_type: str, base_url: str, api_key: str | None, default_model: str
+    user_id: int, nickname: str, provider_type: str, base_url: str, api_key: str | None, models_raw: str
 ) -> None:
-    if not nickname or not default_model:
-        st.warning("Nickname and default model are required.", icon=":material/error:")
+    """Saves one profile per model name typed into the Models box."""
+    models = parse_model_names(models_raw)
+    if not nickname or not models:
+        st.warning("Nickname and at least one model are required.", icon=":material/error:")
         return
     if provider_type in ("local", "custom") and not base_url:
         st.warning("Base URL is required for local and custom providers.", icon=":material/error:")
         return
-    try:
-        create_profile(user_id, nickname, provider_type, base_url or None, api_key or None, default_model)
-    except LLMDatabaseError:
-        logger.exception("Database error while creating an LLM profile for user_id %s.", user_id)
-        st.error("We couldn't save this profile. Please try again shortly.")
-    else:
-        _queue_llm_table_reset()
-        st.rerun()
+
+    created, failure = create_profiles(
+        user_id, nickname, provider_type, base_url or None, api_key or None, models
+    )
+
+    if failure is not None:
+        # There is no transaction across the rows, so say how far it got rather than imply
+        # nothing was saved — the user needs to know what is left to re-enter.
+        logger.error("Only %s of %s LLM profiles saved for user_id %s: %s", len(created), len(models), user_id, failure)
+        if created:
+            st.error(
+                f"Saved {len(created)} of {len(models)} profiles — we couldn't save the rest. "
+                "Please try again shortly."
+            )
+            _queue_llm_table_reset()
+        else:
+            st.error("We couldn't save this profile. Please try again shortly.")
+        return
+
+    if len(created) > 1:
+        # Queued, not shown here: st.rerun closes this dialog, and anything written just
+        # before it never reaches the screen.
+        st.session_state["settings_llm_flash"] = f"Saved {len(created)} profiles."
+    _queue_llm_table_reset()
+    st.rerun()
 
 
 @st.dialog("Edit LLM provider profile")
@@ -246,7 +284,7 @@ def _open_edit_profile_dialog(user_id: int, profile_id: int) -> None:
                 help="Clears the stored API key for this profile.",
             )
         default_model = st.text_input(
-            "Default model",
+            "Model",
             value=current["default_model"],
             key=f"settings_edit_default_model_{profile_id}",
             help="Free-text model name.",
@@ -333,6 +371,28 @@ def _handle_unset_light_model(user_id: int, profile_id: int) -> None:
         st.rerun()
 
 
+def _handle_set_default_model(user_id: int, profile_id: int) -> None:
+    try:
+        set_default_model(profile_id, user_id)
+    except LLMDatabaseError:
+        logger.exception("Database error while setting default model %s for user_id %s.", profile_id, user_id)
+        st.error("We couldn't update your default model. Please try again shortly.")
+    else:
+        _queue_llm_table_reset()
+        st.rerun()
+
+
+def _handle_unset_default_model(user_id: int, profile_id: int) -> None:
+    try:
+        unset_default_model(profile_id, user_id)
+    except LLMDatabaseError:
+        logger.exception("Database error while unsetting default model %s for user_id %s.", profile_id, user_id)
+        st.error("We couldn't update your default model. Please try again shortly.")
+    else:
+        _queue_llm_table_reset()
+        st.rerun()
+
+
 def _handle_test_connection(llm_profile: dict) -> None:
     """Fires one minimal request against a saved profile (requirement 3.4).
 
@@ -354,9 +414,13 @@ def _handle_test_connection(llm_profile: dict) -> None:
 def _render_llm_section(current_profile: dict) -> None:
     user_id = current_profile["user_id"]
     st.write(""":blue[**Manage your saved LLM connection profiles.
-        " mark one as your light model — 
-        "used automatically for small, fast auxiliary tasks.**]"""
+        " mark one as your default model — the one every session starts on — and one as your
+        " light model, used automatically for small, fast auxiliary tasks.**]"""
     )
+
+    flash = st.session_state.pop("settings_llm_flash", None)
+    if flash:
+        st.success(flash, icon=":material/check_circle:")
 
     if st.button(
         "Add new",
@@ -379,12 +443,13 @@ def _render_llm_section(current_profile: dict) -> None:
 
     profiles_df = pd.DataFrame(profiles)
     profiles_df["light_model_label"] = profiles_df["is_light_model"].map({1: "Yes", 0: ""})
+    profiles_df["default_model_label"] = profiles_df["is_default_model"].map({1: "Yes", 0: ""})
 
     if st.session_state.pop("settings_llm_table_reset_pending", False):
         st.session_state["settings_selected_profile_id"] = None
         st.session_state["settings_llm_table"] = {"selection": {"rows": [], "columns": []}}
 
-    st.caption("Select a row to edit, delete, or set/unset it as your light model.")
+    st.caption("Select a row to edit, delete, or set/unset it as your default or light model.")
     selection = st.dataframe(
         profiles_df,
         key="settings_llm_table",
@@ -397,11 +462,15 @@ def _render_llm_section(current_profile: dict) -> None:
             "user_id": None,
             "api_key_encrypted": None,
             "is_light_model": None,
+            "is_default_model": None,
             "created_at": None,
             "nickname": "Nickname",
             "provider_type": st.column_config.TextColumn("Type", help="local / cloud / custom"),
             "base_url": "Base URL",
             "default_model": "Model",
+            "default_model_label": st.column_config.TextColumn(
+                "Default", help="The model every session starts on."
+            ),
             "light_model_label": st.column_config.TextColumn("Light model", help="Your designated light model."),
         },
     )
@@ -412,7 +481,7 @@ def _render_llm_section(current_profile: dict) -> None:
         selected_profile_id = int(selected_row["profile_id"])
         st.session_state["settings_selected_profile_id"] = selected_profile_id
 
-        edit_col, delete_col, light_col, test_col = st.columns(4)
+        edit_col, delete_col, default_col, light_col, test_col = st.columns(5)
         with test_col:
             if st.button(
                 "Test connection",
@@ -443,6 +512,25 @@ def _render_llm_section(current_profile: dict) -> None:
                 help="Permanently remove this profile.",type="primary"
             ):
                 _open_delete_profile_dialog(user_id, selected_profile_id)
+        with default_col:
+            if selected_row["is_default_model"]:
+                if st.button(
+                    "Unset default",
+                    key="settings_unset_default_button",
+                    icon=":material/check_circle:",
+                    help="Stop using this profile as your default model.",
+                    type="primary",
+                ):
+                    _handle_unset_default_model(user_id, selected_profile_id)
+            else:
+                if st.button(
+                    "Set as default",
+                    key="settings_set_default_button",
+                    icon=":material/check_circle_outline:",
+                    help="Start every session on this model.",
+                    type="primary",
+                ):
+                    _handle_set_default_model(user_id, selected_profile_id)
         with light_col:
             if selected_row["is_light_model"]:
                 if st.button(

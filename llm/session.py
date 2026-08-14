@@ -63,12 +63,35 @@ def light_profile(user_id: int) -> dict | None:
     return None
 
 
+def default_profile(user_id: int) -> dict | None:
+    """The account's designated default model, or None if none is set.
+
+    This is the model a session starts on. It is a stored designation rather than a session
+    choice, so it survives logout and is the same on every page.
+    """
+    for profile in available_profiles(user_id):
+        if profile.get("is_default_model"):
+            return profile
+    return None
+
+
+def _fallback_profile(profiles: list[dict]) -> dict:
+    """The profile to use when the session has no valid selection: the designated default if
+    the user set one, otherwise the first profile by nickname (which is what this did before
+    a default could be designated at all)."""
+    for profile in profiles:
+        if profile.get("is_default_model"):
+            return profile
+    return profiles[0]
+
+
 def active_profile(user_id: int) -> dict | None:
     """The profile currently selected as this session's model.
 
-    Falls back to the user's first profile when nothing is selected yet, and *re-reads
-    it from the database every call* so an edit in Settings takes effect immediately.
-    A selection pointing at a deleted profile resolves to None rather than an error.
+    Falls back to the user's designated default profile when nothing is selected yet — and to
+    their first profile when no default is set — and *re-reads it from the database every call*
+    so an edit in Settings takes effect immediately. A selection pointing at a deleted profile
+    resolves to None rather than an error.
     """
     profiles = session_profiles(user_id)
     if not profiles:
@@ -76,14 +99,14 @@ def active_profile(user_id: int) -> dict | None:
 
     selected_id = st.session_state.get(LLM_ACTIVE_PROFILE_KEY)
     if selected_id is None:
-        return profiles[0]
+        return _fallback_profile(profiles)
 
     for profile in profiles:
         if profile["profile_id"] == selected_id:
             return profile
 
     logger.info("Session model %s is no longer available; falling back.", selected_id)
-    return profiles[0]
+    return _fallback_profile(profiles)
 
 
 def set_active_profile(profile_id: int | None) -> None:

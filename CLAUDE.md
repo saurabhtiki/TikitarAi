@@ -152,6 +152,25 @@ every change. `AppTest` can't drive that state — it rebuilds widget state from
 nodes and an expander isn't one — so the test asserts the stamped element id, which only a
 stateful expander carries.
 
+Out of band, since: **Settings takes several models at once, and a designated default LLM.**
+A profile row is still one provider *and* one model — that is what `client.build_model` and the
+picker read — so the Add dialog's Models box fans out instead: `llm/models.py`'s
+`parse_model_names` splits it on lines and commas, and `db.create_profiles` saves one row per
+model sharing the nickname, URL and key, each named `OpenRouter — gpt-4o`. One model keeps the
+nickname exactly as typed, so adding one behaves as it always did. `create_profiles` **returns
+`(created, failure)`** rather than raising: there is no transaction across the rows, and a
+failure part-way has to report how far it got instead of looking like nothing was saved.
+The success message is queued in `settings_llm_flash`, because `st.rerun` closes the dialog and
+anything written just before it never reaches the screen.
+
+`is_default_model` copies `is_light_model` exactly — a nullable-free integer flag, at most one
+per user enforced procedurally in `set_default_model`, migrated in with a `PRAGMA table_info`
+guard. **Setting either flag clears the other**: `session.session_profiles` hides the light
+model from the picker, so a light-and-default profile would be a default nothing could select.
+`session.active_profile`'s two `profiles[0]` fallbacks now go through `_fallback_profile`, which
+prefers the designated default — the sidebar picker reads its index from `active_profile`, so it
+opens on the default with no change to `sidebar.py`.
+
 Known pre-existing failures, not from this stage (they fail with Stage 9's page changes
 stashed): `test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body`
 and `TestRelationships::test_confirming_a_bad_link_keeps_it_declared_but_unenforced`.

@@ -92,3 +92,23 @@ def test_set_light_model_button_does_not_crash(tmp_path, monkeypatch):
     assert not at.exception
     profiles = list_profiles(1, db_path)
     assert profiles[0]["is_light_model"] == 1
+
+
+def test_set_default_model_button_does_not_crash(tmp_path, monkeypatch):
+    at = _make_app(tmp_path, monkeypatch)
+    db_path = Path("data") / "tikitarai.db"
+    create_profile(1, "Local LM Studio", "local", "http://localhost:1234", None, "llama-3", db_path=db_path)
+
+    at.segmented_control(key="settings_section").set_value("LLM providers")
+    at.run()
+    row_selection = {"selection": {"rows": [0], "columns": []}}
+    at.session_state["settings_llm_table"] = row_selection
+    at.run()
+
+    at.button(key="settings_set_default_button").click()
+    # See the comment in test_set_light_model_button_does_not_crash.
+    at.session_state["settings_llm_table"] = row_selection
+    at.run()
+
+    assert not at.exception
+    assert list_profiles(1, db_path)[0]["is_default_model"] == 1
