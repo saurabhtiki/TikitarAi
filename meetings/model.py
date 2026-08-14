@@ -1,15 +1,15 @@
-"""What a meeting, an invitee, a session and a message are (requirement 6.7, Phase 1).
+"""What a meeting, an invitee, a session and a message are (requirement 6.7).
 
 No Streamlit and no database here, for the same reason `chat_types/model.py` has neither:
 `meetings/db.py` stores these and both pages hold them, and keeping the shape free of both
 is what makes it testable without `AppTest`.
 
-Phase 1 is **discussion agenda items only**. Table items (spec 3a), evaluation fields
-(3b) and the comparison matrices are later phases. The one concession made to them here is
-that `AgendaItem` stores its `type` even though Phase 1 only ever writes `"discussion"` —
-that is what lets a later phase add table items by adding a table, rather than by migrating
-every `agenda_json` already written. `agenda_from_json` drops anything that isn't a
-discussion item, so Phase 1 code never has to understand one.
+Phase 1 shipped discussion agenda items only, but wrote each item's `type` anyway. That is
+what let Phase 2 add **table items** (spec 3a) without migrating a single `agenda_json`
+already written: an agenda saved by Phase 1 reads back identically, and the new item type is
+simply one the old rows never contained. Phase 2 also adds **evaluation fields** (spec 3b),
+which are their own table rather than part of the agenda — they are questions woven into the
+discussion, not items on it.
 """
 
 import json
@@ -18,11 +18,17 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-# The stored JSON carries its own version, so an agenda saved today can still be read back
-# once table items widen the shape.
+# The stored JSON carries its own version. Still 1: Phase 2 only ever *adds* keys that a
+# Phase 1 agenda simply doesn't have, and every reader here defaults a missing one.
 SCHEMA_VERSION = 1
 
 DISCUSSION_ITEM = "discussion"
+
+# An agenda item whose substance is a grid rather than a conversation (spec 3a). It gets its
+# own tab and its own `meeting_agenda_tables` row; the chat never asks for its contents.
+TABLE_ITEM = "table"
+
+ITEM_TYPES = (DISCUSSION_ITEM, TABLE_ITEM)
 
 # The tag an exchange gets when it doesn't belong to any agenda item. Spec 2.5: off-agenda
 # points are captured in the MoM rather than forced into a defined item, so this is a real
@@ -38,16 +44,24 @@ SENDER_AI = "ai"
 
 @dataclass
 class AgendaItem:
-    """One thing to be discussed, with the specific knowledge the AI needs to discuss it.
+    """One thing to be covered, with the specific knowledge the AI needs to cover it.
 
     `ai_note` is the creator's 1-2 lines of ground truth for this item ("Standard SLA is 30
     days from PO date") — it goes into the system prompt so the AI argues from the
     creator's facts rather than inventing plausible ones.
+
+    A `TABLE_ITEM` carries no data of its own here: the grid lives in `AgendaTable`, keyed
+    back to this item by title. The title is the join, not an id, because the agenda is
+    stored as one JSON blob that gets rewritten whole on every edit — an id minted inside it
+    would have nothing durable to be minted from.
     """
 
     item: str
     ai_note: str = ""
     item_type: str = DISCUSSION_ITEM
+
+    def is_table(self) -> bool:
+        return self.item_type == TABLE_ITEM
 
 
 @dataclass
@@ -70,6 +84,14 @@ class Meeting:
 
     def agenda_titles(self) -> list[str]:
         return [item.item for item in self.agenda]
+
+    def discussion_items(self) -> list[AgendaItem]:
+        """The items the chat works through. What `agenda_titles` used to mean, exactly."""
+        return [item for item in self.agenda if not item.is_table()]
+
+    def table_items(self) -> list[AgendaItem]:
+        """The items that render as their own grid tab (spec 3a)."""
+        return [item for item in self.agenda if item.is_table()]
 
     def display_subject(self) -> str:
         return self.subject.strip() or "Untitled meeting"
@@ -104,6 +126,76 @@ class ChatMessage:
 
     def is_from_ai(self) -> bool:
         return self.sender == SENDER_AI
+
+
+@dataclass
+class AgendaTable:
+    """The grid behind one table agenda item (spec 3a).
+
+    `base_data` is the creator's uploaded sheet, frozen at upload: every invitee is answering
+    the *same* rows, which is the entire premise of the cross-invitee comparison. It is
+    stored as a list of row dicts rather than as the original file, because the file is a
+    source and this is the record — re-parsing a spreadsheet at read time would let a
+    changed pandas version quietly shift what an invitee was asked.
+
+    `locked_columns` are reference-only (Bill No, Due Date); `editable_columns` are what the
+    invitee fills. A column named in neither is treated as locked — the safe reading of a
+    column nobody classified is that it is not an invitation to type.
+    """
+
+    table_id: int | None = None
+    meeting_id: int | None = None
+    item_ref: str = ""
+    source_file: str = ""
+    locked_columns: list[str] = field(default_factory=list)
+    editable_columns: list[str] = field(default_factory=list)
+    base_data: list[dict] = field(default_factory=list)
+
+    def row_count(self) -> int:
+        return len(self.base_data)
+
+    def all_columns(self) -> list[str]:
+        """Locked columns first, then editable — the order the invitee reads them in."""
+        return [*self.locked_columns, *self.editable_columns]
+
+    def signature(self) -> tuple[str, ...]:
+        """What makes two tables comparable (spec 3a's "identical table template" rule)."""
+        return tuple(self.all_columns())
+
+
+@dataclass
+class EvaluationField:
+    """One short question asked across every invitee, for comparison (spec 3b).
+
+    `buckets` is optional: with them the Extraction Agent also assigns a classification tag,
+    without them only the raw answer is pulled. The raw answer is kept either way, so a
+    bucket added later can be re-run without having lost the detail it classifies.
+    """
+
+    field_id: int | None = None
+    meeting_id: int | None = None
+    question: str = ""
+    buckets: list[str] = field(default_factory=list)
+    position: int = 0
+
+
+@dataclass
+class EvaluationAnswer:
+    """What one invitee said about one evaluation field."""
+
+    field_id: int | None = None
+    invitee_id: int | None = None
+    raw_answer: str = ""
+    classified_tag: str = ""
+    updated_at: str = ""
+
+    def display(self) -> str:
+        """Raw answer with its tag in brackets — the cell shape spec 3b's matrix shows."""
+        raw = self.raw_answer.strip()
+        tag = self.classified_tag.strip()
+        if raw and tag:
+            return f"{raw} ({tag})"
+        return raw or tag
 
 
 @dataclass
@@ -158,12 +250,18 @@ def agenda_to_json(agenda: list[AgendaItem]) -> str:
 
 
 def agenda_from_json(text: str) -> list[AgendaItem]:
-    """Rebuilds the agenda from stored JSON, keeping only discussion items.
+    """Rebuilds the agenda from stored JSON.
 
-    Never raises. An agenda that can't be parsed comes back empty, which the pages already
-    handle (a meeting with no agenda items is a legal, if unhelpful, meeting) — whereas an
-    exception here would take down the invitee's whole chat screen over a stored-format
-    problem they can do nothing about.
+    An item whose `type` is neither known value is read as a discussion item rather than
+    dropped. That reverses Phase 1's rule, and deliberately: dropping was right while there
+    was no UI that could render anything else, but now that there are two real types, an
+    unreadable third is far more likely to be a typo in a hand-edited row than a future
+    feature — and a dropped item is one the invitee is never asked about, silently.
+
+    Never raises. An agenda that can't be parsed at all comes back empty, which the pages
+    already handle (a meeting with no agenda items is a legal, if unhelpful, meeting) —
+    whereas an exception here would take down the invitee's whole chat screen over a
+    stored-format problem they can do nothing about.
     """
     try:
         payload = json.loads(text or "{}")
@@ -183,12 +281,30 @@ def agenda_from_json(text: str) -> list[AgendaItem]:
         title = str(raw.get("item") or "").strip()
         if not title:
             continue
-        if item_type != DISCUSSION_ITEM:
-            # A later phase's table item, read by Phase 1 code. Dropping it is right:
-            # Phase 1 has no UI that could render one, and carrying it through would put
-            # an item on the agenda list that the invitee is asked about but cannot answer.
-            logger.info("Skipping a '%s' agenda item — this phase handles discussion items only.", item_type)
-            continue
-        items.append(AgendaItem(item=title, ai_note=str(raw.get("ai_note") or "")))
+        if item_type not in ITEM_TYPES:
+            logger.warning(
+                "Agenda item '%s' has unknown type '%s'; reading it as a discussion item.",
+                title,
+                item_type,
+            )
+            item_type = DISCUSSION_ITEM
+        items.append(
+            AgendaItem(item=title, ai_note=str(raw.get("ai_note") or ""), item_type=item_type)
+        )
 
     return items
+
+
+def evaluation_buckets_to_text(buckets: list[str]) -> str:
+    """The buckets as one comma-separated cell, for the creator's editor."""
+    return ", ".join(bucket for bucket in buckets if bucket.strip())
+
+
+def evaluation_buckets_from_text(text: str) -> list[str]:
+    """Buckets typed as a comma-separated cell.
+
+    Split on commas only — a bucket like "Medium / High" is one the creator wrote with a
+    slash in it on purpose, and `llm.models.parse_model_names` splitting on newlines *and*
+    commas is right for its input and wrong for a single-line grid cell.
+    """
+    return [part.strip() for part in str(text or "").split(",") if part.strip()]

@@ -182,6 +182,22 @@ def _type_label(semantic_type: str) -> str:
     return _TYPE_LABELS.get(semantic_type, semantic_type or "Text")
 
 
+# The same types standing on their own, in a table cell. The article `_TYPE_LABELS` carries
+# for mid-sentence use ("a Number") reads as a mistake once there is no sentence around it.
+_STANDALONE_TYPE_LABELS = {
+    "text": "Text",
+    "categorical": "Category",
+    "numeric": "Number",
+    "date": "Date",
+    "id": "ID",
+}
+
+
+def type_label(semantic_type: str) -> str:
+    """A semantic type as a standalone label — for a column of a table, not a sentence."""
+    return _STANDALONE_TYPE_LABELS.get(semantic_type, (semantic_type or "text").title())
+
+
 def normalise(table_name: str) -> str:
     """The form two table names are compared in.
 

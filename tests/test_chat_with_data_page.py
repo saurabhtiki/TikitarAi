@@ -166,6 +166,61 @@ class TestSteps:
         assert engine_session.DE_PENDING_STEPS_KEY not in app.session_state
 
 
+class TestStepOneIsOnlyOnSetup:
+    """Chat and Checks show no upload chrome — but still mount the uploader.
+
+    The two halves are inseparable. Hiding the step is the point; mounting it anyway is
+    what keeps the data alive, because a `st.file_uploader` that stops being rendered
+    stops reporting its files and `sync_tables` drops every table on the next run.
+    """
+
+    def test_chat_and_checks_show_no_step_one(self, tmp_path, monkeypatch):
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+
+        for view in ("Chat", "Checks"):
+            app.session_state["de_view"] = view
+            app.run()
+            assert not any("Step 1" in expander.label for expander in app.status), view
+
+    def test_the_uploader_is_still_mounted_off_setup(self, tmp_path, monkeypatch):
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        app.session_state["de_view"] = "Chat"
+        app.run()
+
+        assert app.file_uploader(key=engine_session.DE_UPLOADER_KEY)
+
+    def test_the_upload_survives_a_trip_through_chat(self, tmp_path, monkeypatch):
+        """The regression that matters: gating `_render_upload` on the view loses the data."""
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+
+        app.session_state["de_view"] = "Chat"
+        app.run()
+        app.session_state["de_view"] = "Setup"
+        app.run()
+
+        tables = app.session_state[engine_session.DE_TABLES_KEY]
+        assert [table.table_name for table in tables.values()] == ["sales"]
+
+    def test_chat_asks_for_data_instead_of_showing_nothing(self, tmp_path, monkeypatch):
+        # With Step 1 off this screen there is nothing else on it, and an empty view reads
+        # as the page having failed.
+        app = _make_app(tmp_path, monkeypatch)
+        app.session_state["de_view"] = "Chat"
+        app.run()
+
+        assert any("Upload your data in Setup" in info.value for info in app.info)
+        assert app.button(key="de_chat_go_to_setup_button")
+
+    def test_the_button_goes_back_to_setup(self, tmp_path, monkeypatch):
+        app = _make_app(tmp_path, monkeypatch)
+        app.session_state["de_view"] = "Chat"
+        app.run()
+        app.button(key="de_chat_go_to_setup_button").click().run()
+
+        assert app.session_state["de_view"] == "Setup"
+        assert any("Step 1" in expander.label for expander in app.status)
+
+
 class TestRelationships:
     def _loaded(self, tmp_path, monkeypatch):
         app = _upload(

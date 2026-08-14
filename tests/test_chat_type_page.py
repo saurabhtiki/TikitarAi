@@ -141,6 +141,62 @@ class TestTheBar:
         assert chat_type_session.CT_ACTIVE_KEY not in app.session_state
 
 
+class TestShowSchema:
+    """The saved setup is read on demand, not announced above the uploader.
+
+    A red banner listing table names stood over Step 1 for the whole session, said nothing
+    about the columns — the part that decides whether an upload matches — and was red while
+    nothing was wrong. The button replaces it with the full schema, on request.
+    """
+
+    def test_the_button_is_offered_only_once_a_chat_type_is_selected(self, tmp_path, monkeypatch):
+        app = _make_app(tmp_path, monkeypatch)
+        assert app.button(key="ct_schema_button").disabled
+
+    def test_nothing_is_announced_above_the_uploader(self, tmp_path, monkeypatch):
+        app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_JANUARY))
+        _save_as(app, "Salary processing")
+
+        fresh = _make_app(tmp_path, monkeypatch)
+        _select(fresh, "Salary processing")
+
+        assert not any("expects" in element.value for element in fresh.error)
+        assert not fresh.button(key="ct_schema_button").disabled
+
+    def test_it_shows_the_columns_with_their_types(self, tmp_path, monkeypatch):
+        # The columns and their types are what an upload is actually measured against, so
+        # they are what the dialog is for — a list of table names never explained a refusal.
+        app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_JANUARY))
+        _save_as(app, "Salary processing")
+
+        app.button(key="ct_schema_button").click().run()
+
+        assert app.session_state[engine_session.DE_DIALOG_KEY]["action"] == "chat_type_schema"
+        # Picked by shape rather than position: Step 1 draws tables of its own above this.
+        shown = next(
+            element.value for element in app.dataframe if "Column" in element.value.columns
+        )
+        assert list(shown["Column"]) == ["emp_id", "joining_date", "bonus"]
+        assert dict(zip(shown["Column"], shown["Type"]))["joining_date"] == "Date"
+
+    def test_it_shows_the_links(self, tmp_path, monkeypatch):
+        app = _upload(
+            _make_app(tmp_path, monkeypatch),
+            ("salary.csv", SALARY_JANUARY),
+            ("employee.csv", EMPLOYEE_CSV),
+        )
+        app.session_state[engine_session.DE_RELATIONSHIPS_KEY] = [
+            Relationship("salary", "emp_id", "employee", "emp_id")
+        ]
+        _save_as(app, "Salary processing")
+
+        app.button(key="ct_schema_button").click().run()
+
+        assert any(
+            "`salary.emp_id` → `employee.emp_id`" in element.value for element in app.markdown
+        )
+
+
 class TestMatchingAnUpload:
     def test_a_text_date_column_is_fixed_on_the_way_in(self, tmp_path, monkeypatch):
         """The whole point of the feature.
@@ -326,7 +382,11 @@ class TestBlockingTheViews:
         fresh.session_state["de_view"] = "Chat"
         fresh.run()
 
-        assert any("Fix the problems listed in Step 1" in element.value for element in fresh.info)
+        # The problems are named here, not pointed at: Step 1 is only on Setup now, so
+        # "fix the problems listed in Step 1" would name something off screen.
+        assert any("asking questions" in element.value for element in fresh.error)
+        assert any("**bonus** is missing in **salary**" in element.value for element in fresh.markdown)
+        assert fresh.button(key="de_chat_mismatch_setup_button")
         assert not fresh.chat_input
 
     def test_checks_is_closed_too(self, tmp_path, monkeypatch):
@@ -339,13 +399,16 @@ class TestBlockingTheViews:
         fresh.session_state["de_view"] = "Checks"
         fresh.run()
 
-        assert any("straight onto your Dashboard" in element.value for element in fresh.info)
+        assert any("straight onto your Dashboard" in element.value for element in fresh.error)
+        assert any("**bonus** is missing in **salary**" in element.value for element in fresh.markdown)
+        assert fresh.button(key="de_checks_mismatch_setup_button")
 
     def test_the_ad_hoc_path_is_never_blocked(self, tmp_path, monkeypatch):
         app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_MISSING_COLUMN))
         app.session_state["de_view"] = "Chat"
         app.run()
-        assert not any("Fix the problems listed in Step 1" in element.value for element in app.info)
+        assert app.chat_input
+        assert not any("asking questions" in element.value for element in app.error)
 
 
 class TestWhereTheReportIsShown:
@@ -353,8 +416,9 @@ class TestWhereTheReportIsShown:
 
     A green banner, a retype note and a link warning are setup feedback: worth reading once,
     not worth a bordered box above every question the user asks for the rest of the session.
-    Collapsing Step 1 takes them off the screen. What must not be missed — a blocking
-    problem, or a file that didn't import — re-opens the step instead.
+    Collapsing Step 1 takes them off the screen, and leaving Setup takes the whole step with
+    it. What must not be missed — a blocking problem, or a file that didn't import —
+    re-opens the step instead, and a blocking one is restated in full by the view it blocks.
     """
 
     def _matched_and_collapsed(self, tmp_path, monkeypatch, view):
@@ -373,7 +437,7 @@ class TestWhereTheReportIsShown:
         assert app.chat_input
 
     def test_a_blocking_problem_re_opens_step_one_and_is_read_there(self, tmp_path, monkeypatch):
-        # Chat says "fix the problems listed in Step 1", so Step 1 has to be showing them.
+        # Setup is where the problem gets fixed, so Setup has to be showing it.
         # Step 1 collapses itself the moment files load, which is exactly when the problem
         # appears — without the re-open, the message would arrive already hidden.
         app = _upload(_make_app(tmp_path, monkeypatch), ("salary.csv", SALARY_JANUARY))

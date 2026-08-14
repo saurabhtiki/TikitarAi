@@ -23,6 +23,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from llm.client import LLMConnectionError, run_structured
+from meetings import tables
 from meetings.exceptions import MeetingAgentError
 from meetings.model import OPENING_TAG, ChatMessage, Meeting
 from meetings.running_summary import render_turns
@@ -42,11 +43,19 @@ _INSTRUCTIONS = (
 
 
 class AgendaItemSummary(BaseModel):
-    """What happened on one agenda item."""
+    """What happened on one agenda item.
+
+    A table item reuses this shape rather than getting one of its own: `discussed` becomes
+    "any rows filled" and `notes` becomes the completion line. Both are written from the
+    stored counts, never by the model — see `_with_every_item`.
+    """
 
     item: str = Field(description="The agenda item's title, exactly as listed.")
     discussed: bool = Field(description="Whether this item was genuinely addressed.")
     notes: str = Field(default="", description="Point-wise summary. Empty if not discussed.")
+    is_table: bool = Field(
+        default=False, description="Set by the app, not the model: a structured-table item."
+    )
 
 
 class MeetingSummary(BaseModel):
@@ -63,20 +72,33 @@ def build_prompt(meeting: Meeting, messages: list[ChatMessage]) -> str:
     Takes the messages it is given and renders all of them. The opening message is included
     rather than filtered out — it is what the invitee was responding to, and dropping it
     would leave the first answer with no question above it.
+
+    Table items are named but explicitly excluded from what the model reports on: their
+    entry is a completion figure the app already knows, and asking a model to restate a
+    number it can only estimate is how a wrong one gets into a permanent record.
     """
     parts = [f"Meeting subject: {meeting.display_subject()}"]
 
     if meeting.meeting_context.strip():
         parts.append(f"Why this meeting happened:\n{meeting.meeting_context.strip()}")
 
-    if meeting.agenda:
+    discussion_items = meeting.discussion_items()
+    if discussion_items:
         agenda_lines = []
-        for item in meeting.agenda:
+        for item in discussion_items:
             note = f" — {item.ai_note.strip()}" if item.ai_note.strip() else ""
             agenda_lines.append(f"- {item.item}{note}")
         parts.append("Agenda items to report on:\n" + "\n".join(agenda_lines))
     else:
-        parts.append("This meeting had no fixed agenda; report everything under other_extra.")
+        parts.append("This meeting had no discussion agenda; report everything under other_extra.")
+
+    table_items = meeting.table_items()
+    if table_items:
+        parts.append(
+            "These items were handled as structured tables and are reported separately — do "
+            "not write entries for them:\n"
+            + "\n".join(f"- {item.item}" for item in table_items)
+        )
 
     transcript = render_turns(messages)
     parts.append(f"The full conversation:\n{transcript or '(the invitee sent no messages)'}")
@@ -89,9 +111,14 @@ def generate_summary(
     profile: dict,
     messages: list[ChatMessage],
     *,
+    table_progress: dict[str, tuple[int, int]] | None = None,
     key_path: Path | str | None = None,
 ) -> MeetingSummary:
     """The MoM for one conversation, built from the messages given.
+
+    `table_progress` maps a table item's title to its `(filled, total)` row counts. It is
+    applied after the call, over whatever the model said, because those counts are a fact the
+    app holds and the model can only guess at.
 
     Raises:
         MeetingAgentError: if the provider fails or returns nothing usable. Unlike the
@@ -111,19 +138,36 @@ def generate_summary(
         logger.warning("Generating a summary for meeting %s failed: %s", meeting.meeting_id, error)
         raise MeetingAgentError(f"Couldn't generate the summary: {error}") from error
 
-    return _with_every_item(result, meeting)
+    return _with_every_item(result, meeting, table_progress or {})
 
 
-def _with_every_item(summary: MeetingSummary, meeting: Meeting) -> MeetingSummary:
-    """Fills in any agenda item the model left out, as not discussed.
+def _with_every_item(
+    summary: MeetingSummary, meeting: Meeting, table_progress: dict[str, tuple[int, int]]
+) -> MeetingSummary:
+    """Fills in any agenda item the model left out, and overwrites every table item.
 
     Spec 3 wants the MoM to say *Discussed / Not Discussed per agenda item* — an item
     missing from the reply reads on screen as though it were never on the agenda, which is
     a different and more flattering claim than "nobody got to it".
+
+    A table item's entry is written here outright rather than merged: spec 3a reports it as
+    a completion percentage, and anything the model wrote about it is prose about a grid it
+    was told not to report on.
     """
     reported = {entry.item.strip().lower(): entry for entry in summary.agenda_items}
     ordered = []
     for item in meeting.agenda:
+        if item.is_table():
+            filled, total = table_progress.get(item.item, (0, 0))
+            ordered.append(
+                AgendaItemSummary(
+                    item=item.item,
+                    discussed=filled > 0,
+                    notes=tables.format_completion(filled, total),
+                    is_table=True,
+                )
+            )
+            continue
         entry = reported.get(item.item.strip().lower())
         ordered.append(entry if entry is not None else AgendaItemSummary(item=item.item, discussed=False))
 
@@ -137,13 +181,18 @@ def _with_every_item(summary: MeetingSummary, meeting: Meeting) -> MeetingSummar
 
 
 def coverage(messages: list[ChatMessage], meeting: Meeting) -> set[str]:
-    """Which agenda items this conversation has actually touched.
+    """Which discussion agenda items this conversation has actually touched.
 
     Counted from the stored tags rather than from a summary, so the creator's status table
     doesn't need an LLM call to draw a row. The opening message is excluded — it names
     every item without discussing any of them.
+
+    Table items are excluded too, and not because they can't be tagged: an exchange *about*
+    a grid is legitimately tagged with its title. They are excluded because their progress is
+    measured in rows filled, so counting a table item here as well would let one passing
+    mention of it read as the same thing as having filled it in.
     """
-    titles = {item.item for item in meeting.agenda}
+    titles = {item.item for item in meeting.discussion_items()}
     return {
         message.agenda_tag
         for message in messages

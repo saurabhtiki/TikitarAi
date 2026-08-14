@@ -171,11 +171,20 @@ model from the picker, so a light-and-default profile would be a default nothing
 prefers the designated default — the sidebar picker reads its index from `active_profile`, so it
 opens on the default with no change to `sidebar.py`.
 
+Out of band, since: **the active chat type's schema is read on demand, not announced.** The red
+`st.error` above the uploader ("*X* expects: a, b") is gone; a **Show schema** button sits beside
+Update chat type (disabled, not hidden, on `— New chat type —` so the bar keeps its shape) and opens
+`_dialog_chat_type_schema` with the tables, each column's type, the links and the column meanings.
+It goes through the `DIALOGS` registry rather than being called from the bar, because the bar draws
+*above* `st.file_uploader` and a run ending before that widget exists drops the uploaded files.
+`matching.type_label` is a public standalone-form sibling of `_type_label`, whose "a Number" reads
+as a mistake in a table cell.
+
 Known pre-existing failures, not from this stage (they fail with Stage 9's page changes
 stashed): `test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body`
 and `TestRelationships::test_confirming_a_bad_link_keeps_it_declared_but_unenforced`.
 
-Stage 10 (current): Meeting Chatbot, Phase 1 (requirement 6.7, written up from
+Stage 10 (previous): Meeting Chatbot, Phase 1 (requirement 6.7, written up from
 `docs/projectAI ChatDynamic.md`) — complete. Task Builder is deferred; this was taken up
 ahead of it at the user's request. The new `meetings/` package plus `app_pages/meetings.py`
 (registered) and `app_pages/meeting_invitee.py` (**not** registered — rendered by direct
@@ -185,8 +194,9 @@ private token link to chat with that persona and close it into a point-wise MoM.
 
 Phase 1 is **discussion agenda items only**. Table items (spec 3a), evaluation fields (3b)
 and every cross-invitee comparison matrix are later phases. `AgendaItem` stores its `type`
-regardless, and `agenda_from_json` drops anything that isn't `"discussion"`, so those arrive
-as a new table rather than a migration of every `agenda_json` already written.
+regardless, and `agenda_from_json` drops anything that isn't `"discussion"` (Phase 2 reverses
+that drop — see below), so those arrive as a new table rather than a migration of every
+`agenda_json` already written.
 
 Two load-bearing decisions. **The MoM is built from the full stored transcript, never from
 `running_summary`.** That rolling fold exists only to keep a live conversation inside a
@@ -220,11 +230,81 @@ Table names are all `meeting_`-prefixed (`meeting_sessions`, `meeting_messages`,
 claim in a database four other domains already share. `BASE_URL` reads an env var, not
 `st.secrets`, which raises outright when no secrets file exists.
 
-Next: Meeting Chatbot Phase 2 — table agenda items (spec 3a) and evaluation fields (3b),
-both of which then feed the comparison matrices in spec 8. After that, Stage 11 — Task
-Builder (requirement 7), build-order item 9, which should reuse `checks.model`'s JSON,
-already shaped as a recipe, for §7.5's `task_json`, and `chat_types.model` for the schema
-signature §7.4 asks a Task to capture.
+Stage 10 (current): Meeting Chatbot, Phase 2 — table agenda items (spec 3a), evaluation
+fields (3b) and the cross-invitee comparison matrices they feed (spec 8) — complete. Three
+new modules (`meetings/tables.py`, `meetings/extraction_agent.py`, `meetings/matrix.py`),
+four new tables (`meeting_agenda_tables`, `meeting_table_responses`,
+`meeting_evaluation_fields`, `meeting_evaluation_results`), and Phase 1's two pages grown
+rather than replaced. `SCHEMA_VERSION` stays 1 and `agenda_json` is not migrated: Phase 1
+already wrote `type` on every item, so **Phase 2's change is `agenda_from_json` no longer
+dropping `"table"`** — and an unknown type is now read as a discussion item with a warning,
+because losing an agenda line silently is worse than mis-typing it.
+
+An agenda table's join key is `item_ref`, the agenda item's **title**, not an id — agenda
+items live inside a JSON blob with no stable identity of their own, and the title is what
+`agenda_tag`, `coverage()` and the MoM already group on. One `AgendaTable` belongs to the
+*meeting*, which is how spec 3a's "every invitee gets the identical template" holds
+**structurally**: there is no per-invitee template that could diverge, so nothing needs to
+check it at runtime. Replacing a table deletes the responses to the old one — the row
+positions they were keyed to no longer mean anything.
+
+Completion is a `COUNT(*)`, made honest by a DB-enforced invariant: **a stored response row
+is a filled row.** `save_table_responses` filters blanks itself rather than trusting callers,
+so `table_progress` is one query. That figure is then written **over** the model in
+`summary_agent._with_every_item` — a table item's MoM entry is the stored count, never
+whatever the model guessed, which is how a wrong number gets into a permanent record. The
+wording ("12 of 40 row(s) filled (30%)") lives once, in `tables.format_completion`, read by
+the status list, the MoM and the matrix alike. `coverage()` now walks
+`meeting.discussion_items()` only: a grid is measured in rows filled, so a passing mention of
+it must not read as having filled it.
+
+`meetings/tables.py` reads a source file **entirely as text** (`dtype=str,
+keep_default_na=False`) — a bill number in a column with one blank row otherwise comes back
+as `1001.0`. `replace_evaluation_fields` **updates in place by `field_id`** and deletes only
+what was actually removed, because a delete-all-and-reinsert would cascade every extracted
+answer away when the creator fixes a typo in a question. Extraction runs **after**
+`close_session` and swallows its own failures: the MoM is the thing that must survive a
+provider outage, and a missed extraction is re-runnable from the creator's page
+("Re-extract answers"). `extract_answers` returns `[]` with **no provider call** when no
+fields are defined, so the common case costs nothing. A bucket is normalised to the
+creator's spelling and an invented one is dropped while the raw answer survives — the matrix
+groups on that string, so "high" beside "High" would silently become two columns of one.
+
+Two page-shape decisions. The invitee page builds `st.tabs` **only when the meeting has table
+items**, so a discussion-only meeting keeps Phase 1's bottom-pinned `st.chat_input` byte for
+byte (inside tabs Streamlit renders it inline, which is legal but different). And the
+matrices distinguish `NOT_STARTED` (`—`) from `NOT_DISCUSSED` — they look alike in a grid and
+mean opposite things, and collapsing them would indict someone who simply never opened their
+link. The creator page's detail is now six tabs, `Comparisons` holding the three sub-tabs;
+`_handle_save_setup` is the first caller of `db.update_meeting`.
+
+Deferred deliberately: nothing in Phase 2 sends anything either, and the invitee-side queries
+still take no `user_id`.
+
+Out of band, since: **Step 1 is only on Setup.** The upload step used to render in all three
+views of the Chat page — a step header (and, whenever it was open, a whole upload panel) above
+every question the user asked. It now renders on Setup alone. What could *not* move is the
+`st.file_uploader` itself: a widget that stops being rendered stops reporting its value, and
+`sync_tables` would drop every loaded table on the next run. So the three ungated calls came out
+of the expander body into `_mount_upload` (uploader → `_sync_selection` → `_check_upload`, an
+order that is load-bearing), which every view calls; off Setup it runs inside
+`st.container(key=HIDDEN_UPLOAD_MOUNT)` hidden by the page's one `st.html` stylesheet — **that
+container is not dead UI**, and deleting it loses the user's data the first time they switch
+views. The check still *acts* everywhere; only its reporting is Setup's.
+
+The two blocked views therefore can no longer say "fix the problems listed in Step 1" — it would
+name something off screen — so `_render_mismatch_gate` lists `report.problems()` itself, keeping
+each view's reason clause. Chat also gained the no-data message it never had (it rendered
+*nothing*, a blank screen, where Checks already spoke). All three messages carry one **Go to
+Setup** button, which queues `PENDING_VIEW_KEY` rather than writing `de_view`: the toggle is a
+widget created far above the button, and Streamlit forbids writing a widget's own key once it
+exists — the same deferral `session.queue_step_state` makes for the steps.
+`_open_step_one_on_problems` deliberately still does not switch views: a discarded extra file
+blocks nothing, and must not yank someone out of a chat mid-question.
+
+Next: Stage 11 — Task Builder (requirement 7), build-order item 9, which should reuse
+`checks.model`'s JSON, already shaped as a recipe, for §7.5's `task_json`, and
+`chat_types.model` for the schema signature §7.4 asks a Task to capture.
 
 # Library docs (Agno, Streamlit)
 

@@ -49,6 +49,7 @@ class _FakeAgent:
     """Stands in for `agno.agent.Agent`, recording what it was constructed with."""
 
     last = None
+    calls = 0
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -57,6 +58,7 @@ class _FakeAgent:
 
     def run(self, prompt):
         self.prompt = prompt
+        _FakeAgent.calls += 1
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
@@ -66,10 +68,32 @@ def _patch_agent(monkeypatch, response):
     # Reset the class-level record, so "was an agent ever constructed?" means this test
     # rather than whichever one ran before it.
     _FakeAgent.last = None
+    _FakeAgent.calls = 0
 
     def factory(**kwargs):
         agent = _FakeAgent(**kwargs)
         agent.response = response
+        return agent
+
+    monkeypatch.setattr(client, "Agent", factory)
+
+
+def _patch_agent_sequence(monkeypatch, replies):
+    """One reply per `Agent.run`, in order — for the structured call and its retry.
+
+    A bare string is wrapped as message content, an exception is raised from `run`, and
+    anything else is returned as it stands. Running past the end is a test writing more
+    calls than it meant to, so it fails loudly rather than repeating the last reply.
+    """
+    _FakeAgent.last = None
+    _FakeAgent.calls = 0
+    remaining = list(replies)
+
+    def factory(**kwargs):
+        agent = _FakeAgent(**kwargs)
+        assert remaining, "the code under test made more provider calls than the test set up"
+        reply = remaining.pop(0)
+        agent.response = reply if isinstance(reply, (Exception, _Response)) else _Response(reply)
         return agent
 
     monkeypatch.setattr(client, "Agent", factory)
@@ -247,6 +271,65 @@ class TestRecoveringAnAnswerInTheWrongEnvelope:
         _patch_agent(monkeypatch, _Response("just some prose"))
         with pytest.raises(client.LLMConnectionError, match="expected structure"):
             client.run_structured(local_profile, "q", Reply, text_field="nonexistent")
+
+
+class TestTheRetryWhenTheEnvelopeIsIgnoredEntirely:
+    """A reasoning model that answers the task in Markdown and never mentions the schema.
+
+    Nothing in the reply is JSON, so `_recover_structure` has nothing to work with. The
+    fallback is to ask again with the provider's structured mode off and the schema in the
+    prompt, which is the one thing every OpenAI-compatible endpoint understands.
+    """
+
+    def test_prose_then_json_on_the_retry_is_returned(self, monkeypatch, local_profile):
+        _patch_agent_sequence(monkeypatch, ["# Minutes\n\nAll good.", '{"answer": "42"}'])
+        assert client.run_structured(local_profile, "q", Reply).answer == "42"
+
+    def test_the_retry_drops_the_schema_and_spells_it_out_instead(self, monkeypatch, local_profile):
+        _patch_agent_sequence(monkeypatch, ["# Minutes", '{"answer": "42"}'])
+        client.run_structured(local_profile, "q", Reply, instructions="be brief")
+        asked = _FakeAgent.last.kwargs["instructions"]
+        assert _FakeAgent.last.kwargs.get("output_schema") is None
+        assert "be brief" in asked
+        assert "answer" in asked  # the schema itself, restated
+
+    def test_a_reply_that_already_parsed_never_retries(self, monkeypatch, local_profile):
+        _patch_agent_sequence(monkeypatch, [_Response(Reply(answer="42"))])
+        assert client.run_structured(local_profile, "q", Reply).answer == "42"
+        assert _FakeAgent.calls == 1
+
+    def test_a_failing_retry_reports_the_original_problem(self, monkeypatch, local_profile):
+        _patch_agent_sequence(monkeypatch, ["# Minutes", RuntimeError("Rate limited")])
+        with pytest.raises(client.LLMConnectionError, match="expected structure"):
+            client.run_structured(local_profile, "q", Reply)
+
+    def test_only_one_retry_is_made(self, monkeypatch, local_profile):
+        _patch_agent_sequence(monkeypatch, ["# Minutes", "# Minutes again"])
+        with pytest.raises(client.LLMConnectionError, match="expected structure"):
+            client.run_structured(local_profile, "q", Reply)
+        assert _FakeAgent.calls == 2
+
+
+class TestJsonWrappedInProse:
+    """The object is there, with a sentence in front of it — worth reading, not refusing."""
+
+    def test_a_leading_sentence_is_stepped_over(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response('Here you go:\n{"answer": "42"}\nHope that helps.'))
+        assert client.run_structured(local_profile, "q", Reply).answer == "42"
+
+    def test_a_fence_inside_prose_is_read(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response('Sure:\n```json\n{"answer": "42"}\n```'))
+        assert client.run_structured(local_profile, "q", Reply).answer == "42"
+
+    def test_a_brace_inside_a_value_does_not_end_the_object(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response('Result:\n{"answer": "a } brace"}'))
+        assert client.run_structured(local_profile, "q", Reply).answer == "a } brace"
+
+    def test_prose_with_no_object_still_becomes_the_named_field(self, monkeypatch, local_profile):
+        _patch_agent(monkeypatch, _Response("just some prose"))
+        assert client.run_structured(local_profile, "q", Reply, text_field="answer").answer == (
+            "just some prose"
+        )
 
 
 class TestDescribeProfile:

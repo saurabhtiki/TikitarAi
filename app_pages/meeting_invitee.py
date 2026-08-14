@@ -1,4 +1,4 @@
-"""The invitee's private chat (requirement 6.7, Phase 1, spec 2).
+"""The invitee's private chat (requirement 6.7, spec 2 and 3a).
 
 **Not registered as an `st.Page`.** `streamlit_app.py` calls `render_invitee_page` directly
 when the URL carries an invitee link, before the login gate — an invitee has no account, so
@@ -10,6 +10,10 @@ keys, so `st.session_state["user_id"]` stays empty and nothing that checks it ca
 an invitee for an employee.
 
 The model used is the *creator's* default profile — see `chat_agent`.
+
+Phase 2 adds the tab strip spec 3a asks for: every discussion item shares one **General
+Discussion** tab, and each table item gets its own grid tab. Ten discussion items and two
+tables are three tabs, not twelve.
 """
 
 import logging
@@ -18,12 +22,23 @@ import streamlit as st
 
 from llm.client import LLMConnectionError
 from llm.session import default_profile
-from meetings import chat_agent, db, running_summary, session, storage, summary_agent
+from meetings import (
+    chat_agent,
+    db,
+    extraction_agent,
+    running_summary,
+    session,
+    storage,
+    summary_agent,
+    tables,
+)
 from meetings.access import verify_code
 from meetings.exceptions import MeetingAgentError, MeetingError
-from meetings.model import SENDER_AI, SENDER_USER, Meeting
+from meetings.model import SENDER_AI, SENDER_USER, AgendaTable, Meeting
 
 logger = logging.getLogger(__name__)
+
+DISCUSSION_TAB = "💬 General Discussion"
 
 
 def render_invitee_page(meeting_id: int, token: str) -> None:
@@ -105,6 +120,20 @@ def _profile_for(meeting: Meeting) -> dict | None:
     return default_profile(meeting.created_by)
 
 
+def _evaluation_fields(meeting_id: int) -> list:
+    """The meeting's evaluation questions, or none if the feature is off for it.
+
+    A failure here costs the questions, not the conversation: they are woven into the chat
+    as a nicety, and losing them is a far smaller harm than an invitee meeting an error page
+    because one extra query failed.
+    """
+    try:
+        return db.list_evaluation_fields(meeting_id)
+    except MeetingError:
+        logger.exception("Could not read the evaluation fields for meeting %s.", meeting_id)
+        return []
+
+
 def _render_chat(meeting: Meeting, invitee: dict) -> None:
     meeting_id = invitee["meeting_id"]
     invitee_id = invitee["invitee_id"]
@@ -126,23 +155,31 @@ def _render_chat(meeting: Meeting, invitee: dict) -> None:
         )
         return
 
+    fields = _evaluation_fields(meeting_id)
+
     if not messages and not chat_session.closed:
-        _open_conversation(meeting, profile, meeting_id, invitee_id)
+        _open_conversation(meeting, profile, meeting_id, invitee_id, fields)
         return
 
-    for message in messages:
-        with st.chat_message("assistant" if message.is_from_ai() else "user"):
-            st.write(message.text)
+    table_items = meeting.table_items()
+    if table_items:
+        # Spec 3a's tab strip: one shared discussion tab, one tab per grid. Built only when
+        # there is a grid, so a meeting without one keeps `st.chat_input` at page level and
+        # pinned to the bottom, exactly as it was before this phase.
+        tabs = st.tabs([DISCUSSION_TAB, *[f"📋 {item.item}" for item in table_items]])
+        with tabs[0]:
+            _render_discussion(meeting, profile, invitee, chat_session, messages, fields)
+        for tab, item in zip(tabs[1:], table_items):
+            with tab:
+                _render_table_tab(meeting_id, invitee_id, item, chat_session.closed)
+    else:
+        _render_discussion(meeting, profile, invitee, chat_session, messages, fields)
 
+    # Below the tabs, because closing and its summary belong to the whole session rather
+    # than to whichever tab happens to be open.
     if chat_session.closed:
         _render_closed(meeting_id, invitee_id)
         return
-
-    _render_uploads(meeting_id, invitee_id)
-
-    prompt = st.chat_input("Type your reply", key="invitee_chat_input")
-    if prompt:
-        _handle_turn(meeting, profile, meeting_id, invitee_id, chat_session.running_summary, messages, prompt)
 
     if st.button(
         "Close chat",
@@ -150,14 +187,115 @@ def _render_chat(meeting: Meeting, invitee: dict) -> None:
         icon=":material/task_alt:",
         help="Finish and generate your summary. You won't be able to add anything afterwards.",
     ):
-        _handle_close(meeting, profile, meeting_id, invitee_id)
+        _handle_close(meeting, profile, meeting_id, invitee_id, fields)
 
 
-def _open_conversation(meeting: Meeting, profile: dict, meeting_id: int, invitee_id: int) -> None:
+def _render_discussion(
+    meeting: Meeting,
+    profile: dict,
+    invitee: dict,
+    chat_session,
+    messages: list,
+    fields: list,
+) -> None:
+    """The conversation itself — every discussion agenda item, as one flowing chat."""
+    meeting_id = invitee["meeting_id"]
+    invitee_id = invitee["invitee_id"]
+
+    for message in messages:
+        with st.chat_message("assistant" if message.is_from_ai() else "user"):
+            st.write(message.text)
+
+    if chat_session.closed:
+        return
+
+    _render_uploads(meeting_id, invitee_id)
+
+    prompt = st.chat_input("Type your reply", key="invitee_chat_input")
+    if prompt:
+        _handle_turn(
+            meeting, profile, meeting_id, invitee_id, chat_session.running_summary, messages, prompt, fields
+        )
+
+
+def _render_table_tab(meeting_id: int, invitee_id: int, item, closed: bool) -> None:
+    """One table agenda item's grid: locked columns to read, editable ones to fill.
+
+    Loaded fresh on every run rather than cached in session state — the invitee is expected
+    to leave and come back, and what is on the screen has to be what is in the database.
+    """
+    try:
+        table = db.find_agenda_table(meeting_id, item.item)
+    except MeetingError as error:
+        logger.exception("Could not load the grid for '%s'.", item.item)
+        st.error(str(error), icon=":material/error:")
+        return
+
+    if table is None:
+        st.info(
+            "This table isn't ready yet — the organiser hasn't attached its data. "
+            "The rest of the meeting is unaffected.",
+            icon=":material/info:",
+        )
+        return
+
+    if item.ai_note.strip():
+        st.caption(item.ai_note)
+
+    try:
+        responses = db.load_table_responses(table.table_id, invitee_id)
+    except MeetingError as error:
+        logger.exception("Could not load saved rows for invitee %s.", invitee_id)
+        st.error(str(error), icon=":material/error:")
+        return
+
+    st.caption(tables.completion_label(table, len(responses)))
+
+    edited = st.data_editor(
+        tables.display_frame(table, responses),
+        num_rows="fixed",
+        # The whole grid, not just the locked columns, once the chat is closed: a closed
+        # session is a locked record, and an editable cell that silently saves nothing would
+        # be worse than one that can't be typed in.
+        disabled=True if closed else table.locked_columns,
+        hide_index=True,
+        width="stretch",
+        key=f"invitee_table_{table.table_id}",
+    )
+
+    if closed:
+        return
+
+    if st.button(
+        "Save progress",
+        key=f"invitee_table_save_{table.table_id}",
+        icon=":material/save:",
+        help="Store what you've filled in so far. You can come back and finish later.",
+    ):
+        _handle_save_table(table, invitee_id, edited)
+
+
+def _handle_save_table(table: AgendaTable, invitee_id: int, edited) -> None:
+    """Stores the invitee's rows. Explicit rather than per-cell, as spec 3a asks."""
+    try:
+        saved = db.save_table_responses(
+            table.table_id, invitee_id, tables.responses_from_frame(table, edited)
+        )
+    except MeetingError as error:
+        logger.exception("Could not save table rows for invitee %s.", invitee_id)
+        st.error(str(error), icon=":material/error:")
+        return
+
+    st.success(tables.completion_label(table, saved) + " saved.", icon=":material/check_circle:")
+
+
+def _open_conversation(
+    meeting: Meeting, profile: dict, meeting_id: int, invitee_id: int, fields: list
+) -> None:
     """Generates and stores the AI's opening message, then reruns to show it."""
     try:
         with st.spinner("Starting the conversation..."):
-            opening = chat_agent.opening_message(meeting, profile)
+            opening = chat_agent.opening_message(meeting, profile, evaluation_fields=fields)
         db.add_message(meeting_id, invitee_id, SENDER_AI, opening.reply, opening.agenda_tag)
     except (LLMConnectionError, MeetingError) as error:
         logger.exception("Could not open the conversation for invitee %s.", invitee_id)
@@ -174,6 +312,7 @@ def _handle_turn(
     summary_so_far: str,
     messages: list,
     prompt: str,
+    fields: list,
 ) -> None:
     """Saves the invitee's message, replies to it, then folds if the history has grown.
 
@@ -190,7 +329,12 @@ def _handle_turn(
     try:
         with st.spinner("Thinking..."):
             turn = chat_agent.send_turn(
-                meeting, profile, summary_so_far, running_summary.recent_messages(messages), prompt
+                meeting,
+                profile,
+                summary_so_far,
+                running_summary.recent_messages(messages),
+                prompt,
+                evaluation_fields=fields,
             )
         db.add_message(meeting_id, invitee_id, SENDER_AI, turn.reply, turn.agenda_tag)
     except (LLMConnectionError, MeetingError) as error:
@@ -204,7 +348,9 @@ def _handle_turn(
     st.rerun()
 
 
-def _handle_close(meeting: Meeting, profile: dict, meeting_id: int, invitee_id: int) -> None:
+def _handle_close(
+    meeting: Meeting, profile: dict, meeting_id: int, invitee_id: int, fields: list
+) -> None:
     """Generates the final MoM from the **full** transcript and locks the session.
 
     The message list is re-read here rather than reused from the render above: it is the
@@ -214,13 +360,37 @@ def _handle_close(meeting: Meeting, profile: dict, meeting_id: int, invitee_id: 
     try:
         with st.spinner("Preparing your summary..."):
             full_history = db.list_messages(meeting_id, invitee_id)
-            summary = summary_agent.generate_summary(meeting, profile, full_history)
+            progress = db.table_progress(meeting_id, invitee_id)
+            summary = summary_agent.generate_summary(
+                meeting, profile, full_history, table_progress=progress
+            )
         db.close_session(meeting_id, invitee_id, summary_agent.to_json(summary))
     except (MeetingAgentError, MeetingError) as error:
         logger.exception("Could not close the chat for invitee %s.", invitee_id)
         st.error(f"{error} Your conversation is safe — try closing again shortly.", icon=":material/error:")
         return
+
+    _extract_evaluations(meeting, profile, invitee_id, fields, full_history)
     st.rerun()
+
+
+def _extract_evaluations(
+    meeting: Meeting, profile: dict, invitee_id: int, fields: list, full_history: list
+) -> None:
+    """Pulls the evaluation answers out of the conversation, after it has already closed.
+
+    Deliberately runs **after** `close_session` and swallows its own failures. The MoM is
+    the record the invitee is owed; the evaluation answers are a convenience for the
+    creator, who can re-extract them from their own page. Ordering it this way means a
+    provider failure here can never cost somebody their closing summary.
+    """
+    if not fields:
+        return
+    try:
+        answers = extraction_agent.extract_answers(meeting, profile, fields, full_history)
+        db.save_evaluation_answers(invitee_id, answers)
+    except (MeetingAgentError, MeetingError):
+        logger.exception("Could not extract evaluation answers for invitee %s.", invitee_id)
 
 
 def _render_uploads(meeting_id: int, invitee_id: int) -> None:

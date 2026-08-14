@@ -17,7 +17,15 @@ from meetings.chat_agent import (
     send_turn,
     system_instructions,
 )
-from meetings.model import OPENING_TAG, OTHER_TAG, AgendaItem, ChatMessage, Meeting
+from meetings.model import (
+    OPENING_TAG,
+    OTHER_TAG,
+    TABLE_ITEM,
+    AgendaItem,
+    ChatMessage,
+    EvaluationField,
+    Meeting,
+)
 
 PROFILE = {"profile_id": 1, "default_model": "test-model"}
 
@@ -72,7 +80,66 @@ class TestSystemInstructions:
         assert "facilitator" in system_instructions(Meeting(subject="Anything"))
 
     def test_a_meeting_with_no_agenda_says_so_rather_than_listing_nothing(self):
-        assert "no fixed agenda" in system_instructions(Meeting(subject="Anything"))
+        assert "no fixed discussion agenda" in system_instructions(Meeting(subject="Anything"))
+
+
+class TestTableItemsAreNotAskedAbout:
+    """Spec 3a: a grid is filled in on its own tab, not read out row by row in the chat."""
+
+    def _meeting(self):
+        return Meeting(
+            subject="PO No 123",
+            agenda=[
+                AgendaItem(item="Delivery timeline"),
+                AgendaItem(item="Outstanding bills", ai_note="40 open bills.", item_type=TABLE_ITEM),
+            ],
+        )
+
+    def test_a_table_item_is_named_but_kept_out_of_the_items_to_work_through(self):
+        instructions = system_instructions(self._meeting())
+        working_block = instructions.split("Work through these agenda items")[1].split("\n\n")[0]
+
+        assert "Outstanding bills" in instructions
+        assert "Outstanding bills" not in working_block
+
+    def test_the_model_is_told_not_to_collect_the_rows_in_chat(self):
+        assert "never ask for their contents row by row" in system_instructions(self._meeting())
+
+    def test_a_table_item_is_still_a_taggable_title(self):
+        # An exchange *about* the grid ("I've filled it in") belongs to that item.
+        assert '"Outstanding bills"' in system_instructions(self._meeting())
+
+
+class TestEvaluationFieldsInTheInstructions:
+    def test_the_questions_are_listed_when_the_meeting_has_them(self, meeting):
+        instructions = system_instructions(
+            meeting, [EvaluationField(question="Years of experience?")]
+        )
+
+        assert "Years of experience?" in instructions
+        assert "do not read" in instructions
+
+    def test_a_meeting_without_them_gets_no_such_block(self, meeting):
+        assert "Somewhere in the conversation" not in system_instructions(meeting)
+
+    def test_a_turn_carries_them_through_to_the_provider(self, monkeypatch, meeting):
+        calls = _stub(monkeypatch)
+        send_turn(
+            meeting,
+            PROFILE,
+            "",
+            [],
+            "45 days.",
+            evaluation_fields=[EvaluationField(question="Employee strength?")],
+        )
+
+        assert "Employee strength?" in calls[0]["instructions"]
+
+    def test_the_opening_message_carries_them_too(self, monkeypatch, meeting):
+        calls = _stub(monkeypatch, tag="")
+        opening_message(meeting, PROFILE, evaluation_fields=[EvaluationField(question="Facilities?")])
+
+        assert "Facilities?" in calls[0]["instructions"]
 
 
 class TestHistoryBlock:

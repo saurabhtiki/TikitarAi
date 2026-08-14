@@ -11,7 +11,14 @@ import pytest
 
 from meetings import summary_agent
 from meetings.exceptions import MeetingAgentError
-from meetings.model import OPENING_TAG, OTHER_TAG, AgendaItem, ChatMessage, Meeting
+from meetings.model import (
+    OPENING_TAG,
+    OTHER_TAG,
+    TABLE_ITEM,
+    AgendaItem,
+    ChatMessage,
+    Meeting,
+)
 from meetings.summary_agent import (
     AgendaItemSummary,
     MeetingSummary,
@@ -150,9 +157,80 @@ class TestGenerating:
             generate_summary(meeting, PROFILE, transcript)
 
 
+class TestTableItems:
+    """Spec 3a: a table item is reported as a completion figure, not as prose."""
+
+    @pytest.fixture
+    def meeting_with_table(self, meeting):
+        meeting.agenda.append(AgendaItem(item="Outstanding bills", item_type=TABLE_ITEM))
+        return meeting
+
+    def test_the_model_is_told_not_to_write_an_entry_for_one(self, meeting_with_table, transcript):
+        prompt = build_prompt(meeting_with_table, transcript)
+
+        assert "do not write entries for them" in prompt
+        assert "Outstanding bills" in prompt
+
+    def test_its_entry_is_the_stored_row_count(self, monkeypatch, meeting_with_table, transcript):
+        _stub(monkeypatch)
+        summary = generate_summary(
+            meeting_with_table, PROFILE, transcript, table_progress={"Outstanding bills": (12, 40)}
+        )
+
+        entry = next(item for item in summary.agenda_items if item.item == "Outstanding bills")
+        assert entry.notes == "12 of 40 row(s) filled (30%)"
+        assert entry.discussed is True
+        assert entry.is_table is True
+
+    def test_a_figure_the_model_invented_for_it_is_overwritten(self, monkeypatch, meeting_with_table, transcript):
+        # The completion count is a fact the app holds. A model guessing at it is how a wrong
+        # number gets into a permanent record.
+        _stub(
+            monkeypatch,
+            result=MeetingSummary(
+                agenda_items=[
+                    AgendaItemSummary(item="Outstanding bills", discussed=True, notes="They filled in most of it.")
+                ]
+            ),
+        )
+        summary = generate_summary(
+            meeting_with_table, PROFILE, transcript, table_progress={"Outstanding bills": (1, 40)}
+        )
+
+        entry = next(item for item in summary.agenda_items if item.item == "Outstanding bills")
+        assert entry.notes == "1 of 40 row(s) filled (2%)"
+
+    def test_an_untouched_grid_is_not_marked_discussed(self, monkeypatch, meeting_with_table, transcript):
+        _stub(monkeypatch)
+        summary = generate_summary(
+            meeting_with_table, PROFILE, transcript, table_progress={"Outstanding bills": (0, 40)}
+        )
+
+        entry = next(item for item in summary.agenda_items if item.item == "Outstanding bills")
+        assert entry.discussed is False
+        assert entry.notes == "0 of 40 row(s) filled (0%)"
+
+    def test_no_progress_passed_at_all_still_produces_an_entry(self, monkeypatch, meeting_with_table, transcript):
+        _stub(monkeypatch)
+        summary = generate_summary(meeting_with_table, PROFILE, transcript)
+
+        entry = next(item for item in summary.agenda_items if item.item == "Outstanding bills")
+        assert entry.discussed is False
+
+
 class TestCoverage:
     def test_only_real_agenda_items_count(self, meeting, transcript):
         assert coverage(transcript, meeting) == {"Delivery timeline"}
+
+    def test_a_table_item_is_not_counted_as_covered_by_being_mentioned(self, meeting):
+        # It is measured in rows filled. Counting a passing mention here would let talking
+        # about a grid read as the same thing as having filled it in.
+        meeting.agenda.append(AgendaItem(item="Outstanding bills", item_type=TABLE_ITEM))
+        messages = [
+            ChatMessage(message_id=1, sender="user", text="I'll do the bills later", agenda_tag="Outstanding bills")
+        ]
+
+        assert coverage(messages, meeting) == set()
 
     def test_the_opening_message_does_not_count_as_coverage(self, meeting):
         messages = [ChatMessage(message_id=1, sender="ai", text="Welcome", agenda_tag=OPENING_TAG)]

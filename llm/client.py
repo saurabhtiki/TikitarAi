@@ -17,6 +17,7 @@ Nothing in this module imports Streamlit, so every function is testable without
 `AppTest` and without a network call.
 """
 
+import json
 import logging
 from pathlib import Path
 
@@ -163,6 +164,10 @@ def run_structured(
             over its packaging leaves the user with an error they cannot act on. See
             `_recover_structure`. Leave it None when no single field could carry the reply.
 
+    A reply that neither parses nor recovers gets **one** retry with the provider's
+    structured-output mode dropped and the schema restated in the prompt — see
+    `_retry_as_prompted_json`. Only then is the failure reported.
+
     Raises:
         LLMConnectionError: if the provider fails or returns something unparseable.
     """
@@ -193,13 +198,63 @@ def run_structured(
         )
         return recovered
 
+    retried = _retry_as_prompted_json(model, prompt, output_schema, instructions, text_field)
+    if retried is not None:
+        logger.info(
+            "Structured call returned %s; a prompted-JSON retry produced %s.",
+            type(content).__name__,
+            output_schema.__name__,
+        )
+        return retried
+
     logger.warning(
-        "Structured call returned %s rather than %s.", type(content).__name__, output_schema.__name__
+        "Structured call returned %s rather than %s, and the retry did not recover it.",
+        type(content).__name__,
+        output_schema.__name__,
     )
     raise LLMConnectionError(
         f"{profile.get('default_model')} didn't return the expected structure. "
         "A larger or more capable light model usually fixes this."
     )
+
+
+_JSON_RETRY_INSTRUCTIONS = (
+    "Reply with one JSON object and nothing else — no prose before or after it, no "
+    "headings, no code fence, no explanation. It must match this JSON schema:\n{schema}"
+)
+
+
+def _retry_as_prompted_json(model, prompt, output_schema, instructions: str | None, text_field: str | None):
+    """Asks once more with the schema spelled out in the prompt, or None.
+
+    The provider's own structured-output mode is dropped for this attempt, because it is
+    what just failed. Reasoning models in particular answer the *task* well and ignore the
+    envelope entirely — a MoM arrives as Markdown minutes, which `_recover_structure` has
+    nothing to work with. Restating the schema as an ordinary instruction is the one thing
+    every OpenAI-compatible endpoint understands, and it costs a second call only on a
+    request that was otherwise about to be reported as a failure.
+
+    Never raises: this is already the fallback path, so a failure here means the original
+    error is what the user should see.
+    """
+    try:
+        schema = json.dumps(output_schema.model_json_schema(), indent=2)
+    except (TypeError, ValueError):
+        logger.exception("Could not render a JSON schema for %s.", output_schema.__name__)
+        return None
+
+    asked = "\n\n".join(
+        part for part in (instructions, _JSON_RETRY_INSTRUCTIONS.format(schema=schema)) if part
+    )
+
+    try:
+        agent = Agent(model=model, instructions=asked, telemetry=False)
+        response = agent.run(prompt)
+    except Exception as error:  # noqa: BLE001 — providers raise their own exception types
+        logger.info("The prompted-JSON retry also failed: %s", _readable_error(error))
+        return None
+
+    return _recover_structure(getattr(response, "content", None), output_schema, text_field)
 
 
 def _strip_code_fence(text: str) -> str:
@@ -209,6 +264,42 @@ def _strip_code_fence(text: str) -> str:
         return stripped
     lines = [line for line in stripped.splitlines() if not line.strip().startswith("```")]
     return "\n".join(lines).strip()
+
+
+def _embedded_json_object(text: str) -> str | None:
+    """The first balanced `{...}` in a reply that wrapped it in prose, or None.
+
+    Models that explain themselves ("Here are the minutes:") put the object the caller
+    asked for after a sentence, or after a fence this module has already stripped. Braces
+    inside strings are skipped so a value containing `}` cannot end the scan early. What
+    comes back is still validated against the schema, so a false positive costs nothing.
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        character = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
 
 
 def _recover_structure(content, output_schema, text_field: str | None):
@@ -238,14 +329,16 @@ def _recover_structure(content, output_schema, text_field: str | None):
         return None
 
     text = _strip_code_fence(content)
-    if text.startswith("{"):
+    for candidate in (text, _embedded_json_object(text)):
+        if not candidate or not candidate.startswith("{"):
+            continue
         try:
-            return output_schema.model_validate_json(text)
+            return output_schema.model_validate_json(candidate)
         except ValidationError:
             # Falls through to `text_field`: a reply that opens with a brace but doesn't fit
             # the schema may still be the answer itself, and a JSON-shaped answer is no
             # worse a candidate than any other text.
-            pass
+            continue
 
     if not text_field:
         return None

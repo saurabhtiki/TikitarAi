@@ -29,6 +29,7 @@ from meetings.model import (
     OPENING_TAG,
     OTHER_TAG,
     ChatMessage,
+    EvaluationField,
     Meeting,
     canonical_tag,
 )
@@ -50,12 +51,18 @@ class ChatTurnOutput(BaseModel):
     )
 
 
-def system_instructions(meeting: Meeting) -> str:
+def system_instructions(
+    meeting: Meeting, evaluation_fields: list[EvaluationField] | None = None
+) -> str:
     """The persona, the context, the SOP and the agenda, as one instruction block.
 
     Assembled per turn from the meeting as it stands rather than cached, so a creator who
     fixes a wrong figure in an agenda item's note has it apply to the very next message
     instead of only to invitees who haven't started yet.
+
+    Table agenda items (spec 3a) are described but **not** asked about: they are filled in on
+    their own tab, and an agent that started reading out bill numbers would be asking the
+    invitee to do in prose the thing the grid exists to spare them.
     """
     parts = []
 
@@ -68,9 +75,10 @@ def system_instructions(meeting: Meeting) -> str:
     if meeting.context_sop.strip():
         parts.append(f"Rules and background you must apply:\n{meeting.context_sop.strip()}")
 
-    if meeting.agenda:
+    discussion_items = meeting.discussion_items()
+    if discussion_items:
         agenda_lines = []
-        for item in meeting.agenda:
+        for item in discussion_items:
             note = f" — {item.ai_note.strip()}" if item.ai_note.strip() else ""
             agenda_lines.append(f"- {item.item}{note}")
         parts.append(
@@ -78,7 +86,28 @@ def system_instructions(meeting: Meeting) -> str:
             + "\n".join(agenda_lines)
         )
     else:
-        parts.append("There is no fixed agenda — discuss the subject with the invitee.")
+        parts.append("There is no fixed discussion agenda — discuss the subject with the invitee.")
+
+    table_items = meeting.table_items()
+    if table_items:
+        table_lines = []
+        for item in table_items:
+            note = f" — {item.ai_note.strip()}" if item.ai_note.strip() else ""
+            table_lines.append(f"- {item.item}{note}")
+        parts.append(
+            "These items are filled in on their own tabs as tables, not in this chat:\n"
+            + "\n".join(table_lines)
+            + "\nMention them once so the invitee knows to open those tabs, and answer "
+            "questions about them, but never ask for their contents row by row here."
+        )
+
+    if evaluation_fields:
+        question_lines = [f"- {field_spec.question}" for field_spec in evaluation_fields]
+        parts.append(
+            "Somewhere in the conversation you also need short answers to these questions. "
+            "Work them in naturally, one at a time, as part of the discussion — do not read "
+            "them out as a form or a checklist:\n" + "\n".join(question_lines)
+        )
 
     parts.append(
         "Ask about one item at a time and wait for the answer. Be concise and professional. "
@@ -108,7 +137,11 @@ def build_history_block(running_summary: str, recent: list[ChatMessage]) -> str:
 
 
 def opening_message(
-    meeting: Meeting, profile: dict, *, key_path: Path | str | None = None
+    meeting: Meeting,
+    profile: dict,
+    *,
+    evaluation_fields: list[EvaluationField] | None = None,
+    key_path: Path | str | None = None,
 ) -> ChatTurnOutput:
     """The AI's own first message, generated before the invitee has said anything.
 
@@ -122,7 +155,7 @@ def opening_message(
         "briefly why this conversation is happening, list the agenda items you will go "
         "through, and invite them to begin with the first one.",
         ChatTurnOutput,
-        instructions=system_instructions(meeting),
+        instructions=system_instructions(meeting, evaluation_fields),
         text_field="reply",
         key_path=key_path,
     )
@@ -137,6 +170,7 @@ def send_turn(
     recent: list[ChatMessage],
     user_message: str,
     *,
+    evaluation_fields: list[EvaluationField] | None = None,
     key_path: Path | str | None = None,
 ) -> ChatTurnOutput:
     """One reply to one invitee message.
@@ -153,7 +187,7 @@ def send_turn(
         profile,
         prompt,
         ChatTurnOutput,
-        instructions=system_instructions(meeting),
+        instructions=system_instructions(meeting, evaluation_fields),
         text_field="reply",
         key_path=key_path,
     )

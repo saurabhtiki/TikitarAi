@@ -21,17 +21,23 @@ re-run its preview queries. Actions that need input open an `st.dialog`, driven 
 session-state flag rather than a button's return value, which breaks the moment a dialog
 holds widgets.
 
-A `st.segmented_control` (`de_view`) switches between "Setup" (steps 2 & 3) and "Chat"
-(the transcript, the chat input, and the Actions menu), rendered *above* Step 1 so it
-reads as the page's primary navigation rather than something below a full upload panel.
-Step 1 is the one exception to the toggle hiding a step outright — its
-`st.file_uploader` must be instantiated on *every* rerun regardless of which view is
-selected, to keep reporting its files; the moment a run skips creating it (which
-switching views would do, same as a collapsed expander skipping it would), it comes back
-empty on the next run. Once files are loaded it auto-collapses to one summary line, so in
-practice it costs a single line under the toggle rather than a panel. Steps 2 and 3 don't
-have that problem — their state lives in plain `session_state` dicts, not a raw widget —
-so they can be hidden outright.
+A `st.segmented_control` (`de_view`) switches between "Setup" (steps 1, 2 & 3) and "Chat"
+(the transcript, the chat input, and the Actions menu), rendered *above* them so it reads
+as the page's primary navigation rather than something below a full upload panel.
+
+Setup is the only view that **shows** Step 1: Chat and Checks are for working, not for
+managing files, and a step header repeated above every question is setup chrome on a
+screen that has no use for it. But Step 1's `st.file_uploader` must still be
+*instantiated* on every rerun regardless of the view, to keep reporting its files — the
+moment a run skips creating it (which gating it on the view would do, same as a collapsed
+expander skipping it would), it comes back empty on the next run and `sync_tables`
+dutifully drops every loaded table. So `_mount_upload` runs in all three views, and off
+Setup it runs inside `HIDDEN_UPLOAD_MOUNT`, a container hidden by this page's one
+stylesheet. That container is not dead UI: removing it loses the user's data the first
+time they switch views. What the check found is not lost with it — anything blocking is
+restated by the views' own gates, which name the problems rather than pointing at a step
+that isn't on screen. Steps 2 and 3 don't have that problem — their state lives in plain
+`session_state` dicts, not a raw widget — so they are simply not rendered off Setup.
 
 Rendering it every run is not enough on its own, because leaving the page entirely still
 drops the widget's value and `st.file_uploader` is the one widget with no `persist_state`
@@ -145,14 +151,6 @@ def _render_upload() -> list[session.EngineTable]:
     detached = session.detach_uploader_tables()
 
     _render_cleaner_handoff()
-
-    active_chat_type = chat_type_session.active()
-    if active_chat_type is not None:
-        expected = ", ".join(active_chat_type.table_names()) or "nothing yet"
-        st.error(
-            f"**{active_chat_type.display_name()}** expects: {expected}. "
-            "Upload Current files — we'll check them against it."
-        )
 
     uploads = st.file_uploader(
         "Upload CSV or Excel files",
@@ -317,6 +315,17 @@ def _render_chat_type_bar(user_id: int, loaded_tables: list[session.EngineTable]
             "time you only have to upload the files.",
         )
 
+        st.button(
+            "Show schema",
+            key="ct_schema_button",
+            icon=":material/schema:",
+            # Disabled rather than hidden, so the bar keeps its shape as the picker changes.
+            disabled=active is None,
+            on_click=_open_schema_dialog,
+            help="What this chat type expects: the tables, each column's type, the links "
+            "between them and what the columns mean.",
+        )
+
         # if active is not None and active.chat_type_id is not None:
         #     st.button(
         #         #"Delete",
@@ -401,6 +410,16 @@ def _save_chat_type(user_id: int, name: str) -> None:
     st.toast(f"Saved “{saved.display_name()}”.", icon=":material/check_circle:")
 
 
+def _open_schema_dialog() -> None:
+    """Asks for the schema dialog on the next run.
+
+    Routed through the session flag like every other dialog on this page rather than
+    calling the dialog here: the bar is drawn *above* `st.file_uploader`, and a run that
+    ends before that widget is created loses the uploaded files.
+    """
+    session.open_dialog("chat_type_schema", {})
+
+
 def _delete_chat_type(user_id: int, chat_type: chat_type_model.ChatType) -> None:
     try:
         orphaned = chat_type_db.delete_type(chat_type.chat_type_id, user_id)
@@ -438,9 +457,10 @@ def _match_status(loaded_tables: list[session.EngineTable]) -> str:
 def _check_upload(loaded_tables: list[session.EngineTable]) -> matching.MatchReport | None:
     """Acts on the check: drops what the chat type doesn't expect, applies what it saved.
 
-    Called from inside Step 1, but deliberately **not** gated on that step being open — a
-    collapsed step must still discard extra tables and apply the saved links, because the
-    views below are only safe once it has.
+    Called from `_mount_upload`, so it runs in every view and is deliberately **not** gated
+    on Step 1 being open or even shown — a collapsed step, and a view that hides it, must
+    still discard extra tables and apply the saved links, because the views below are only
+    safe once it has.
 
     Returns the report, for `_render_match_notes` and for the gate on Chat and Checks.
     """
@@ -462,13 +482,17 @@ def _check_upload(loaded_tables: list[session.EngineTable]) -> matching.MatchRep
 
 
 def _open_step_one_on_problems(report: matching.MatchReport | None) -> None:
-    """Re-opens Step 1 when a new problem appears, since the check now lives inside it.
+    """Re-opens Step 1 when a new problem appears, since the check lives inside it.
 
     Step 1 auto-collapses once files are loaded, so a blocking problem would arrive already
-    hidden — on the very views whose "fix the problems above" message points at it. Keyed
-    on the problems themselves rather than run unconditionally: forcing the step open on
-    every run would fight a user who deliberately collapsed it, while a *different* problem
-    is worth showing again.
+    hidden. Keyed on the problems themselves rather than run unconditionally: forcing the
+    step open on every run would fight a user who deliberately collapsed it, while a
+    *different* problem is worth showing again.
+
+    Off Setup this only prepares that view for when the user arrives — it deliberately does
+    **not** switch views. A non-blocking note (a file discarded for not belonging to the
+    chat type) must not yank someone out of a chat mid-question, and what does block is
+    already restated in full by `_render_mismatch_gate`.
     """
     problems = [
         *(report.problems() if report is not None and not report.ok else []),
@@ -1047,11 +1071,86 @@ def _dialog_show_data(payload: dict) -> None:
         st.rerun(scope="app")
 
 
+@st.dialog("Chat type schema", width="large", on_dismiss=_dismiss_dialog)
+def _dialog_chat_type_schema(payload: dict) -> None:
+    """What the selected chat type expects, in full.
+
+    This is what the upload is measured against, so it is worth being able to read before
+    uploading anything — which a one-line list of table names above the uploader was not.
+    Reads the chat type out of session state: it is already the whole definition, so there
+    is no database call here and nothing that can fail.
+    """
+    chat_type = chat_type_session.active()
+    if chat_type is None:
+        st.info("No chat type is selected.", icon=":material/info:")
+        return
+
+    st.caption(
+        f"**{chat_type.display_name()}** expects {len(chat_type.tables)} table(s) and "
+        f"{chat_type_model.column_count(chat_type)} column(s). Upload Current files and "
+        "we'll check them against this."
+    )
+
+    if not chat_type.tables:
+        st.warning("This chat type has no tables saved against it.", icon=":material/warning:")
+
+    for position, table in enumerate(chat_type.tables):
+        st.markdown(f"**{table.table_name}**")
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "Column": table.column_names,
+                    "Type": [matching.type_label(column.semantic_type) for column in table.columns],
+                }
+            ),
+            key=f"ct_schema_table_{position}",
+            width="stretch",
+            hide_index=True,
+        )
+
+    if chat_type.relationships:
+        st.markdown("**Links**")
+        for link in chat_type.relationships:
+            st.markdown(
+                f"- `{link.child_table}.{link.child_column}` → "
+                f"`{link.parent_table}.{link.parent_column}`"
+            )
+
+    described = [
+        saved for saved in chat_type.descriptions if saved.description.strip() or saved.synonyms
+    ]
+    if described:
+        st.markdown("**Column meanings**")
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "Table": [saved.table for saved in described],
+                    "Column": [saved.column for saved in described],
+                    "Description": [saved.description for saved in described],
+                    "Also called": [", ".join(saved.synonyms) for saved in described],
+                }
+            ),
+            key="ct_schema_descriptions",
+            width="stretch",
+            hide_index=True,
+        )
+
+    if st.button(
+        "Close",
+        key="ct_schema_close_button",
+        width="stretch",
+        help="Back to the page.",
+    ):
+        session.close_dialog()
+        st.rerun(scope="app")
+
+
 DIALOGS = {
     "edit_link": _dialog_edit_link,
     "offending": _dialog_offending_rows,
     "suggest": _dialog_suggest,
     "show_data": _dialog_show_data,
+    "chat_type_schema": _dialog_chat_type_schema,
 }
 
 
@@ -1458,6 +1557,75 @@ def _step_label(number: int, title: str, summary: str, done: bool) -> str:
     return f"{marker} Step {number} · {title}{f' — {summary}' if summary else ''}"
 
 
+# The container Step 1's widgets live in on Chat and Checks, hidden by the one stylesheet
+# on this page. Named here because the CSS rule has to spell the same key.
+HIDDEN_UPLOAD_MOUNT = "de_upload_mount"
+
+VIEW_KEY = "de_view"
+# A view change asked for by something *inside* a view, queued rather than written: the
+# toggle is a widget, and Streamlit forbids writing a widget's own key once it exists this
+# run — which it does by the time anything below it can ask. Same deferral as
+# `session.queue_step_state` uses for the steps.
+PENDING_VIEW_KEY = "de_pending_view"
+
+
+def _mount_upload(
+    user_id: int, chosen_chat_type: str, saved_chat_types: list[dict]
+) -> tuple[list[session.EngineTable], matching.MatchReport | None]:
+    """Step 1's machinery, without any of the chrome that shows it.
+
+    Every view calls this, because `st.file_uploader` must be instantiated on **every** run
+    — a widget that stops being rendered stops reporting its value, so the moment a run
+    skipped it, `sync_tables` returned nothing and dutifully dropped every table the user
+    had loaded. Only Setup wraps the call in an expander and reports what came back; Chat
+    and Checks mount it out of sight.
+
+    The order of the three calls is load-bearing and is the reason they sit together here.
+    """
+    loaded_tables = _render_upload()
+
+    # Acted on here rather than where the picker is drawn: this reruns, and a rerun before
+    # `st.file_uploader` has been created is a run in which that widget wasn't rendered —
+    # Streamlit then drops its value, taking the files with it. It also has to come before
+    # the check below, which would otherwise measure this upload against the chat type being
+    # switched away from, and discard tables on its say-so.
+    _sync_selection(user_id, chosen_chat_type, saved_chat_types)
+
+    # Ungated on purpose: a view that never shows the report must still act on the check.
+    # Only the *reporting* of it belongs to Setup.
+    match_report = _check_upload(loaded_tables)
+    return loaded_tables, match_report
+
+
+def _render_go_to_setup(key: str) -> None:
+    """Sends the user to the one view that can fix what the message above just described.
+
+    Step 1 isn't on this screen any more, so a message about the upload has to carry its own
+    way back rather than say "scroll up".
+    """
+    if st.button(
+        "Go to Setup",
+        key=key,
+        icon=":material/upload_file:",
+        help="Open the Setup view, where you upload files and manage what's loaded.",
+    ):
+        st.session_state[PENDING_VIEW_KEY] = "Setup"
+        st.rerun(scope="app")
+
+
+def _render_mismatch_gate(report: matching.MatchReport | None, reason: str, key: str) -> None:
+    """The blocked-view message: what's wrong, why it blocks, and where to fix it.
+
+    The problems are listed here rather than pointed at, because the step that lists them is
+    only on Setup now — "fix the problems in Step 1" would name something off screen.
+    """
+    st.error(f"{report.summary() if report is not None else 'This upload has problems.'} {reason}",
+             icon=":material/error:")
+    for problem in report.problems() if report is not None else []:
+        st.markdown(f"- {problem}")
+    _render_go_to_setup(key)
+
+
 if profile is not None:
     render_sidebar(profile)
     user_id = st.session_state["user_id"]
@@ -1468,6 +1636,9 @@ if profile is not None:
     # Applied before any expander is created, since Streamlit forbids writing a widget's
     # own key once it exists this run.
     session.consume_step_state()
+    # The view toggle is under the same rule, and "Go to Setup" is drawn well below it.
+    if PENDING_VIEW_KEY in st.session_state:
+        st.session_state[VIEW_KEY] = st.session_state.pop(PENDING_VIEW_KEY)
 
     loaded_tables = list(session.get_tables().values())
     relationship_count = len(session.get_relationships())
@@ -1498,7 +1669,7 @@ if profile is not None:
     view = st.segmented_control(
         "View",
         options=["Setup", "Chat", "Checks"],
-        key="de_view",
+        key=VIEW_KEY,
         default="Setup",
         required=True,
         label_visibility="collapsed",
@@ -1513,44 +1684,51 @@ if profile is not None:
         width="stretch",
     )
 
-    # Every `expanded=` on this page is a **constant**. Streamlit re-applies that
-    # argument whenever its value changes, overriding the stored open state — so a
-    # dynamic `expanded=not loaded_tables` would force this step shut the instant a file
-    # loaded and keep it shut, putting the uploader permanently out of reach. Anything
-    # dynamic goes through `session.queue_step_state` instead.
-    with st.expander(
-        _step_label(1, "Your data", upload_summary, bool(loaded_tables)),
-        key=session.STEP_UPLOAD,
-        on_change="rerun",
-        expanded=True,
-        icon=":material/upload_file:",
-    ) as upload_step:
-        # The uploader is instantiated on **every** run, open or collapsed, regardless of
-        # `view` — gating it on either looks like the same optimization applied to steps 2
-        # and 3 and is not: a widget that stops being rendered stops reporting its value,
-        # so the moment this step auto-collapsed `st.file_uploader` returned nothing and
-        # `sync_tables` dutifully dropped every table the user had loaded. Only the
-        # per-table previews below are gated — they are the expensive part, and they hold
-        # no state.
-        loaded_tables = _render_upload()
+    if view == "Setup":
+        # Every `expanded=` on this page is a **constant**. Streamlit re-applies that
+        # argument whenever its value changes, overriding the stored open state — so a
+        # dynamic `expanded=not loaded_tables` would force this step shut the instant a file
+        # loaded and keep it shut, putting the uploader permanently out of reach. Anything
+        # dynamic goes through `session.queue_step_state` instead.
+        with st.expander(
+            _step_label(1, "Your data", upload_summary, bool(loaded_tables)),
+            key=session.STEP_UPLOAD,
+            on_change="rerun",
+            expanded=True,
+            icon=":material/upload_file:",
+        ) as upload_step:
+            # Ungated on `upload_step.open` for the reason `_mount_upload` explains: a
+            # collapsed step must still instantiate the uploader and act on the check. Only
+            # the per-table previews below are gated — they are the expensive part, and they
+            # hold no state.
+            loaded_tables, match_report = _mount_upload(
+                user_id, chosen_chat_type, saved_chat_types
+            )
 
-        # Acted on here rather than where the picker is drawn: this reruns, and a rerun
-        # before `st.file_uploader` has been created is a run in which that widget wasn't
-        # rendered — Streamlit then drops its value, taking the files with it. It also has
-        # to come before the check below, which would otherwise measure this upload against
-        # the chat type being switched away from, and discard tables on its say-so.
-        _sync_selection(user_id, chosen_chat_type, saved_chat_types)
-
-        # Ungated on purpose: a collapsed step must still act on the check. Only the
-        # *reporting* of it is part of what this step shows.
-        match_report = _check_upload(loaded_tables)
-
-        if upload_step.open:
-            _render_match_notes(match_report)
-            if loaded_tables:
-                _render_loaded_tables(loaded_tables)
-            else:
-                st.info("Upload a CSV or Excel file to get started.", icon=":material/upload_file:")
+            if upload_step.open:
+                _render_match_notes(match_report)
+                if loaded_tables:
+                    _render_loaded_tables(loaded_tables)
+                else:
+                    st.info(
+                        "Upload a CSV or Excel file to get started.",
+                        icon=":material/upload_file:",
+                    )
+    else:
+        # Chat and Checks are for working, not for managing files, so Step 1 is off these
+        # screens entirely — no expander, no header line, no report. Its widgets are still
+        # *mounted*, hidden, because they must be created on every run or the upload is
+        # lost; this container is not dead UI and deleting it drops the user's tables the
+        # first time they switch views. What the check found is not silently swallowed:
+        # anything blocking is said by the gates below, and Setup still shows the rest.
+        with st.container(key=HIDDEN_UPLOAD_MOUNT):
+            loaded_tables, match_report = _mount_upload(
+                user_id, chosen_chat_type, saved_chat_types
+            )
+        # The app's only stylesheet, and deliberately not a styling choice: there is no
+        # native way to mount a widget without showing it, and mounting it is not optional.
+        # `key=` on a container is what Streamlit documents as producing `.st-key-<key>`.
+        st.html(f"<style>.st-key-{HIDDEN_UPLOAD_MOUNT} {{ display: none; }}</style>")
 
     if set(session.get_tables()) != tables_before:
         # The labels above were rendered from the table set as it stood at the top of
@@ -1614,18 +1792,26 @@ if profile is not None:
 
     _render_pending_dialog()
 
-    if loaded_tables and view == "Chat":
-        if upload_matches:
+    if view == "Chat":
+        if not loaded_tables:
+            # Said out loud rather than left blank: with Step 1 off this screen there is
+            # nothing else here, and an empty view reads as the page having failed.
+            st.info(
+                "Upload your data in Setup to start asking questions.",
+                icon=":material/upload_file:",
+            )
+            _render_go_to_setup("de_chat_go_to_setup_button")
+        elif upload_matches:
             with st.container(border=True, key="an_chat_container1",):
                 _render_chat(user_id)
         else:
-            # Step 1 already lists what's wrong, and was re-opened for it. Answering
-            # questions against a half-matched load is the one thing requirement 6.6 exists
-            # to prevent — a text date column returns wrong rows rather than an error.
-            st.info(
-                "Fix the problems listed in Step 1 before asking questions — the answers "
-                "wouldn't be reliable until then.",
-                icon=":material/error:",
+            # Answering questions against a half-matched load is the one thing requirement
+            # 6.6 exists to prevent — a text date column returns wrong rows, not an error.
+            _render_mismatch_gate(
+                match_report,
+                "Fix these before asking questions — the answers wouldn't be reliable "
+                "until then.",
+                "de_chat_mismatch_setup_button",
             )
 
     if view == "Checks":
@@ -1636,11 +1822,13 @@ if profile is not None:
                 "Upload your data first — criteria are written against the columns you load.",
                 icon=":material/upload_file:",
             )
+            _render_go_to_setup("de_checks_go_to_setup_button")
         elif not upload_matches:
-            st.info(
-                "Fix the problems listed in Step 1 before running criteria — a wrong Yes/No "
-                "goes straight onto your Dashboard as a report.",
-                icon=":material/error:",
+            _render_mismatch_gate(
+                match_report,
+                "Fix these before running criteria — a wrong Yes/No goes straight onto "
+                "your Dashboard as a report.",
+                "de_checks_mismatch_setup_button",
             )
         else:
             render_checks(user_id)

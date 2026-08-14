@@ -1,4 +1,4 @@
-"""Meetings, invitees, sessions and messages in SQLite (requirement 6.7, Phase 1).
+"""Meetings, invitees, sessions and messages in SQLite (requirement 6.7).
 
 Follows `chat_types/db.py` line for line — short-lived connection per call, every creator
 read scoped to the owning `user_id` — with one structural difference that shapes the whole
@@ -15,6 +15,7 @@ the token actually belongs to it. `resolve_token` is the only door into the invi
 and it returns the meeting id rather than accepting one.
 """
 
+import json
 import logging
 import sqlite3
 from contextlib import contextmanager
@@ -24,8 +25,11 @@ from pathlib import Path
 from meetings.exceptions import MeetingStorageError
 from meetings.model import (
     AgendaItem,
+    AgendaTable,
     ChatMessage,
     ChatSession,
+    EvaluationAnswer,
+    EvaluationField,
     Invitee,
     Meeting,
     agenda_from_json,
@@ -143,6 +147,70 @@ _CREATE_FILES_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_meeting_files_meeting ON meeting_files (meeting_id, invitee_id);
 """
 
+# Phase 2 (spec 3a/3b). All four are new tables rather than columns on existing ones, which
+# is why none of them needs a `PRAGMA table_info` migration guard the way `check_sets` did:
+# `CREATE TABLE IF NOT EXISTS` is the whole migration for a database written by Phase 1.
+_CREATE_AGENDA_TABLES_TABLE = """
+CREATE TABLE IF NOT EXISTS meeting_agenda_tables (
+    table_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id       INTEGER NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
+    item_ref         TEXT NOT NULL,
+    source_file      TEXT NOT NULL DEFAULT '',
+    locked_columns   TEXT NOT NULL DEFAULT '[]',
+    editable_columns TEXT NOT NULL DEFAULT '[]',
+    base_data        TEXT NOT NULL DEFAULT '[]',
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+# One grid per agenda item title. UNIQUE rather than merely indexed so that re-uploading a
+# sheet for the same item replaces it instead of leaving two tables both claiming the tab.
+_CREATE_AGENDA_TABLES_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_meeting_agenda_tables_item
+ON meeting_agenda_tables (meeting_id, item_ref);
+"""
+
+# A row exists here only when the invitee has actually filled something into it — see
+# `save_table_responses`. That is what makes completion a plain COUNT rather than a scan of
+# every stored JSON blob asking whether it counts as filled.
+_CREATE_TABLE_RESPONSES_TABLE = """
+CREATE TABLE IF NOT EXISTS meeting_table_responses (
+    table_id      INTEGER NOT NULL REFERENCES meeting_agenda_tables(table_id) ON DELETE CASCADE,
+    invitee_id    INTEGER NOT NULL REFERENCES meeting_invitees(invitee_id) ON DELETE CASCADE,
+    row_id        INTEGER NOT NULL,
+    edited_values TEXT NOT NULL DEFAULT '{}',
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (table_id, invitee_id, row_id)
+);
+"""
+
+_CREATE_EVALUATION_FIELDS_TABLE = """
+CREATE TABLE IF NOT EXISTS meeting_evaluation_fields (
+    field_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id   INTEGER NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
+    question     TEXT NOT NULL,
+    buckets_json TEXT NOT NULL DEFAULT '[]',
+    position     INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_EVALUATION_FIELDS_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_meeting_evaluation_fields_meeting
+ON meeting_evaluation_fields (meeting_id, position);
+"""
+
+_CREATE_EVALUATION_RESULTS_TABLE = """
+CREATE TABLE IF NOT EXISTS meeting_evaluation_results (
+    field_id       INTEGER NOT NULL REFERENCES meeting_evaluation_fields(field_id) ON DELETE CASCADE,
+    invitee_id     INTEGER NOT NULL REFERENCES meeting_invitees(invitee_id) ON DELETE CASCADE,
+    raw_answer     TEXT NOT NULL DEFAULT '',
+    classified_tag TEXT NOT NULL DEFAULT '',
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (field_id, invitee_id)
+);
+"""
+
 
 @contextmanager
 def _get_connection(db_path: Path | str = DEFAULT_DB_PATH):
@@ -188,6 +256,12 @@ def init_meetings_tables(db_path: Path | str = DEFAULT_DB_PATH) -> None:
         connection.execute(_CREATE_MESSAGES_INDEX)
         connection.execute(_CREATE_FILES_TABLE)
         connection.execute(_CREATE_FILES_INDEX)
+        connection.execute(_CREATE_AGENDA_TABLES_TABLE)
+        connection.execute(_CREATE_AGENDA_TABLES_INDEX)
+        connection.execute(_CREATE_TABLE_RESPONSES_TABLE)
+        connection.execute(_CREATE_EVALUATION_FIELDS_TABLE)
+        connection.execute(_CREATE_EVALUATION_FIELDS_INDEX)
+        connection.execute(_CREATE_EVALUATION_RESULTS_TABLE)
 
 
 def _now() -> str:
@@ -706,3 +780,386 @@ def list_files(
                 (meeting_id, invitee_id),
             ).fetchall()
     return [dict(row) for row in rows]
+
+
+# --------------------------------------------------------------------------------------
+# Agenda tables and evaluation fields — the meeting's own setup (spec 3a, 3b)
+# --------------------------------------------------------------------------------------
+#
+# These read functions take no `user_id` and no token, which breaks the two-family split
+# above on purpose. They are part of the *meeting's* definition, like `agenda_json` — and
+# both sides have already proved their right to the meeting before they get here: the
+# creator through `load_meeting`, the invitee through `resolve_token`. Writing is a
+# different matter, and every writer below is scoped to `created_by`.
+
+
+def _row_to_agenda_table(row: sqlite3.Row) -> AgendaTable:
+    return AgendaTable(
+        table_id=row["table_id"],
+        meeting_id=row["meeting_id"],
+        item_ref=row["item_ref"],
+        source_file=row["source_file"],
+        locked_columns=_json_list(row["locked_columns"]),
+        editable_columns=_json_list(row["editable_columns"]),
+        base_data=_json_list(row["base_data"]),
+    )
+
+
+def _json_list(text: str) -> list:
+    """A stored JSON array, or an empty list if it can't be read.
+
+    Never raises, for the same reason `agenda_from_json` doesn't: a grid that won't parse
+    should cost the invitee that one tab, not the chat screen it is a tab of.
+    """
+    try:
+        value = json.loads(text or "[]")
+    except (TypeError, ValueError):
+        logger.exception("A stored meetings JSON list could not be read.")
+        return []
+    return value if isinstance(value, list) else []
+
+
+def save_agenda_table(
+    meeting_id: int, user_id: int, table: AgendaTable, db_path: Path | str = DEFAULT_DB_PATH
+) -> int:
+    """Attaches a grid to one table agenda item, replacing any grid already there.
+
+    Replacing rather than versioning is deliberate: `base_data` is the question every
+    invitee is answering, so two versions of it would mean two invitees answered different
+    questions with nothing on screen saying so. Re-uploading before invitees start is the
+    intended fix for a wrong sheet; re-uploading after they start is the creator changing
+    the question, and their existing answers are cleared with it.
+
+    Raises:
+        MeetingStorageError: if the meeting isn't theirs, or on a database failure.
+    """
+    item_ref = (table.item_ref or "").strip()
+    if not item_ref:
+        raise MeetingStorageError("A table needs to belong to an agenda item.")
+
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        existing = connection.execute(
+            "SELECT table_id FROM meeting_agenda_tables WHERE meeting_id = ? AND item_ref = ?;",
+            (meeting_id, item_ref),
+        ).fetchone()
+
+        payload = (
+            table.source_file,
+            json.dumps(table.locked_columns),
+            json.dumps(table.editable_columns),
+            json.dumps(table.base_data),
+        )
+        if existing is None:
+            cursor = connection.execute(
+                "INSERT INTO meeting_agenda_tables "
+                "(meeting_id, item_ref, source_file, locked_columns, editable_columns, base_data) "
+                "VALUES (?, ?, ?, ?, ?, ?);",
+                (meeting_id, item_ref, *payload),
+            )
+            return cursor.lastrowid
+
+        table_id = existing["table_id"]
+        connection.execute(
+            "UPDATE meeting_agenda_tables SET source_file = ?, locked_columns = ?, "
+            "editable_columns = ?, base_data = ? WHERE table_id = ?;",
+            (*payload, table_id),
+        )
+        # The rows people filled in answered the old sheet. Keeping them against a new one
+        # would silently re-attribute an answer to a different question.
+        connection.execute("DELETE FROM meeting_table_responses WHERE table_id = ?;", (table_id,))
+        return table_id
+
+
+def list_agenda_tables(meeting_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> list[AgendaTable]:
+    """Every grid attached to this meeting, keyed back to its agenda item by `item_ref`."""
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM meeting_agenda_tables WHERE meeting_id = ? ORDER BY table_id;",
+            (meeting_id,),
+        ).fetchall()
+    return [_row_to_agenda_table(row) for row in rows]
+
+
+def find_agenda_table(
+    meeting_id: int, item_ref: str, db_path: Path | str = DEFAULT_DB_PATH
+) -> AgendaTable | None:
+    """The grid for one agenda item, or None if the creator hasn't uploaded one yet."""
+    with _get_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT * FROM meeting_agenda_tables WHERE meeting_id = ? AND item_ref = ?;",
+            (meeting_id, (item_ref or "").strip()),
+        ).fetchone()
+    return _row_to_agenda_table(row) if row is not None else None
+
+
+def delete_agenda_table(
+    meeting_id: int, user_id: int, item_ref: str, db_path: Path | str = DEFAULT_DB_PATH
+) -> None:
+    """Removes a grid and every answer to it.
+
+    Raises:
+        MeetingStorageError: if the meeting isn't theirs, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        connection.execute(
+            "DELETE FROM meeting_agenda_tables WHERE meeting_id = ? AND item_ref = ?;",
+            (meeting_id, (item_ref or "").strip()),
+        )
+
+
+def save_table_responses(
+    table_id: int,
+    invitee_id: int,
+    rows: dict[int, dict],
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> int:
+    """Replaces one invitee's answers to one grid, and returns how many rows they've filled.
+
+    A row whose values are all blank is **not stored**. That is the invariant the completion
+    count rests on — "a stored response row is a filled row" — so it is enforced here rather
+    than trusted from the caller, and clearing a row the invitee had filled correctly takes
+    the row back out.
+
+    Whole-set replace rather than per-row upsert because Save Progress is one press over one
+    grid: a partial write would leave a row the invitee had just cleared still counted.
+    """
+    keep = {}
+    for row_id, values in (rows or {}).items():
+        cleaned = {
+            str(column): value
+            for column, value in (values or {}).items()
+            if str(value or "").strip()
+        }
+        if cleaned:
+            keep[int(row_id)] = cleaned
+
+    with _get_connection(db_path) as connection:
+        connection.execute(
+            "DELETE FROM meeting_table_responses WHERE table_id = ? AND invitee_id = ?;",
+            (table_id, invitee_id),
+        )
+        connection.executemany(
+            "INSERT INTO meeting_table_responses (table_id, invitee_id, row_id, edited_values, updated_at) "
+            "VALUES (?, ?, ?, ?, ?);",
+            [
+                (table_id, invitee_id, row_id, json.dumps(values), _now())
+                for row_id, values in sorted(keep.items())
+            ],
+        )
+    return len(keep)
+
+
+def _json_object(text: str) -> dict:
+    try:
+        value = json.loads(text or "{}")
+    except (TypeError, ValueError):
+        logger.exception("A stored table response could not be read.")
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def load_table_responses(
+    table_id: int, invitee_id: int, db_path: Path | str = DEFAULT_DB_PATH
+) -> dict[int, dict]:
+    """One invitee's filled rows for one grid, keyed by row index."""
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT row_id, edited_values FROM meeting_table_responses "
+            "WHERE table_id = ? AND invitee_id = ? ORDER BY row_id;",
+            (table_id, invitee_id),
+        ).fetchall()
+    return {row["row_id"]: _json_object(row["edited_values"]) for row in rows}
+
+
+def load_all_table_responses(
+    table_id: int, db_path: Path | str = DEFAULT_DB_PATH
+) -> dict[int, dict[int, dict]]:
+    """Every invitee's filled rows for one grid, as `{invitee_id: {row_id: values}}`.
+
+    One query rather than one per invitee, because this feeds a comparison matrix that would
+    otherwise open a connection per column.
+    """
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT invitee_id, row_id, edited_values FROM meeting_table_responses "
+            "WHERE table_id = ? ORDER BY invitee_id, row_id;",
+            (table_id,),
+        ).fetchall()
+
+    responses: dict[int, dict[int, dict]] = {}
+    for row in rows:
+        responses.setdefault(row["invitee_id"], {})[row["row_id"]] = _json_object(row["edited_values"])
+    return responses
+
+
+def count_table_responses(meeting_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> dict[tuple[int, int], int]:
+    """`{(table_id, invitee_id): filled_row_count}` for every grid in this meeting.
+
+    A COUNT rather than a length of loaded JSON — this feeds the creator's status list,
+    which needs a completion figure per invitee per table and nothing else from the rows.
+    """
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT r.table_id, r.invitee_id, COUNT(*) AS filled "
+            "FROM meeting_table_responses r "
+            "JOIN meeting_agenda_tables t ON t.table_id = r.table_id "
+            "WHERE t.meeting_id = ? GROUP BY r.table_id, r.invitee_id;",
+            (meeting_id,),
+        ).fetchall()
+    return {(row["table_id"], row["invitee_id"]): row["filled"] for row in rows}
+
+
+def table_progress(
+    meeting_id: int, invitee_id: int, db_path: Path | str = DEFAULT_DB_PATH
+) -> dict[str, tuple[int, int]]:
+    """`{agenda item title: (filled_rows, total_rows)}` for one invitee.
+
+    The shape the MoM wants, in one query. Both pages need it — the invitee's Close Chat and
+    the creator's Generate Status write the same figures into the same summary — so it lives
+    here rather than being assembled twice from `list_agenda_tables` and
+    `count_table_responses`.
+    """
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT t.item_ref, t.base_data, "
+            "  (SELECT COUNT(*) FROM meeting_table_responses r "
+            "     WHERE r.table_id = t.table_id AND r.invitee_id = ?) AS filled "
+            "FROM meeting_agenda_tables t WHERE t.meeting_id = ?;",
+            (invitee_id, meeting_id),
+        ).fetchall()
+    return {row["item_ref"]: (row["filled"], len(_json_list(row["base_data"]))) for row in rows}
+
+
+def _row_to_evaluation_field(row: sqlite3.Row) -> EvaluationField:
+    return EvaluationField(
+        field_id=row["field_id"],
+        meeting_id=row["meeting_id"],
+        question=row["question"],
+        buckets=[str(bucket) for bucket in _json_list(row["buckets_json"])],
+        position=row["position"],
+    )
+
+
+def list_evaluation_fields(
+    meeting_id: int, db_path: Path | str = DEFAULT_DB_PATH
+) -> list[EvaluationField]:
+    """This meeting's evaluation questions, in the order the creator put them in.
+
+    An empty list means the feature is simply off for this meeting — spec 1 makes evaluation
+    fields an optional toggle, and "no questions defined" is how that toggle is stored.
+    """
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM meeting_evaluation_fields WHERE meeting_id = ? ORDER BY position, field_id;",
+            (meeting_id,),
+        ).fetchall()
+    return [_row_to_evaluation_field(row) for row in rows]
+
+
+def replace_evaluation_fields(
+    meeting_id: int,
+    user_id: int,
+    fields: list[EvaluationField],
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Saves this meeting's evaluation questions as the given list.
+
+    Existing questions are **updated in place by `field_id`**, not deleted and re-inserted.
+    Deleting would cascade `meeting_evaluation_results` away, so fixing a typo in a question
+    would throw out every answer already extracted for it. Only a question the creator
+    actually removed loses its answers — which is right, since the question it answered is
+    gone.
+
+    Raises:
+        MeetingStorageError: if the meeting isn't theirs, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+
+        existing = {
+            row["field_id"]
+            for row in connection.execute(
+                "SELECT field_id FROM meeting_evaluation_fields WHERE meeting_id = ?;",
+                (meeting_id,),
+            ).fetchall()
+        }
+
+        kept = set()
+        for position, field_spec in enumerate(fields):
+            question = (field_spec.question or "").strip()
+            if not question:
+                continue
+            buckets = json.dumps([bucket for bucket in field_spec.buckets if bucket.strip()])
+            if field_spec.field_id in existing:
+                connection.execute(
+                    "UPDATE meeting_evaluation_fields SET question = ?, buckets_json = ?, position = ? "
+                    "WHERE field_id = ? AND meeting_id = ?;",
+                    (question, buckets, position, field_spec.field_id, meeting_id),
+                )
+                kept.add(field_spec.field_id)
+            else:
+                cursor = connection.execute(
+                    "INSERT INTO meeting_evaluation_fields (meeting_id, question, buckets_json, position) "
+                    "VALUES (?, ?, ?, ?);",
+                    (meeting_id, question, buckets, position),
+                )
+                kept.add(cursor.lastrowid)
+
+        for removed in existing - kept:
+            connection.execute(
+                "DELETE FROM meeting_evaluation_fields WHERE field_id = ? AND meeting_id = ?;",
+                (removed, meeting_id),
+            )
+
+
+def save_evaluation_answers(
+    invitee_id: int, answers: list[EvaluationAnswer], db_path: Path | str = DEFAULT_DB_PATH
+) -> None:
+    """Stores one invitee's extracted answers, overwriting any previous extraction.
+
+    Overwrite rather than append for the same reason `save_live_status` overwrites: a
+    re-extraction is a better reading of the same conversation, not a second opinion to be
+    kept beside the first.
+    """
+    with _get_connection(db_path) as connection:
+        connection.executemany(
+            "INSERT INTO meeting_evaluation_results (field_id, invitee_id, raw_answer, classified_tag, updated_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(field_id, invitee_id) DO UPDATE SET raw_answer = excluded.raw_answer, "
+            "classified_tag = excluded.classified_tag, updated_at = excluded.updated_at;",
+            [
+                (answer.field_id, invitee_id, answer.raw_answer, answer.classified_tag, _now())
+                for answer in answers
+                if answer.field_id is not None
+            ],
+        )
+
+
+def list_evaluation_answers(
+    meeting_id: int, db_path: Path | str = DEFAULT_DB_PATH
+) -> list[EvaluationAnswer]:
+    """Every extracted answer in this meeting, across every invitee.
+
+    Joined through the fields table so the meeting scope holds: the results table keys on
+    `field_id`, and a query that filtered on anything else could not prove the rows belong
+    to this meeting.
+    """
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT r.* FROM meeting_evaluation_results r "
+            "JOIN meeting_evaluation_fields f ON f.field_id = r.field_id "
+            "WHERE f.meeting_id = ? ORDER BY f.position, f.field_id, r.invitee_id;",
+            (meeting_id,),
+        ).fetchall()
+    return [
+        EvaluationAnswer(
+            field_id=row["field_id"],
+            invitee_id=row["invitee_id"],
+            raw_answer=row["raw_answer"] or "",
+            classified_tag=row["classified_tag"] or "",
+            updated_at=row["updated_at"] or "",
+        )
+        for row in rows
+    ]
