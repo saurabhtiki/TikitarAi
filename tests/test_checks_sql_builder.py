@@ -137,7 +137,7 @@ class TestRunCheck:
 class TestGenerateAndRun:
     def test_a_good_first_attempt_needs_only_one_call(self, monkeypatch, connection, check):
         prompts = _stub(monkeypatch, GeneratedSql(sql=GOOD_SQL))
-        sql, frame = generate_and_run({}, "", check, SCHEMA, connection)
+        sql, frame, _ = generate_and_run({}, "", check, SCHEMA, connection)
         assert sql == GOOD_SQL
         assert len(frame) == 2
         assert len(prompts) == 1
@@ -148,7 +148,7 @@ class TestGenerateAndRun:
         broken = "SELECT employee, bonus AS criteria_result FROM salary"
         prompts = _stub(monkeypatch, GeneratedSql(sql=broken), GeneratedSql(sql=GOOD_SQL))
 
-        sql, frame = generate_and_run({}, "", check, SCHEMA, connection)
+        sql, frame, _ = generate_and_run({}, "", check, SCHEMA, connection)
 
         assert sql == GOOD_SQL
         assert len(prompts) == 2
@@ -165,7 +165,7 @@ class TestGenerateAndRun:
         """Models fence SQL unbidden, and a fenced statement would be reported to the user
         as if their rule were at fault."""
         _stub(monkeypatch, GeneratedSql(sql=f"```sql\n{GOOD_SQL};\n```"))
-        sql, _ = generate_and_run({}, "", check, SCHEMA, connection)
+        sql, _, _ = generate_and_run({}, "", check, SCHEMA, connection)
         assert sql == GOOD_SQL
 
     def test_a_bare_statement_reply_is_asked_to_be_recovered(self, monkeypatch, connection, check):

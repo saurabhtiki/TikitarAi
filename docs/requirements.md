@@ -510,96 +510,99 @@ Restricted to `admin` and `superuser` roles. This is where a full pipeline
 — from raw file upload through a finished, deliberately structured report —
 is assembled once and saved as a reusable **Task**.
 
-### 7.1 Flow
+### 7.1 Shape of the page
+
+Its own page, laid out like Chat with Data but separate from it: one control
+switches between four views — **Setup | Report-Items | Checks | Report** —
+with a task bar above them holding the task name and Save / Update / Load.
+
+Two things Chat with Data has are deliberately absent:
+
+- **No chat type picker.** A Task *is* a saved setup; offering a second
+  saved-setup concept on the same screen would be two answers to one
+  question.
+- **No criteria Save set / Load set** in the Checks view. The criteria are
+  saved with the Task.
+
+### 7.2 Persona and context
+
+Set **once per Task**, at the foot of the Setup view, and used by both
+Report-Items and Checks wherever commentary is generated. This is the
+knowledge base / domain-rules slot the rest of this document refers to.
+
+### 7.3 Flow
+
 1. **Name the task** (e.g. "Salary Processing").
-2. **Upload sample files and clean them**, using the same cleaning actions
-   available in the Data Cleaner utility (Section 4.1). Every cleaning
-   action is recorded with its exact structured parameters (not just a
-   display string), in the order applied, so the sequence can be replayed
-   later.
-3. **Data Engine setup** (Section 5): confirm relationships, review and
-   edit column descriptions. Everything configured here is recorded for
-   later reuse.
-4. **Build the report, structure-first:**
-   - Define the report skeleton before chatting: header, footer, title
-     page, and a Section → Subsection tree, each subsection with its own
-     name. Sections and subsections are auto-numbered based on their
-     position in the tree, and renumber automatically if reordered.
-   - Ask questions in chat as usual; each output has a **"💾 Save to
-     Report"** button that opens a small dialog to choose the target
-     Section → Subsection (with an optional title override, defaulting to
-     the question asked).
-   - Items that aren't assigned to a section at save time go into an
-     "Unassigned" holding area rather than being dropped.
-   - Items, subsections, and sections can each be reordered among their
-     siblings (up/down controls, position-jump input, and — for items only
-     — a "move to a different subsection" action).
-5. **Attach a knowledge base** (Section 7.2) to guide how AI-generated
-   commentary should interpret the data.
-6. **Save as Task**, capturing the full recipe (Section 7.5).
+2. **Setup** — upload sample files (e.g. salary master, employee master,
+   attendance data), confirm relationships, review and edit column
+   descriptions, exactly as Section 5 describes. Everything configured here
+   is recorded for later reuse. The persona and context box sits at the foot
+   of this view.
+3. **Report-Items** — cards, like Checks, not a conversation. **Add new**
+   creates an item of one of two kinds:
+   - A **report item**: point heading, the rule in plain language, tables
+     involved (optional), columns involved (optional). The user generates
+     and regenerates SQL, sees the result as a dataframe, can generate a
+     chart for it and a comment, then **Pin to report**, update, or remove
+     from the report.
+   - A **column step**: add or update column values, in plain language. From
+     that step onwards every later item sees the updated table. A column
+     step is never pinned — its effect is the changed data.
 
-### 7.2 Report Knowledge Base
-- A free-text field attached to the report (one per report, not per
-  section) where the task author writes domain rules or context for the
-  AI to apply when generating written commentary — for example: *"This
-  report covers accounts receivable. If a customer's outstanding balance
-  is overdue more than 90 days, flag it as high risk. If overdue 30–90
-  days, note it as a follow-up item."*
-- Written in plain English and interpreted directly by the LLM — no
-  structured rule-editor is needed.
-- This text is passed as additional context into the dedicated
-  commentary-generation call (Section 6.2), kept separate from the
-  SQL-generation call.
-- Because it's attached to the Task's report, it's automatically applied
-  every time that report is produced — whether during authoring or during
-  a later Task run.
+   Order is the list's order, and **only the last column step may be
+   deleted** — deleting one in the middle would leave every later item's SQL
+   written against columns that no longer exist.
+4. **Checks** — Criteria-Based Exceptional Reporting as described in
+   Section 6.5, with two omissions: no criteria set save/load (above), and
+   **no Actions view**. Drafted emails, meetings and tasks respond to *this
+   month's* exceptions; a Task is a reusable recipe, and a saved draft about
+   rows that no longer exist is worse than no draft. Chat with Data keeps
+   its Actions view unchanged.
+5. **Report** — the same arranging, preview and download screen as the
+   Dashboard (Section 6.4), over the Task's own report rather than the
+   session Dashboard. Anything pinned from Report-Items or Checks lands
+   here.
+6. **Save / Update as Task**, capturing the full recipe below so it can be
+   reused and later edited.
 
-### 7.3 Export Formats
+### 7.4 Export Formats
 - Uses the same Jinja2-based HTML rendering approach as Chat with Data's
   Dashboard (Section 6.4), plus two additional formats:
   - **HTML** — as described in Section 6.4.
-  - **PDF** — generated by converting the same HTML through an
-    HTML-to-PDF engine, which handles pagination, page numbers, and footer
-    placement.
-  - **Word** — generated by converting the same HTML through an
-    HTML-to-docx engine, preserving Section/Subsection headings as real
-    Word heading styles (enabling a working, auto-generated Table of
-    Contents).
   - **Excel** — one sheet per subsection, charts embedded as images, text
     summaries placed as cells; full data, no row limits.
-- Row caps apply to large tables in the Word and PDF exports (e.g. top 50
-  rows with a note indicating the full data is available in the Excel
-  export); this cap is configurable. HTML and Excel exports always contain
-  full data.
 
-### 7.4 What Gets Captured in a Task
-- **Schema signature per file role** — recorded column names, data types,
-  and their descriptions/aliases (Section 5.3).
-- **Cleaning action sequence per file role**, with structured parameters,
-  in the exact order applied.
-- **Relationships** — the confirmed foreign key relationships from Section 5.2.
-- **Calculated/deleted column statements**, captured in order.
-- **Chat items** — the original questions, their output type, and their
-  section/subsection placement.
-- **Report skeleton** — header, footer, title page, section/subsection
-  structure, and the knowledge base text (Section 7.2).
 
-### 7.5 Storage
+### 7.5 What Gets Captured in a Task
+
+The file schemas, the relationships, the column meanings, the ordered
+calculated-column statements, the report items and their SQL, the criteria,
+the report structure, and the persona and context.
+
+**Data Cleaner steps are not captured.** The user cleans their files
+themselves and uploads the result, so a Task has no cleaning sequence to
+record or replay.
+
+A saved report is a **skeleton, never a snapshot**: headings, comments,
+section and subsection names, ordering and the id of the item each entry
+came from — never a dataframe or a figure, which describe data that is gone
+when the session ends.
+
+### 7.6 Storage
 - SQLite table: `task_id`, `user_id` (owner), `name`, `description`,
   `created_at`, `task_json`.
 - `task_json` holds the full recorded recipe:
   ```
   {
     expected_schemas: { role: { columns: { name: {dtype, description, aliases} } } },
-    cleaning_steps: { role: [ ordered action list ] },
     relationships: [ ... ],
     calculated_columns: [ ordered SQL statement list ],
-    chat_items: [ ... ],
-    report_skeleton: { header, footer, title_page, sections: [...], knowledge_base }
+    report_items: [ ... ],
+    checks: [ ... ]
+    report_skeleton: { header, footer, title_page, sections: [...], Persona and context  }
   }
   ```
-- Tasks are owned by the user who created them, with rename, duplicate, and
-  delete actions available to the owner.
+- Tasks are owned by the user who created them, the owner can update & save it.
 
 ---
 
@@ -609,13 +612,8 @@ Available to any logged-in user.
 
 ### 8.1 Flow
 1. Select a saved Task from the list.
-2. Download a sample file template, generated automatically from the
-   Task's recorded schema — correct column headers plus a handful of
-   plausible dummy sample rows appropriate to each column's data type, and
-   a short note on any columns that serve as join keys. This is
-   regenerated fresh from the schema whenever the Task is saved, so it
-   never goes stale.
-3. Upload this run's files.
+2. on click of button in dialog-Show schema to user -like files-columns names etc
+3. user Upload all the files & once all files uploded- click to check/ match schema.
 4. **Automatic schema matching** — each uploaded file's column-name and
    dtype signature is compared against each recorded file role's expected
    signature:
@@ -624,30 +622,42 @@ Available to any logged-in user.
      upgrades (e.g. an `int` column arriving as `float`).
    - Extra columns beyond what's expected are allowed and ignored; missing
      required columns are flagged.
-   - If no confident match is found, the user manually assigns which
-     uploaded file corresponds to which recorded role.
 5. On a mismatch, the exact file/column/expected-vs-actual discrepancy is
-   shown, with an option to manually remap the affected column rather than
-   aborting the whole run.
+   shown, with an option to manually remap rather than aborting the whole run.
+   Two remaps, because two things can be named differently in this month's
+   files:
+   - **which file is which table** — a table's name comes from its filename,
+     so `salary_august.xlsx` against a task recorded on `salary.xlsx` is the
+     first mismatch most users meet, and telling them to rename their files
+     would be a worse answer than remapping;
+   - **which column is which column**, as above.
+
+   A remap is applied **while the file is being read**, never to what is
+   already loaded: whether a column can be read as a date is a question about
+   the text in the file, and a column renamed after the load would keep the
+   type detection gave it rather than the one the task declares.
 
 ### 8.2 Replay Execution
-1. Replay the recorded cleaning action sequence for each file. If an
-   individual step's target column is missing or renamed, that one step is
-   skipped and flagged in the run log — the rest of the sequence continues.
-2. Rebuild the relationship metadata and schema context in DuckDB from the
+1. Rebuild the relationship metadata and schema context in DuckDB from the
    recorded configuration.
-3. Replay the recorded calculated-column statements, in order.
-4. Replay each recorded chat item:
-   - Attempt the originally stored SQL first.
-   - If it errors, automatically fall back to re-asking the LLM with the
-     original question against the current schema.
-   - If that also fails, skip the item and flag it for the user's
-     attention.
-5. Assemble all results into the saved report skeleton, applying the
-   knowledge base (Section 7.2) wherever commentary is generated.
-6. Show a preview screen summarizing what succeeded, what needed the LLM
-   fallback, and what failed, before any file is downloaded.
-7. Download the finished report in Excel, Word, PDF, or HTML.
+2. Replay the recorded calculated-column statements, in order.
+3. Replay each recorded report item & Checks, in the order the report items
+   were written — a column step changes what every item below it sees. Each
+   one runs its **recorded SQL** first, with no LLM call at all; only if that
+   statement fails is it regenerated, and the step is reported as having used
+   the fallback. A column step is never regenerated: rewriting a column
+   definition would silently change every figure below it.
+4. Generate report Assemble all results into the saved report skeleton, applying the
+   Task's persona and context (Section 7.2) wherever commentary is
+   generated. Redrafting the commentary is the one LLM call a run makes by
+   design, so it is offered as a choice — declining it keeps the wording
+   saved with the Task.
+5. Show a preview screen summarizing what succeeded, what needed the LLM
+   fallback, and what failed, before any file is downloaded. An item whose
+   result could not be produced keeps its place in the report and says so,
+   rather than disappearing from a report that was designed to have it.
+6. Download the finished report in Excel, HTML.
+7. while the process take time- show user spinner or similar the processing stage to keep UX good.
 
 ---
 

@@ -98,6 +98,41 @@ def read_raw(file_bytes: bytes, file_name: str, sheet_name: str | None = None) -
         raise TableLoadError(str(error)) from error
 
 
+def rename_columns(raw: pd.DataFrame, renames: dict[str, str] | None) -> pd.DataFrame:
+    """Renames columns in an all-text frame, before anything has been typed.
+
+    Requirement 8.1 step 5's manual remap: a saved Task expects `employee_id` and this
+    month's file calls it `emp_id`, and the user says so rather than the whole run aborting.
+
+    **Before typing, deliberately.** Renaming after the load would leave the column typed by
+    detection under a name the Task declares a type for, which is the wrong-rows-with-no-error
+    failure the declared-load path exists to prevent — a date column read as text turns every
+    later comparison into a string comparison. So this runs on the raw text, and
+    `prepare_declared_table` then sees a frame whose columns are the ones it expects.
+
+    Ignores a rename whose source column isn't there, and one that would collide with a
+    column the frame already has: both would raise deep inside pandas or silently produce a
+    duplicate column, and the caller has a match report that will name the still-missing
+    column far more usefully than either.
+    """
+    if not renames:
+        return raw
+
+    present = set(raw.columns)
+    usable = {
+        source: target
+        for source, target in renames.items()
+        if source in present and target and target not in present
+    }
+    skipped = len(renames) - len(usable)
+    if skipped:
+        logger.info("Skipped %d remap(s) naming a column this file doesn't have, or one it already has.", skipped)
+    if not usable:
+        return raw
+
+    return raw.rename(columns=usable)
+
+
 def declaration_failures(
     raw: pd.DataFrame, declared: dict[str, str], limit: int = MAX_FAILED_EXAMPLES
 ) -> list[ConversionFailure]:

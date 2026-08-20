@@ -15,6 +15,8 @@ from llm.exceptions import LLMDatabaseError
 from meetings.db import init_meetings_tables
 from meetings.exceptions import MeetingStorageError
 from meetings.session import invitee_route_params
+from tasks.db import init_tasks_table
+from tasks.exceptions import TaskStorageError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,12 +40,14 @@ def bootstrap_database() -> bool:
         init_chat_types_table()
         init_check_sets_table()
         init_meetings_tables()
+        init_tasks_table()
     except (
         AuthDatabaseError,
         LLMDatabaseError,
         ChecksStorageError,
         ChatTypeStorageError,
         MeetingStorageError,
+        TaskStorageError,
     ):
         logger.exception("Failed to bootstrap the application database.")
         raise
@@ -73,23 +77,38 @@ else:
     # Sections rather than a flat list, because Utilities is an open-ended category
     # (spec 4) that more standalone tools get added to over time.
     pages = {
-        "": [st.Page("app_pages/home.py", title="Home", icon=":material/home:", default=True)],
+        "": [st.Page("app_pages/home.py", title="Home", icon="🏠", default=True)],
         "Explore": [
-            st.Page("app_pages/chat_with_data.py", title="Chat with data", icon=":material/forum:"),
+            st.Page("app_pages/chat_with_data.py", title="Chat with data", icon=":material/chat:"),
             # Directly after the chat, because pinning an answer there is the only way
             # anything gets here — the two pages are one workflow (requirement 6.1–6.3).
-            st.Page("app_pages/dashboard.py", title="Dashboard", icon=":material/dashboard:"),
+            st.Page("app_pages/dashboard.py", title="Dashboard", icon="📊"),
         ],
         # Its own section rather than part of Explore: a meeting is a workflow with two
         # sides (creator here, invitee on a link), not a data-exploration tool.
         "Meetings": [
-            st.Page("app_pages/meetings.py", title="Meetings", icon=":material/groups:")
+            st.Page("app_pages/meetings.py", title="Meetings", icon="👨‍💻")
+        ],
+        # Requirement 8's first line: running a saved task is open to any logged-in user,
+        # unlike building one. The section therefore exists for everyone, and Task builder
+        # is added to it below only for the two roles that may build.
+        "Automate": [
+            st.Page("app_pages/run_task.py", title="Run a task", icon="📊")
         ],
         "Utilities": [
-            st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon=":material/cleaning_services:")
+            st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon="🧹")
         ],
         "Account": [st.Page("app_pages/settings.py", title="Settings", icon=":material/settings:")],
     }
+    # Requirement 2.2 grants Task Builder to admins and superusers only. Registered
+    # conditionally rather than left in the sidebar for everyone to be refused at, the same
+    # call `user_management.py` gets — the page still carries its own `require_role` guard,
+    # since navigation is not access control.
+    if st.session_state.get("role") in ("admin", "superuser"):
+        pages["Automate"].append(
+            st.Page("app_pages/task_builder.py", title="Task builder", icon="🛠️")
+        )
+
     if st.session_state.get("role") == "superuser":
         pages["Admin"] = [
             st.Page(

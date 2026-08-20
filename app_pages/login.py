@@ -11,10 +11,8 @@ logger = logging.getLogger(__name__)
 _, center, _ = st.columns([1, 2, 1])
 
 with center:
-    with st.container(key="logincont",horizontal=True):
-        st.image(LOGO_PATH, width=50)
-        st.title(":blue[Tikitar-Ai]")
-    st.subheader("Log in to continue")
+    
+    st.subheader("🔐Log in to continue")
 
     with st.form("login_form"):
         email = st.text_input(

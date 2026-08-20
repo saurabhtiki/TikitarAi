@@ -31,7 +31,11 @@ from dataclasses import dataclass, field
 import pandas as pd
 import streamlit as st
 
+from checks.model import SOURCE_PREFIX as model_source_prefix
+from checks.model import SUMMARY_SOURCE_ID as model_summary_source_id
 from checks.model import CheckSet
+from checks.model import actions_source_id_for as model_actions_source_id_for
+from checks.model import source_id_for as model_source_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -49,21 +53,15 @@ CK_SUMMARY_TEXT_KEY = "ck_summary_text"
 # What a criteria's dashboard item is filed under. Prefixed rather than the bare check_id,
 # so a criteria and the same criteria's action list (`…:actions`) can each own an item
 # without either one overwriting the other.
-SOURCE_PREFIX = "check"
-
-# The set-level summary owns one item too, under a name no `check_id` can collide with —
-# `new_id` produces twelve hex characters, which never contain a colon.
-SUMMARY_SOURCE_ID = f"{SOURCE_PREFIX}:__summary__"
-
-
-def source_id_for(check_id: str) -> str:
-    """The `PinnedItem.source_id` this criteria's result item is owned by."""
-    return f"{SOURCE_PREFIX}:{check_id}"
-
-
-def actions_source_id_for(check_id: str) -> str:
-    """The `PinnedItem.source_id` this criteria's confirmed action drafts are owned by."""
-    return f"{SOURCE_PREFIX}:{check_id}:actions"
+# These four moved to `checks/model.py` and are re-exported here. `runner/replay.py` has to
+# ask the same question — which report item does this criteria own? — while filling a saved
+# report skeleton, and it may not import a module that pulls in Streamlit. Kept as names on
+# this module because every existing caller spells them `checks_session.source_id_for(...)`,
+# and renaming those would be churn for nothing.
+SOURCE_PREFIX = model_source_prefix
+SUMMARY_SOURCE_ID = model_summary_source_id
+source_id_for = model_source_id_for
+actions_source_id_for = model_actions_source_id_for
 
 
 @dataclass

@@ -16,6 +16,15 @@ class ReportExportError(DashboardError):
     """
 
 
+class ReportSkeletonError(DashboardError):
+    """A report's structure couldn't be saved as, or read back from, JSON.
+
+    Separate from `ReportExportError` because nothing is being exported: this is the
+    recipe form a Task stores (requirement 7.5), and a failure here costs the save, not a
+    download. The report itself is untouched either way.
+    """
+
+
 class StyleValidationError(DashboardError):
     """Hand-edited CSS was rejected.
 

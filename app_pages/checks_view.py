@@ -44,9 +44,9 @@ from checks.model import (
     ACTION_EMAIL,
     COLUMN_MET,
     FILTER_ALL,
-    FILTER_FAILURES,
     FILTER_PASSES,
     MET_YES,
+    REQUIRED_COLUMNS,
     RESULT_FILTERS,
     ActionDraft,
     Check,
@@ -55,8 +55,10 @@ from checks.model import (
     find_check,
     freeze_run,
     met_values,
+    project_columns,
     remove_action,
     remove_check,
+    report_heading,
 )
 from dashboard import session as dashboard_session
 from engine import session as engine_session
@@ -69,13 +71,6 @@ logger = logging.getLogger(__name__)
 # all of it would cost seconds per rerun to show rows nobody scrolls to. The saved run and
 # the exported report both keep every row.
 PREVIEW_ROWS = 500
-
-# Appended to a criteria's heading when the rows pinned to the report are only part of the
-# run. `FILTER_ALL` is absent on purpose — a whole result needs no qualifier.
-FILTER_SUFFIXES = {
-    FILTER_FAILURES: " — breaches only",
-    FILTER_PASSES: " — passing records only",
-}
 
 PERSONA_PLACEHOLDER = (
     "You are a finance controller verifying salary processing accuracy. Bonuses are "
@@ -337,7 +332,7 @@ def _run_test(check: Check, user_id: int) -> None:
         return
 
     try:
-        sql, frame = sql_builder.generate_and_run(
+        sql, frame, identity_columns = sql_builder.generate_and_run(
             profile,
             checks_session.get_set().persona,
             check,
@@ -352,7 +347,28 @@ def _run_test(check: Check, user_id: int) -> None:
 
     check.sql = sql
     check.last_error = None
+    _seed_display_columns(check, frame, identity_columns)
     checks_session.record_result(check.check_id, frame)
+
+
+def _seed_display_columns(check: Check, frame: pd.DataFrame, identity_columns: list[str]) -> None:
+    """Chooses what a freshly-generated result shows, the first time it is run.
+
+    The generated SQL now returns the whole source row, so showing everything by default
+    would change the screen of every criteria that already exists. Seeding from the model's
+    own identity columns reproduces exactly what was shown before this was a choice, and the
+    picker is how the user asks for more.
+
+    Only ever seeds an *empty* selection: once the user has chosen, a regeneration must not
+    quietly reset it. Names the model returned that aren't in the result are dropped, and a
+    seed that ends up empty falls back to every non-contract column — a criteria with no
+    usable identity column is better wide than blank.
+    """
+    if check.display_columns:
+        return
+    available = [name for name in frame.columns if name not in REQUIRED_COLUMNS]
+    seeded = [name for name in identity_columns if name in available]
+    check.display_columns = seeded or available
 
 
 def _run_saved_sql(check: Check) -> None:
@@ -378,18 +394,13 @@ def _run_saved_sql(check: Check) -> None:
         return
 
     check.last_error = None
+    # No identity columns to seed from — nothing asked a model anything here. A set saved
+    # before the picker existed therefore opens showing every column, which is the honest
+    # answer: the stored SQL is all there is, and it does not say which columns identify a row.
+    _seed_display_columns(check, frame, [])
     checks_session.record_result(check.check_id, frame)
 
 
-def _report_heading(check: Check, mode: str) -> str:
-    """What the pinned copy is called, saying so when it holds only part of the run.
-
-    A report table that is a subset has to admit it: the remarks printed directly above it
-    quote the *whole* run's counts, so "3 of 47 breached" over a table of three rows would
-    otherwise read as the entire result.
-    """
-    suffix = FILTER_SUFFIXES.get(mode, "")
-    return f"{check.display_name()}{suffix}"
 
 
 def _chart_figure(check: Check, shown: pd.DataFrame):
@@ -448,7 +459,7 @@ def _save_to_report(check: Check, frame: pd.DataFrame, shown: pd.DataFrame, mode
 
     item = dashboard_session.pin_result(
         checks_session.source_id_for(check.check_id),
-        heading=_report_heading(check, mode),
+        heading=report_heading(check, mode),
         comment=check.remarks,
         sql=check.sql,
         frame=shown,
@@ -574,8 +585,52 @@ def _render_chart(check: Check, shown: pd.DataFrame) -> None:
     st.rerun(scope="app")
 
 
+def _render_columns_picker(check: Check, frame: pd.DataFrame) -> pd.DataFrame:
+    """Which of the source columns to show, and the frame projected onto them.
+
+    The result carries the whole source row; this is how the user decides how much of it
+    they want to read. `criteria_result` and `criteria_met` are never offered and always
+    appended — they are the criteria's answer, not one of its details.
+
+    Returns the projected frame. **Only the display and the pinned copy go through it**: the
+    counts, the frozen run, the remarks and the action drafts all keep reading the full frame,
+    which is the same rule that already lets Save pin the Failures view of a complete run.
+    """
+    available = [name for name in frame.columns if name not in REQUIRED_COLUMNS]
+    if not available:
+        return frame
+
+    chosen = st.multiselect(
+        "Columns to show",
+        options=available,
+        # Intersected with what the frame actually has, the same tolerant read a stored chart
+        # spec gets: a saved criteria re-run against next month's file may legitimately come
+        # back without a column, and that is not worth an error.
+        default=[name for name in check.display_columns if name in available] or available,
+        key=f"ck_display_columns_{check.check_id}",
+        help=(
+            "Which of the original columns to show beside the result and the Yes/No verdict, "
+            "which are always shown. This changes the table and what gets saved to the "
+            "report — never the counts, the remarks or the drafted actions."
+        ),
+    )
+    check.display_columns = list(chosen)
+    if check.chart is not None:
+        st.caption(
+            "A chart drawn earlier can only use the columns shown here — narrowing the "
+            "selection drops any series that is no longer on screen."
+        )
+
+    # Projected by the model, not here: `runner/replay.py` has to reproduce this exactly when
+    # it re-runs a saved criteria into a report, and two implementations of "which columns
+    # does this criteria show" is one that can disagree with the other. The picker's own list
+    # is passed rather than left to be read off the check, so clearing it means the verdict
+    # columns alone here while an *unset* selection still means everything on a replay.
+    return project_columns(check, frame, chosen)
+
+
 def _render_results(check: Check, frame: pd.DataFrame, user_id: int) -> None:
-    """The result, the All/Failures/Passes filter, the chart, and Save."""
+    """The result, the column picker, the All/Failures/Passes filter, the chart, and Save."""
     # One pass over `criteria_met` for the headline and the table both, rather than
     # `filter_rows` twice — that materialized a whole DataFrame of passing rows to take its
     # length, on every rerun, for one integer.
@@ -583,6 +638,10 @@ def _render_results(check: Check, frame: pd.DataFrame, user_id: int) -> None:
     passing_mask = None if verdicts is None else verdicts == MET_YES.casefold()
     pass_count = 0 if passing_mask is None else int(passing_mask.sum())
     st.write(f"**{len(frame) - pass_count}** of **{len(frame)}** record(s) breached this rule.")
+
+    # Projected once, above the filter: the filter narrows *rows* and this narrows *columns*,
+    # and both are what "the table the user is looking at" means when Save pins it.
+    visible = _render_columns_picker(check, frame)
 
     mode = st.segmented_control(
         "Show",
@@ -592,10 +651,12 @@ def _render_results(check: Check, frame: pd.DataFrame, user_id: int) -> None:
         key=f"ck_filter_{check.check_id}",
         help="Narrow the table to the records that failed, or the ones that passed.",
     )
+    # The mask is built from `frame` and applied to `visible`: the projection keeps every row
+    # and the index with it, so the two line up.
     if passing_mask is None or mode == FILTER_ALL:
-        shown = frame
+        shown = visible
     else:
-        shown = frame[passing_mask if mode == FILTER_PASSES else ~passing_mask]
+        shown = visible[passing_mask if mode == FILTER_PASSES else ~passing_mask]
 
     if shown.empty:
         st.info("No records to show for that filter.", icon=":material/info:")
@@ -885,9 +946,10 @@ def _render_summary(user_id: int) -> None:
             st.rerun(scope="app")
 
 
-def _render_design(user_id: int) -> None:
-    _render_set_bar(user_id)
-    st.divider()
+def _render_design(user_id: int, *, show_set_bar: bool = True) -> None:
+    if show_set_bar:
+        _render_set_bar(user_id)
+        st.divider()
 
     check_set = checks_session.get_set()
     if st.button(
@@ -1201,19 +1263,62 @@ def _render_pending_dialog() -> None:
     DIALOGS[action](payload)
 
 
-def render_checks(user_id: int) -> None:
-    """The Checks view. Called by `chat_with_data.py` when its `de_view` is on "Checks"."""
-    _render_pending_dialog()
-
-    st.caption(
+def render_checks(
+    user_id: int,
+    *,
+    show_set_bar: bool = True,
+    show_actions: bool = True,
+    persona: str | None = None,
+    report_hint: str = (
         "Write your rules here. Saved results go to the **Dashboard** page, where the report "
         "is arranged and downloaded as HTML or Excel."
-    )
+    ),
+) -> None:
+    """The Checks view, shared by the Chat page and the Task Builder (requirement 7.3 step 4).
+
+    The defaults are the Chat page's behaviour exactly as it was, so that page passes nothing
+    and is untouched. Task Builder turns three things off, and each for a reason of its own:
+
+    Args:
+        show_set_bar: the criteria set's name, Save set and Load set. Off in a Task, because a
+            Task *is* the saved setup — a second saved-criteria concept on the same screen
+            would be two answers to one question, and the criteria are saved with the Task.
+        show_actions: the Actions tab. Off in a Task, because a drafted email is a response to
+            *this month's* exceptions while a Task is a reusable recipe, and a saved draft
+            about rows that no longer exist is worse than no draft. With it off there is only
+            Design left, so no `st.tabs` wrapper is built at all — the same call
+            `meeting_invitee.py` makes about not building tabs it doesn't need.
+        persona: the caller's own persona and context, used instead of the box in the set bar.
+            Written onto the set rather than threaded through every function below, because
+            the Task's persona genuinely *is* this set's persona — one field, one value, and
+            no second place for the two to disagree.
+        report_hint: where saved results end up, which is not the same sentence on both pages.
+    """
+    _render_pending_dialog()
+
+    if persona is not None:
+        # A *blank* incoming persona does not clear the set's own. The caller's box may simply
+        # not have been rendered on this run — the widget-value drop `task_builder.py`'s
+        # `persist_state` guards against — and overwriting a written persona with the empty
+        # string it leaves behind would lose it silently, on a screen that never showed it.
+        current_set = checks_session.get_set()
+        if persona.strip() or not (current_set.persona or "").strip():
+            current_set.persona = persona
+
+    st.caption(report_hint)
+
+    if not show_actions:
+        try:
+            _render_design(user_id, show_set_bar=show_set_bar)
+        except ChecksError as error:
+            logger.exception("The Checks design view failed.")
+            st.error(str(error), icon=":material/error:")
+        return
 
     design_tab, actions_tab = st.tabs(["Design", "Actions"])
     with design_tab:
         try:
-            _render_design(user_id)
+            _render_design(user_id, show_set_bar=show_set_bar)
         except ChecksError as error:
             logger.exception("The Checks design tab failed.")
             st.error(str(error), icon=":material/error:")

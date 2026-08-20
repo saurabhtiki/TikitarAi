@@ -69,6 +69,19 @@ FILTER_FAILURES = "Failures"
 FILTER_PASSES = "Passes"
 RESULT_FILTERS = (FILTER_ALL, FILTER_FAILURES, FILTER_PASSES)
 
+# Appended to a criteria's heading when the rows pinned to the report are only part of the
+# run. `FILTER_ALL` is absent on purpose — a whole result needs no qualifier.
+#
+# Here rather than in the page that draws the button, because two readers now need it and
+# only one of them may import Streamlit: `app_pages/checks_view.py` writes the heading, and
+# `runner/replay.py` reads it back to recover which filter a saved criteria was pinned under.
+# That mode is nowhere else — a `Check` never stored it — and a stored heading is a record of
+# it that every Task already written carries, where a new field would be one none of them do.
+FILTER_SUFFIXES = {
+    FILTER_FAILURES: " — breaches only",
+    FILTER_PASSES: " — passing records only",
+}
+
 ACTION_EMAIL = "email"
 ACTION_MEETING = "meeting"
 ACTION_TASK = "task"
@@ -113,6 +126,97 @@ def filter_rows(frame: pd.DataFrame | None, mode: str) -> pd.DataFrame | None:
     if mode == FILTER_PASSES:
         return frame[met_values(frame) == MET_YES.casefold()]
     return frame
+
+
+# What a criteria's report item is filed under. Prefixed rather than the bare check_id, so a
+# criteria and the same criteria's action list (`…:actions`) can each own an item without
+# either one overwriting the other.
+#
+# Here rather than in `checks/session.py`, which is where they used to live: `runner/replay.py`
+# fills a saved report skeleton by `source_id` and must not import Streamlit to do it. The
+# same call `report_items.model.source_id_for` already makes. `checks/session.py` re-exports
+# all four, so every existing caller is unchanged.
+SOURCE_PREFIX = "check"
+
+# The set-level summary owns one item too, under a name no `check_id` can collide with —
+# `new_id` produces twelve hex characters, which never contain a colon.
+SUMMARY_SOURCE_ID = f"{SOURCE_PREFIX}:__summary__"
+
+
+def source_id_for(check_id: str) -> str:
+    """The `PinnedItem.source_id` this criteria's result item is owned by."""
+    return f"{SOURCE_PREFIX}:{check_id}"
+
+
+def actions_source_id_for(check_id: str) -> str:
+    """The `PinnedItem.source_id` this criteria's confirmed action drafts are owned by."""
+    return f"{SOURCE_PREFIX}:{check_id}:actions"
+
+
+def project_columns(
+    check: "Check", frame: pd.DataFrame, columns: list[str] | None = None
+) -> pd.DataFrame:
+    """Narrows a result to the columns this criteria shows, in the order it shows them.
+
+    `criteria_result` and `criteria_met` are never part of the selection and are always
+    appended — they are the criteria's answer, not one of its details.
+
+    **Only the display and the pinned copy go through this.** The counts, the frozen run,
+    the remarks and the action drafts all keep reading the full frame, which is the same rule
+    that lets Save pin the Failures view of a complete run.
+
+    `columns` is what the picker currently says, passed by the view; leaving it out reads
+    `check.display_columns` instead, which is what a **replay** has. The two differ in one
+    case and it matters: an empty list passed in is a user who deliberately cleared the
+    picker, and shows the verdict columns alone. An empty *stored* selection is a criteria
+    saved before the picker existed — "not chosen yet" — and shows everything, which is
+    exactly what such a criteria always did.
+
+    Every name is filtered against what the frame actually has, the tolerant read a stored
+    chart spec gets: a saved criteria re-run against next month's file may legitimately come
+    back without a column, and a `KeyError` in a report run is a worse answer than one fewer
+    column.
+    """
+    available = [name for name in frame.columns if name not in REQUIRED_COLUMNS]
+    if not available:
+        return frame
+
+    if columns is None:
+        chosen = [name for name in check.display_columns if name in available] or available
+    else:
+        chosen = [name for name in columns if name in available]
+
+    keep = chosen + [name for name in REQUIRED_COLUMNS if name in frame.columns]
+    return frame[keep]
+
+
+def report_heading(check: "Check", mode: str) -> str:
+    """What a criteria's pinned copy is called, saying so when it holds only part of the run.
+
+    A report table that is a subset has to admit it: the remarks printed directly above it
+    quote the *whole* run's counts, so "3 of 47 breached" over a table of three rows would
+    otherwise read as the entire result.
+    """
+    return f"{check.display_name()}{FILTER_SUFFIXES.get(mode, '')}"
+
+
+def mode_from_heading(check: "Check", heading: str) -> str:
+    """Which filter a criteria was pinned under, read back off the heading it was pinned as.
+
+    The inverse of `report_heading`, and the only record of the choice there is: the mode is
+    a control on screen, never stored on the `Check`. A run replaying a saved report has to
+    know it — pinning every row into an item the user saved as "breaches only" would put the
+    passing records into a report that says it holds the failures.
+
+    Falls back to `FILTER_ALL` for a heading that matches no suffix, which is both the
+    default and what a heading the user has since edited by hand should mean: show
+    everything rather than guess at a filter from a string that no longer describes one.
+    """
+    text = str(heading or "")
+    for mode, suffix in FILTER_SUFFIXES.items():
+        if text.endswith(suffix):
+            return mode
+    return FILTER_ALL
 
 
 @dataclass
@@ -217,6 +321,16 @@ class Check:
             values rather than a drawn figure, for the same reason `sql` is stored rather
             than the rows it returned: a recipe survives being saved and re-run next month,
             where a picture of last month's numbers doesn't.
+        display_columns: which of the source columns the result table shows, alongside
+            `criteria_result` and `criteria_met`, which are always shown and never listed
+            here. Seeded on the first run from the model's identity columns, so an untouched
+            criteria looks exactly as it did before this was a choice. Empty means "not
+            chosen yet" rather than "show nothing" — the view falls back rather than
+            rendering two columns.
+
+            A *display* setting on a recipe, deliberately: the SQL returns the whole row and
+            the saved run keeps every column, so this narrows what is on screen and what a
+            pin captures — nothing that a count, a remark or an action draft reads.
 
     There is deliberately no `pinned_item_id` here, unlike `analyst.session.ChatMessage`.
     Which report item this criteria owns is answered by `PinnedItem.source_id`, looked up
@@ -235,6 +349,7 @@ class Check:
     actions: list[ActionDraft] = field(default_factory=list)
     chart: ChartChoices | None = None
     chart_style: ChartStyle | None = None
+    display_columns: list[str] = field(default_factory=list)
 
     def display_name(self) -> str:
         """What to label this criteria. Never empty."""
@@ -357,6 +472,10 @@ def _check_to_dict(check: Check) -> dict:
         "actions": [_action_to_dict(action) for action in check.actions],
         "chart": choices_to_dict(check.chart),
         "chart_style": style_to_dict(check.chart_style),
+        # No version bump, on the same grounds as `summary` below: a set written before this
+        # field existed reads back with an empty selection, which re-seeds from the model on
+        # the next run — exactly what it did before the field was there.
+        "display_columns": list(check.display_columns),
     }
 
 
@@ -413,6 +532,7 @@ def _check_from_dict(raw: dict) -> Check:
         actions=[_action_from_dict(action) for action in raw.get("actions") or []],
         chart=chart,
         chart_style=style_from_dict(raw.get("chart_style")) if chart is not None else None,
+        display_columns=[str(name) for name in raw.get("display_columns") or []],
     )
 
 

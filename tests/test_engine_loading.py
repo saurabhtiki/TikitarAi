@@ -80,3 +80,41 @@ class TestPrepareCleanedFrame:
         frame = pd.DataFrame({"code": ["1", "2", "3"]})
         _, types = loading.prepare_cleaned_frame(frame, {"code": "id"})
         assert types["code"] == "id"
+
+
+class TestRenameColumns:
+    """Requirement 8.1 step 5's manual remap, applied to the raw text before any typing."""
+
+    def test_a_column_is_renamed_before_anything_has_been_typed(self):
+        raw = pd.DataFrame({"emp_id": ["007"], "amount": ["1.5"]})
+        renamed = loading.rename_columns(raw, {"emp_id": "employee_id"})
+        assert list(renamed.columns) == ["employee_id", "amount"]
+
+    def test_the_renamed_column_then_takes_the_declared_type(self):
+        """The whole reason the rename happens here: renaming after the load would leave
+        the column typed by detection under a name the recipe declares a type for."""
+        raw = pd.DataFrame({"emp_id": ["007", "008"], "amount": ["1.5", "2.5"]})
+        renamed = loading.rename_columns(raw, {"emp_id": "employee_id"})
+        frame, types, outcome = loading.prepare_declared_table(
+            renamed, {"employee_id": "id", "amount": "numeric"}
+        )
+        assert outcome.accepted
+        assert types["employee_id"] == "id"
+        assert frame["employee_id"].tolist() == ["007", "008"]
+
+    def test_renaming_nothing_hands_the_frame_straight_back(self):
+        raw = pd.DataFrame({"a": ["1"]})
+        assert loading.rename_columns(raw, None) is raw
+        assert loading.rename_columns(raw, {}) is raw
+
+    def test_a_rename_naming_a_column_the_file_does_not_have_is_ignored(self):
+        """The match report names the still-missing column far more usefully than a
+        KeyError from inside pandas would."""
+        raw = pd.DataFrame({"a": ["1"]})
+        assert list(loading.rename_columns(raw, {"nope": "b"}).columns) == ["a"]
+
+    def test_a_rename_onto_a_column_that_already_exists_is_ignored(self):
+        """It would silently produce two columns of the same name, which every later
+        lookup reads as one."""
+        raw = pd.DataFrame({"a": ["1"], "b": ["2"]})
+        assert list(loading.rename_columns(raw, {"a": "b"}).columns) == ["a", "b"]

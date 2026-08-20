@@ -132,6 +132,18 @@ def add_statements(statements: list[str]) -> None:
     get_statements().extend(statements)
 
 
+def set_statements(statements: list[str]) -> None:
+    """Replaces the ordered statement list outright.
+
+    Requirement 8.2 step 2's needs, and only its: a run replays the **Task's** recorded
+    statements, and the session has to end up holding exactly that list — not this list
+    appended to whatever a previous run left behind — so that any later rebuild
+    (`relationships.enforce`) replays the same one rather than applying every statement
+    twice. `add_statements` stays the way a *new* column step is recorded.
+    """
+    st.session_state[DE_STATEMENTS_KEY] = list(statements)
+
+
 def get_dictionary() -> list:
     """The column dictionary entries."""
     return st.session_state.setdefault(DE_DICTIONARY_KEY, [])
@@ -296,6 +308,9 @@ def sync_tables(
     uploaded_files,
     sheet_selection: dict[str, list[str]],
     declared_types: dict[str, dict[str, str]] | None = None,
+    *,
+    table_names: dict[str, str] | None = None,
+    column_renames: dict[str, dict[str, str]] | None = None,
 ) -> list[EngineTable]:
     """Reconciles the loaded tables with what is currently in the uploader.
 
@@ -314,6 +329,17 @@ def sync_tables(
     `loading.prepare_declared_table` instead of plain detection, and what that found is
     stored in `load_outcomes()` for the page to report. Passing nothing is the ad-hoc path
     every earlier stage used, unchanged.
+
+    `table_names` and `column_renames` are requirement 8.1 step 5's manual remap, and both
+    are applied **as the file is read** rather than to what was loaded — see
+    `loading.rename_columns` for why that distinction is the whole point of them.
+
+    - `table_names` maps a `table_id` (`"{file_id}::{sheet}"`) to the name that file should
+      load under, overriding the slug derived from its filename. Keyed on the id rather than
+      the slug because the slug is what the caller is trying to replace, and a Run page is
+      asking "this uploaded file *is* the Task's `salary` table" about a specific upload.
+    - `column_renames` maps a table name to `{name in the file: name the recipe expects}`,
+      looked up under the name the table has *after* `table_names` has had its say.
 
     Returns the loaded tables. Never raises: a file that can't be read is skipped with an
     error on screen, and the others still load.
@@ -344,10 +370,15 @@ def sync_tables(
                 continue
 
             base_label = sheet_name or uploaded_file.name.rsplit(".", 1)[0]
-            table_name = duckdb_session.slugify_table_name(base_label, taken)
+            forced = (table_names or {}).get(table_id)
+            table_name = forced or duckdb_session.slugify_table_name(base_label, taken)
             try:
                 frame, semantic_types = _prepare_upload(
-                    uploaded_file, sheet_name, table_name, declared_types or {}
+                    uploaded_file,
+                    sheet_name,
+                    table_name,
+                    declared_types or {},
+                    _renames_for(column_renames or {}, table_name),
                 )
                 reconciled[table_id] = _register(
                     table_id,
@@ -369,19 +400,32 @@ def sync_tables(
 
 
 def _prepare_upload(
-    uploaded_file, sheet_name: str | None, table_name: str, declared_types: dict[str, dict[str, str]]
+    uploaded_file,
+    sheet_name: str | None,
+    table_name: str,
+    declared_types: dict[str, dict[str, str]],
+    renames: dict[str, str] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, str]]:
     """Reads one upload, under the active chat type's saved types where it names this table.
 
     The outcome is recorded whether or not the chat type accepted the table, because "this
     loaded exactly as saved" and "this loaded by detection because a column is missing" are
     the same-looking table with very different meanings, and only the page can say so.
+
+    `renames` are applied to the raw text before the declared types are considered, so a
+    remapped column is typed as the recipe declares it rather than by detection.
     """
     declared = _declared_for(declared_types, table_name)
-    if not declared:
+    if not declared and not renames:
         return loading.prepare_table(uploaded_file.getvalue(), uploaded_file.name, sheet_name)
 
-    raw = loading.read_raw(uploaded_file.getvalue(), uploaded_file.name, sheet_name)
+    raw = loading.rename_columns(
+        loading.read_raw(uploaded_file.getvalue(), uploaded_file.name, sheet_name), renames
+    )
+    if not declared:
+        # Remapped but with nothing declared for it — the ad-hoc path, over renamed columns.
+        return loading.prepare_raw_frame(raw, source=f"'{uploaded_file.name}'")
+
     frame, semantic_types, outcome = loading.prepare_declared_table(
         raw, declared, source=f"'{uploaded_file.name}'"
     )
@@ -395,6 +439,19 @@ def _declared_for(declared_types: dict[str, dict[str, str]], table_name: str) ->
     for name, types in declared_types.items():
         if name.strip().lower() == wanted:
             return types
+    return {}
+
+
+def _renames_for(column_renames: dict[str, dict[str, str]], table_name: str) -> dict[str, str]:
+    """This table's column remap, matched however the file was capitalised.
+
+    Its own function rather than a `.get`, for `_declared_for`'s reason: the table name is
+    derived from a filename, and the two maps must agree on which table they are describing.
+    """
+    wanted = table_name.strip().lower()
+    for name, renames in column_renames.items():
+        if name.strip().lower() == wanted:
+            return renames
     return {}
 
 

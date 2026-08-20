@@ -84,12 +84,18 @@ class ColumnAction(BaseModel):
 
 @dataclass
 class ColumnChange:
-    """What a column change did, for the chat transcript and the recorded recipe."""
+    """What a column change did, for the chat transcript and the recorded recipe.
+
+    `explanation` is the model's own sentence on what the change means — kept rather than
+    discarded because a new column arrives in the data dictionary with no description, and
+    this is the only sentence anyone has written about it.
+    """
 
     action: str
     summary: str
     statements: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    explanation: str = ""
 
 
 def parse_request(
@@ -98,6 +104,7 @@ def parse_request(
     schema_context: str,
     hint: str | None = None,
     *,
+    column_hint: str = "",
     key_path: Path | str | None = None,
 ) -> ColumnAction:
     """Turns a plain-English column request into structured parameters.
@@ -106,11 +113,20 @@ def parse_request(
         hint: what `routing.looks_like_column_action` guessed. Passed to the model as a
             prior, not as a decision — "remove the rows where x is null" trips the delete
             keyword but isn't a column change, and the model should be free to say so.
+        column_hint: the tables and columns the user pointed at, already rendered as one
+            line. Worded as a hint for the same reason `checks.sql_builder.build_prompt`
+            words it that way: the model also has the real schema and must correct a wrong
+            guess rather than obey it.
 
     Raises:
         AnalystError: if the provider fails or returns something unparseable.
     """
     prompt = f"Schema:\n{schema_context}\n\nRequest:\n{message}"
+    if column_hint and column_hint.strip():
+        prompt += (
+            "\n\nThe user suggested these are involved (a hint only — correct it against "
+            f"the schema if it is wrong):\n{column_hint.strip()}"
+        )
     if hint:
         prompt += f"\n\nThis looks like a '{hint}' request, but decide for yourself."
 
@@ -179,7 +195,12 @@ def apply_action(
         raise AnalystError(str(error)) from error
 
     logger.info("Applied conversational column change: %s on %s.%s", action.action, table, column)
-    return ColumnChange(action=action.action, summary=summary, statements=statements)
+    return ColumnChange(
+        action=action.action,
+        summary=summary,
+        statements=statements,
+        explanation=str(action.explanation or "").strip(),
+    )
 
 
 def handle_message(
@@ -189,10 +210,13 @@ def handle_message(
     message: str,
     hint: str | None = None,
     *,
+    column_hint: str = "",
     relationships: list[Relationship] | None = None,
     key_path: Path | str | None = None,
 ) -> ColumnChange:
     """Parses a plain-English column request and applies it. Raises `AnalystError` on any
     failure, which the page turns into an assistant message."""
-    action = parse_request(profile, message, schema_context, hint, key_path=key_path)
+    action = parse_request(
+        profile, message, schema_context, hint, column_hint=column_hint, key_path=key_path
+    )
     return apply_action(connection, action, relationships)

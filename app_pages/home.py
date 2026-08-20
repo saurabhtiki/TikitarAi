@@ -21,7 +21,12 @@ if profile is not None:
     st.subheader("🏠Home")
     st.caption(f"Role: {profile['role'].replace('_', ' ').title()}")
     st.info(
-        "This is a placeholder home screen. LLM configuration, Data Cleaner, "
-        "Chat with Data, and Task Builder arrive in later build phases.",
-        icon=":material/construction:",
+        "Pick a tool from the sidebar.",
+        icon=":material/waving_hand:",
     )
+    st.write(":blue[🗪] **Chat with data** uploads your files and get answers to questions about them.")
+    st.write("🧹 **Data cleaner** tidies a file before you upload it.")
+    st.write("👨‍💻 **Meetings** runs a subject-based chat with each invitee.")
+    st.write("📊 **Run a task** plays a saved analysis over uploded files & get Report.")
+    st.write("🛠️ Admins also get **Task builder**,which is where a task is recorded in the first place.")
+

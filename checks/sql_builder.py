@@ -61,7 +61,13 @@ INSTRUCTIONS = [
     "The result must have one row per record the rule applies to, with these columns:",
     "  1. First, the columns that identify the row — the person, department, invoice or "
     "account the rule is about, and an email or owner column if the schema has one. "
-    "Someone reading a failing row must be able to tell who or what it refers to.",
+    "Someone reading a failing row must be able to tell who or what it refers to. Return "
+    "these names in `identity_columns`, in the order you selected them.",
+    "  1b. Then every remaining column of the table the rule is mainly about (select it as "
+    "`t.*` where you can), plus any joined columns the rule uses. The user chooses which of "
+    "these to show, so select them even when the rule does not need them. Alias anything "
+    "whose name would otherwise clash across joins so every column in the result is unique, "
+    "and do not group or aggregate purely to shorten the result.",
     f"  2. `{COLUMN_RESULT}` — the value the rule turns on (the calculated percentage, the "
     "difference, the count). Always aliased with exactly that name.",
     f"  3. `{COLUMN_MET}` — the literal string '{MET_YES}' when the row satisfies the rule "
@@ -267,7 +273,7 @@ def generate_and_run(
     connection: duckdb.DuckDBPyConnection,
     *,
     key_path: Path | str | None = None,
-) -> tuple[str, pd.DataFrame]:
+) -> tuple[str, pd.DataFrame, list[str]]:
     """Generates, runs and validates a criteria's SQL — addtion.md steps 3 and 4 in one call.
 
     Regenerates from `check.sql` when there is one, so pressing the button again after
@@ -275,8 +281,14 @@ def generate_and_run(
     attempt is made before the failure is handed back.
 
     Returns:
-        `(sql, frame)` — the statement that worked and the rows it returned. The caller
-        stores both on the check; nothing is mutated here.
+        `(sql, frame, identity_columns)` — the statement that worked, the rows it returned,
+        and the columns the model says identify each row. The caller stores all three on the
+        check; nothing is mutated here.
+
+        The identity columns are what seeds the criteria's display selection: the result now
+        carries the whole source row, and showing all of it by default would change every
+        existing criteria's screen. Seeding from these keeps it exactly as it was until the
+        user widens it themselves.
 
     Raises:
         CheckSqlError: if both attempts failed. The message is written for the user *and*
@@ -293,7 +305,7 @@ def generate_and_run(
     )
 
     try:
-        return generated.sql, run_check(connection, generated.sql)
+        return generated.sql, run_check(connection, generated.sql), list(generated.identity_columns)
     except CheckSqlError as error:
         # Copied out of the `except` block: Python unbinds the exception name on exit, so
         # reading it below would be a NameError rather than the retry it looks like.
@@ -311,4 +323,4 @@ def generate_and_run(
     )
     # Not caught: a second failure is the user's to see. It arrives carrying the reason,
     # which is what the refine loop needs to do better than this did.
-    return repaired.sql, run_check(connection, repaired.sql)
+    return repaired.sql, run_check(connection, repaired.sql), list(repaired.identity_columns)

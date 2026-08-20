@@ -32,14 +32,43 @@ DB_CSS_KEY = "db_accepted_css"
 DB_PRESET_KEY = "db_css_preset"
 DB_VIEW_KEY = "db_view"
 
+# Which report everything below works on. There is more than one now — the session
+# Dashboard, and a Task's own report (requirement 7.3 step 5) — and the producers that pin
+# into one (`checks/`, `report_items/`) must not have to know which. So they keep calling
+# `pin_result`, and the page says once, at the top of its run, which report that means.
+DB_ACTIVE_REPORT_KEY = "db_active_report"
+
+
+def use_report(key: str = DB_REPORT_KEY) -> None:
+    """Points every function in this module at one report, for the rest of this run.
+
+    Called at the top of a page's run, by **every** page that touches a report, including
+    the ones that want the default: the choice outlives the run that made it, so a page that
+    stayed silent would inherit whichever report the last page to speak had selected — and
+    Chat with data would pin into a Task's report because the user had visited Task Builder
+    earlier in the session.
+    """
+    st.session_state[DB_ACTIVE_REPORT_KEY] = key
+
+
+def active_report_key() -> str:
+    """The session-state key of the report in play. The Dashboard's unless told otherwise."""
+    return st.session_state.get(DB_ACTIVE_REPORT_KEY, DB_REPORT_KEY)
+
 
 def get_report() -> Report:
     """The report being built. Created empty on first access."""
-    report = st.session_state.get(DB_REPORT_KEY)
+    key = active_report_key()
+    report = st.session_state.get(key)
     if report is None:
         report = Report()
-        st.session_state[DB_REPORT_KEY] = report
+        st.session_state[key] = report
     return report
+
+
+def set_report(report: Report) -> None:
+    """Replaces the active report wholesale — loading a saved Task, or starting a new one."""
+    st.session_state[active_report_key()] = report
 
 
 def set_title(title: str) -> None:
@@ -242,5 +271,7 @@ def reset_dashboard() -> None:
     package below the page layer needs to know this one exists. A report about tables that
     no longer exist would otherwise read as if it described whatever is loaded next.
     """
-    for key in (DB_REPORT_KEY, DB_DIALOG_KEY, DB_CSS_KEY, DB_PRESET_KEY, DB_VIEW_KEY):
+    # The *active* report, not `DB_REPORT_KEY` outright: Start over in Task Builder must
+    # clear the Task's report and leave the session Dashboard alone, and vice versa.
+    for key in (active_report_key(), DB_DIALOG_KEY, DB_CSS_KEY, DB_PRESET_KEY, DB_VIEW_KEY):
         st.session_state.pop(key, None)

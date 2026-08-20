@@ -230,7 +230,7 @@ Table names are all `meeting_`-prefixed (`meeting_sessions`, `meeting_messages`,
 claim in a database four other domains already share. `BASE_URL` reads an env var, not
 `st.secrets`, which raises outright when no secrets file exists.
 
-Stage 10 (current): Meeting Chatbot, Phase 2 — table agenda items (spec 3a), evaluation
+Stage 10 (previous): Meeting Chatbot, Phase 2 — table agenda items (spec 3a), evaluation
 fields (3b) and the cross-invitee comparison matrices they feed (spec 8) — complete. Three
 new modules (`meetings/tables.py`, `meetings/extraction_agent.py`, `meetings/matrix.py`),
 four new tables (`meeting_agenda_tables`, `meeting_table_responses`,
@@ -302,9 +302,249 @@ exists — the same deferral `session.queue_step_state` makes for the steps.
 `_open_step_one_on_problems` deliberately still does not switch views: a discarded extra file
 blocks nothing, and must not yank someone out of a chat mid-question.
 
-Next: Stage 11 — Task Builder (requirement 7), build-order item 9, which should reuse
-`checks.model`'s JSON, already shaped as a recipe, for §7.5's `task_json`, and
-`chat_types.model` for the schema signature §7.4 asks a Task to capture.
+Stage 11 (previous): Task Builder (requirement 7, rewritten from the user's own shaping of
+§7.1) — build-order item 9 — complete. A new page, `app_pages/task_builder.py`, registered
+under an **Automate** section for `admin`/`superuser` only and carrying its own
+`require_role` guard. Four views on one control: **Setup | Report-Items | Checks | Report**.
+New packages `report_items/` and `tasks/`; two page modules extracted so the new page could
+reuse them, `app_pages/setup_view.py` and `app_pages/report_view.py`.
+
+The user's shaping, all of it deliberate: **no chat type picker** (a Task *is* the saved
+setup, so a second saved-setup concept on one screen would be two answers to one question);
+**no criteria Save set / Load set**; **no Actions tab**; **no chat view** — Report-Items
+replaces it, cards rather than a conversation, because a transcript has no order that can be
+replayed and requirement 8.2 replays this list top to bottom. **Pin to dashboard becomes Pin
+to report.** And §7.4's *"capture the Data Cleaner steps"* was **removed from
+`docs/requirements.md`**, not deferred — the user cleans their files and uploads the result,
+so there is no cleaning sequence to record or for §8.2 step 1 to replay; that step is gone
+and the rest renumbered.
+
+Three decisions carry the stage.
+
+**A page module cannot be imported** — `chat_with_data.py` and `dashboard.py` are `st.Page`
+scripts whose body runs on import — so Steps 1–3 became `setup_view.py` and the
+Build/Preview/Download workspace became `report_view.py`, both plain modules the pages call,
+as `checks_view.py` already related to `chat_with_data.py`. Pure refactors: **every widget
+key is byte-identical** (`de_*`, `db_*`), which is why the existing page tests passing
+unchanged *is* the check on them. `setup_view` knows nothing about chat types (the caller
+passes `declared_types` and owns the match report) and `report_view` knows nothing about
+which page feeds it (the caller passes an `EmptyPool`).
+
+**There are two reports now, so the report had to be addressable.** `dashboard/session.py`
+gained `DB_ACTIVE_REPORT_KEY`, `use_report(key)` and `active_report_key()`; `get_report` /
+`set_report` / `reset_dashboard` read it, and `pin_result` / `unpin_source` /
+`find_item_by_source` are untouched — which is exactly what let the Checks view be reused
+with no edits to its pinning code. Departing from the plan, **every page states which report
+it wants, including the ones that want the default**: the stored key outlives the run that
+set it, so a silent Chat or Dashboard page would inherit `tb_report` after a visit to Task
+Builder and quietly pin a chat answer into a Task.
+
+**A saved report is a skeleton, never a snapshot** — `dashboard/skeleton.py`, structure only:
+title, sections, subsections, headings, comments, ordering, `column_with_previous` and
+`source_id`. The rule is structural, not remembered: `to_json` builds fresh dicts of named
+scalars, so no frame or figure has a path to travel. `from_json` returns the tree with items
+*empty*, which is what §8.2 step 4 fills back in by `source_id`. The pool is deliberately not
+saved — an unplaced item is by definition not in the report.
+
+`report_items/` mirrors `checks/` (only `session.py` imports Streamlit). One `ReportItem`
+with a **kind**: a `report` item asks a question and produces table/chart/comment, a `column`
+step changes the data every item *below* it then sees. One dataclass rather than two because
+the two kinds are *positions in one sequence*. **Only the last column step may be deleted** —
+everything under one was written against the columns it added, and the failure would surface
+next month, in a report, rather than at the click. A column step goes through
+`analyst/column_intent.py` + `engine/columns.py`, never free-form SQL, so the recorded
+statement list is identical to the one Chat's conversational path writes and §8.2 can replay
+either.
+
+`report_items/sql_builder.py` copies `checks/sql_builder.py`'s shape — one narrow
+`run_structured` call, one automatic repair, then the error becomes the refine input — with
+one deliberate difference: **no output contract.** A criteria must return `criteria_result`
+and `criteria_met`; "total payroll cost" is one cell, and demanding a verdict column would
+invent a question the user didn't ask. That gap is real and was found here:
+`engine.guards.assert_safe_sql` blocks what could escape the session (`ATTACH`, `COPY`,
+`DROP TABLE`, filesystem functions) but **not `DELETE FROM salary`** — `checks/` never
+noticed because its contract rejects a row count incidentally. So `assert_read_only` refuses
+anything that isn't a single `SELECT`/`WITH`, skipping leading comments first, and names the
+keyword while pointing at column steps as the fix.
+
+`render_checks` gained three keyword options, all defaulting to the Chat page's behaviour
+exactly as it was: `show_set_bar`, `show_actions`, `persona`, plus a `report_hint` because
+"goes to the Dashboard" is not true on both pages. With Actions off there is only Design, so
+**no `st.tabs` wrapper is built at all**. The caller's persona is **written onto the set**
+rather than threaded through every function below it — the Task's persona genuinely *is* that
+set's persona, and one field means no second place for the two to disagree.
+
+`tasks/model.py` **assembles rather than restates**: `chat_types.model.capture` for the
+schema signature (that is the format `chat_types.matching` already knows how to measure an
+upload against), `engine.session.get_statements()` for the calculated columns,
+`report_items.model.to_json`, `checks.model.to_json` **unchanged** as its docstring promised,
+and `dashboard.skeleton`. The sub-formats nest as **objects, not escaped strings** —
+`json.loads` on their own output — so each format still has exactly one owner and the stored
+Task stays readable. `tasks/db.py` follows `checks/db.py`; one name per account, and saving
+under a taken name updates that row.
+
+Two page-shape subtleties. **`load_task` queues the name, description and persona rather
+than writing them** (`TB_PENDING_FIELDS_KEY`, applied by `consume_pending_fields` at the top
+of the next run): the Open dialog is drawn below the task bar, and Streamlit forbids writing
+a live widget's own key — the same deferral `queue_step_state` and `PENDING_VIEW_KEY` make.
+And **loading a Task restores the recipe, not the session**: it does *not* apply the saved
+schema to what is loaded or replay the column steps. That is §8's Run a Task, and doing half
+of it here would leave the session in a state neither stage owns.
+
+The persona box and the description sit at the **foot of Setup**, not in the task bar and not
+in either view — the bar is pressed on every save while these are written once, and *both*
+Report-Items and Checks read the persona, so it belongs to neither of them.
+
+Out of band, since (four fixes from using the page): a **column step gets the hint pickers**
+every other AI-driven input has, fed to the model through a new `column_hint` keyword on
+`analyst.column_intent.handle_message`/`parse_request`, worded as `checks/sql_builder` words
+it so a wrong guess is corrected rather than obeyed. `ColumnAction.explanation` **stops being
+discarded**: it rides out on `ColumnChange.explanation` into a new round-tripped
+`ReportItem.description`, a caption on the card, and — the part that pays off past Setup's
+grid — the data dictionary, where `_describe_new_columns` fills only the columns the step
+created and never overwrites typed text, so `schema_context()` explains the column to every
+item below. A toast says where the data went and **View data** opens Chat's "Current data"
+dialog on the card. And a criteria's result gained a **column picker**: `sql_builder` selects
+the whole source row now, `GeneratedSql.identity_columns` (returned all along, discarded all
+along) seeds `Check.display_columns` so an untouched criteria's screen is unchanged, and only
+`st.dataframe` and `pin_result` see the projection — `freeze_run`, the pass/fail headline,
+the remarks and the action drafts keep reading the full frame.
+
+Out of band, since: **Task Builder asks which task first.** The page used to open onto an
+empty name box, a Save button and four views, leaving "am I editing something saved or
+building something new?" to be inferred from the controls — and since `tasks.db.save_task`
+reads a name already in use as *update that row*, typing a different name into the box looked
+like the way to start a second Task when it was the way to overwrite another one. Now
+`tasks_session.is_task_open()` gates the page: until a Task is chosen it draws
+`_render_task_gate` and `st.stop()`s — saved Tasks as cards on the left (Open / Delete), a
+name and **Create task** on the right — and the `load_task` dialog is gone, replaced by that
+list. The **upload widgets are mounted on the gate too**, in the same hidden container the
+non-Setup views use, for the same reason: a trip back to the gate to start a second Task
+against the same files must not arrive with the files gone.
+
+Delete moved from the old dropdown into a **confirm dialog**: on a card, Open and Delete are
+the same motion. It is the one dialog the gate resolves, through `_render_pending_task_dialog`
+rather than `_render_pending_dialog` — the setup steps aren't on screen there, so the engine's
+registry has nothing to say.
+
+The name is then a **heading, not a widget** — `TB_NAME_KEY` is plain session state, changed
+only through the Rename dialog, which refuses a name belonging to another Task (`_name_taken`,
+checked on Create as well). Save means write *this* Task. **Switch task** returns to the gate,
+asking first when there is unsaved work.
+
+"Unsaved" is `tasks.model.recipe_fingerprint`, deliberately **not** `to_json`: a Task's schema
+and calculated columns are read from the live session while opening one restores only the
+recipe, so fingerprinting those would report every freshly opened Task as edited. It covers
+name, description, persona, report items, criteria and report structure — and
+`session._recipe_only_task` assembles exactly those rather than calling `capture_task`, whose
+schema build queries DuckDB once a run to word a caption. A fingerprint that won't build is
+dropped, so the Task reads as changed, which is the safe way round. Start over closes the
+Task as well, since it clears the name and persona anyway.
+
+Out of band, since (a ghost the gate made visible): **the page's top level is four children in
+every state, and the ones that vary are held in fixed slots.** Two "Step 1 · Your data" headers
+could appear at once — one of them stale — and one survived onto the gate. Streamlit addresses
+an element by its position among its parent's children and only clears the previous run's
+leftovers when a run finishes *without* asking for another (`FINISHED_EARLY_FOR_RERUN` keeps
+them, deliberately, so reruns don't flicker) — and this page both moves things about and reruns
+constantly: the flash message is a top-level element on the runs that have something to say,
+the gate replaces half the page, and the upload load-check ends its run with
+`st.rerun(scope="app")` whenever the table set changed. So `FLASH_SLOT` is a container that is
+always there and usually empty, `GATE_BODY` and `TASK_BODY` give the two screens one shared
+position, `UPLOAD_SLOT` holds whichever of the Step 1 expander / hidden mount the view calls
+for, and the stylesheet is emitted on every run instead of only the runs that hide something.
+None of it is styling, and
+`TestTheShape::test_the_page_keeps_the_same_top_level_shape_in_every_state` is what says so —
+it compares the top-level element types across gate, flash, settled, off-Setup and back-at-gate
+and fails if any one of them differs. `chat_with_data.py` got the same `UPLOAD_SLOT` and the
+same always-on stylesheet: it swaps expander for hidden container at one position exactly as
+this page does, and had the same latent ghost.
+
+Known pre-existing failures, unchanged by this stage:
+`test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body` and
+`TestRelationships::test_confirming_a_bad_link_keeps_it_declared_but_unenforced`.
+
+Stage 12 (current): Run a Task (requirement 8) — build-order item 10 — complete. A new page,
+`app_pages/run_task.py`, in the **Automate** section and open to **any logged-in user** (Task
+Builder is the admin half of the pair); the section is now registered for everyone and Task
+builder appended to it for `admin`/`superuser`. One new package, `runner/`, mirroring
+`checks/` and `report_items/` — only `session.py` imports Streamlit.
+
+**The stored SQL is the path; the model is the fallback.** Every report item and criteria comes
+back from storage carrying the statement that produced it, so producing the numbers costs **no
+provider call**. Only when a stored statement actually fails does `generate_and_run` get a turn,
+and the step is recorded as `fallback` — which is the distinction §8.2 step 5 asks to be
+reported, and it only exists because it is real. `tests/test_runner_replay.py`'s autouse fixture
+replaces every `run_structured` seam with one that **fails the test if called**, which is what
+keeps that claim true. A **column step never falls back**: regenerating a column definition
+would silently change every figure below it while the report looked fine.
+
+Three more decisions carry the stage.
+
+**Order is the content of the list.** Report items are replayed in list order with each column
+step's own `statements` executed in place, *not* all of `task.calculated_columns` up front.
+The two are nearly the same and differ in exactly one case that matters — a step that updates a
+column an earlier item already read. `replay.unowned_statements` catches the leftovers (a
+statement the engine's session-wide list holds that no column step owns) and applies them before
+the list, because a recorded statement silently not replayed is a column every later item is
+missing.
+
+**A remap is a rename applied while the file is read, never after** — `loading.rename_columns`,
+threaded through two new keyword maps on `engine.session.sync_tables` (`table_names`, keyed by
+`table_id` since the slug is what the caller is replacing; `column_renames`, keyed by table
+name) and through `setup_view.mount_upload`. Renaming a loaded table's column instead would
+leave it typed by detection under a name the recipe declares a type for — §6.6's
+wrong-rows-no-error failure. Changing a mapping therefore goes through
+`reload_after_mapping` → `engine.session.reload_uploaded_tables`, the mechanism
+`chat_types.session.select` already uses. **Table remapping is in scope** though §8.1 step 5's
+letter names only columns: a table's name comes from its filename, so a renamed file is the
+first mismatch every user meets. A mapping that *works* takes its own dropdown off the screen,
+so `_render_active_mapping` shows what is in force with one button to clear it.
+
+**A run never touches the recipe.** The `Task` read from SQLite is held pristine; the replay
+works on `copy.deepcopy` of it (a fallback rewrites an item's SQL) and on a deep copy of the
+report skeleton, so running twice produces the same report rather than a doubled one. Results
+are written into the skeleton by `source_id` through `dashboard.model.find_item_by_source` — no
+new mechanism, which is exactly what `pin_result`'s idempotency was built for. **A failed item
+keeps its place** carrying "Not produced in this run — …": a designed report with a point
+silently missing is worse than one that admits it.
+
+Two things had to move to keep `runner/` free of Streamlit, both pure refactors with no
+behaviour change: `SOURCE_PREFIX` / `SUMMARY_SOURCE_ID` / `source_id_for` /
+`actions_source_id_for` from `checks/session.py` into `checks/model.py` (re-exported, so every
+caller is unchanged), and `FILTER_SUFFIXES` from `app_pages/checks_view.py` into
+`checks/model.py` as `report_heading` / **`mode_from_heading`**. That second one is load-bearing:
+a `Check` never stored which of All / Failures / Passes was on screen when it was pinned, and the
+**heading is the record of it every saved Task already carries** — pinning every row into an item
+headed "breaches only" would put the passing records into a report that says it holds the
+failures. `checks.model.project_columns` came out of the view at the same time and takes the
+picker's list explicitly, because an emptied selection ("verdict columns only") and an unset one
+("saved before the picker existed — show everything") mean opposite things.
+
+Redrafting the commentary is the one provider call a run makes **by design** (§8.2 step 4's
+persona), so it is a checkbox beside Run rather than an assumption; declining it keeps the
+wording saved with the Task. `report_view.render_report_output` is Preview + Download with **no
+Build view** — a run's arrangement came from the Task and the next press of Run replaces it, so
+there is nothing here to file items into. `engine.session.set_statements` exists for one reason:
+`relationships.enforce` replays the statement list on every rebuild, so a second run would apply
+the first run's calculated columns twice and fail on an `ALTER TABLE ADD` of a column that
+already exists.
+
+Two page-shape notes. `run_task.py` reuses `task_builder.py`'s hard-won arrangement —
+`FLASH_SLOT`, `PICKER_BODY` / `RUN_BODY`, `UPLOAD_SLOT`, and the stylesheet emitted on every run
+— and **mounts the upload widgets on the picker too**, hidden, so going back to run a second
+Task against the same files doesn't arrive with the files gone. And a run **rewrites this
+session's setup**: `apply_recorded_setup` clears the relationships and the statement list before
+handing off to `chat_types.session.apply_setup`, so the Task's links and column meanings replace
+whatever was there. The panel says so above the button.
+
+Known pre-existing failures, unchanged by this stage:
+`test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body` and
+`TestRelationships::test_confirming_a_bad_link_keeps_it_declared_but_unenforced`.
+
+Next: build-order item 11 onwards. Requirement 7.4's **Excel export already exists**
+(`dashboard/excel_export.py`), and requirement 9 keeps scheduling, shared Task ownership and
+external identity providers out of scope.
 
 # Library docs (Agno, Streamlit)
 

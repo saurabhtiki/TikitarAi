@@ -39,6 +39,17 @@ RESULT = pd.DataFrame(
 
 STUB_SQL = "SELECT employee, bonus / basic * 100 AS criteria_result, 'Yes' AS criteria_met FROM salary"
 
+# The same three records, with the whole source row the widened instruction now asks for.
+WIDE_RESULT = pd.DataFrame(
+    {
+        "employee": ["Ana", "Bo", "Cy"],
+        "department": ["HR", "HR", "Accounts"],
+        "basic": [1000, 1000, 2000],
+        "criteria_result": [4.0, 12.0, 4.5],
+        "criteria_met": ["Yes", "No", "Yes"],
+    }
+)
+
 
 def _make_app(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -80,9 +91,11 @@ def _check_ids(app):
     return [check.check_id for check in app.session_state[checks_session.CK_SET_KEY].checks]
 
 
-def _stub_test(monkeypatch, frame=RESULT, sql=STUB_SQL):
+def _stub_test(monkeypatch, frame=RESULT, sql=STUB_SQL, identity_columns=("employee",)):
     monkeypatch.setattr(
-        checks_view.sql_builder, "generate_and_run", lambda *args, **kwargs: (sql, frame)
+        checks_view.sql_builder,
+        "generate_and_run",
+        lambda *args, **kwargs: (sql, frame, list(identity_columns)),
     )
 
 
@@ -363,6 +376,126 @@ class TestWhatGetsPinned:
 
         assert len(self._pool(app)) == 1
         assert len(self._pool(app)[0].frame) == 1
+
+
+class TestChoosingColumns:
+    """The generated SQL now returns the whole source row; this is how much of it is shown.
+
+    `WIDE_RESULT` carries three source columns where the model named only one as identifying,
+    so the default and a widened selection are visibly different.
+    """
+
+    def _tested(self, tmp_path, monkeypatch, identity=("employee",)):
+        app = _add_criteria(_loaded(tmp_path, monkeypatch), "Bonus cap")
+        check_id = _check_ids(app)[0]
+        app.text_area(key=f"ck_text_{check_id}").set_value("Bonus must be at most 5% of basic.").run()
+        _stub_test(monkeypatch, frame=WIDE_RESULT, identity_columns=identity)
+        app.button(key=f"ck_test_{check_id}").click().run()
+        monkeypatch.setattr(checks_view.checks_remarks, "write_remarks", lambda *a, **k: ("", []))
+        assert not app.exception
+        return app, check_id
+
+    def _shown(self, app, check_id):
+        """The result table on screen. Found by its contract columns rather than by key —
+        `AppTest`'s dataframe elements do not expose one."""
+        rendered = [
+            frame.value for frame in app.dataframe if "criteria_result" in frame.value.columns
+        ]
+        assert len(rendered) == 1
+        return rendered[0]
+
+    def test_the_default_is_what_the_model_called_identifying(self, tmp_path, monkeypatch):
+        """Which is what keeps every criteria written before the picker existed looking
+        exactly as it did."""
+        app, check_id = self._tested(tmp_path, monkeypatch)
+
+        assert app.session_state[checks_session.CK_SET_KEY].checks[0].display_columns == ["employee"]
+        assert list(self._shown(app, check_id).columns) == [
+            "employee",
+            "criteria_result",
+            "criteria_met",
+        ]
+
+    def test_the_contract_columns_are_never_offered_and_always_shown(self, tmp_path, monkeypatch):
+        """They are the criteria's answer, not one of its details."""
+        app, check_id = self._tested(tmp_path, monkeypatch)
+
+        picker = app.multiselect(key=f"ck_display_columns_{check_id}")
+        assert picker.options == ["employee", "department", "basic"]
+
+        picker.set_value([]).run()
+
+        assert list(self._shown(app, check_id).columns) == ["criteria_result", "criteria_met"]
+
+    def test_widening_the_selection_widens_the_table(self, tmp_path, monkeypatch):
+        app, check_id = self._tested(tmp_path, monkeypatch)
+
+        app.multiselect(key=f"ck_display_columns_{check_id}").set_value(
+            ["employee", "department"]
+        ).run()
+
+        assert list(self._shown(app, check_id).columns) == [
+            "employee",
+            "department",
+            "criteria_result",
+            "criteria_met",
+        ]
+
+    def test_the_selection_reaches_the_report_but_not_the_saved_run(self, tmp_path, monkeypatch):
+        """The rule Save already followed for rows, now holding for columns too: the report
+        gets what is on screen, while the counts and the remarks read the whole run."""
+        app, check_id = self._tested(tmp_path, monkeypatch)
+        app.multiselect(key=f"ck_display_columns_{check_id}").set_value(
+            ["employee", "basic"]
+        ).run()
+
+        app.button(key=f"ck_save_{check_id}").click().run()
+
+        assert not app.exception
+        pinned = app.session_state[dashboard_session.DB_REPORT_KEY].pool[0]
+        assert list(pinned.frame.columns) == [
+            "employee",
+            "basic",
+            "criteria_result",
+            "criteria_met",
+        ]
+
+        run = app.session_state[checks_session.CK_SET_KEY].checks[0].saved_run
+        assert list(run.frame.columns) == list(WIDE_RESULT.columns)
+        assert (run.pass_count, run.fail_count) == (2, 1)
+
+    def test_the_column_and_row_filters_compose(self, tmp_path, monkeypatch):
+        app, check_id = self._tested(tmp_path, monkeypatch)
+        app.multiselect(key=f"ck_display_columns_{check_id}").set_value(["employee"]).run()
+        app.segmented_control(key=f"ck_filter_{check_id}").set_value("Failures").run()
+
+        shown = self._shown(app, check_id)
+
+        assert list(shown["employee"]) == ["Bo"]
+        assert list(shown.columns) == ["employee", "criteria_result", "criteria_met"]
+
+    def test_a_criteria_the_model_gave_no_identity_for_shows_everything(self, tmp_path, monkeypatch):
+        """Better wide than blank: a result nobody can attribute is the failure this seeding
+        exists to avoid, not one to reproduce."""
+        app, check_id = self._tested(tmp_path, monkeypatch, identity=())
+
+        assert app.session_state[checks_session.CK_SET_KEY].checks[0].display_columns == [
+            "employee",
+            "department",
+            "basic",
+        ]
+
+    def test_a_chosen_selection_survives_a_regeneration(self, tmp_path, monkeypatch):
+        """Seeding is for a criteria that has never been shown. Once the user has chosen,
+        pressing Regenerate must not quietly reset what they picked."""
+        app, check_id = self._tested(tmp_path, monkeypatch)
+        app.multiselect(key=f"ck_display_columns_{check_id}").set_value(["department"]).run()
+
+        app.button(key=f"ck_test_{check_id}").click().run()
+
+        assert app.session_state[checks_session.CK_SET_KEY].checks[0].display_columns == [
+            "department"
+        ]
 
 
 class TestRemovingFromTheReport:
