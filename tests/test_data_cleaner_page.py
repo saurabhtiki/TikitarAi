@@ -15,9 +15,12 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from app_pages import saved_picker
 from auth.db import init_db, seed_default_admin
 from cleaner import loaders, pipeline, profiling, session
+from cleaner.db import init_cleaning_templates_table, list_templates, load_template
 from cleaner.steps import FILL_STRATEGIES, STEP_REGISTRY
+from cleaner.template import to_json
 from llm.db import init_llm_table
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +47,7 @@ def _make_app(tmp_path, monkeypatch, role="normal_user"):
     init_db()
     seed_default_admin()
     init_llm_table()
+    init_cleaning_templates_table()
     app = AppTest.from_file(DATA_CLEANER_PAGE_PATH, default_timeout=30)
     app.session_state["user_id"] = 1
     app.session_state["email"] = "admin@admin.com"
@@ -900,3 +904,289 @@ def test_the_download_carries_a_sheet_per_summary(tmp_path, monkeypatch):
     caption = next(caption.value for caption in app.caption if "One workbook" in caption.value)
     assert "2 sheet(s)" in caption
     assert summary.output_sheet_name in caption
+
+
+# --------------------------------------------------------------------------------------
+# Cleaning templates
+# --------------------------------------------------------------------------------------
+
+
+def _template_ids() -> list[int]:
+    return [row["template_id"] for row in list_templates(1)]
+
+
+def _save_as_template(app, name: str, description: str = ""):
+    """Drives the bar's Save as template button and its dialog, as a user would.
+
+    The button only sets a flag — the bar draws above `st.file_uploader` and a run that
+    ended there would drop the uploaded files — so the dialog appears on the same run.
+    """
+    app.button(key="dc_template_save_as").click().run()
+    app.text_input(key="dc_template_new_name").set_value(name).run()
+    if description:
+        app.text_area(key="dc_template_new_description").set_value(description).run()
+    return _click_and_settle(app, "dc_template_save_confirm")
+
+
+def _pick_template(app, template_id):
+    """Chooses a template in the bar. `None` means the leading new-template entry, which
+    the picker carries as a sentinel because `st.selectbox` reserves `None` itself for
+    "nothing is selected" — an option holding it could be offered but never chosen.
+
+    Selecting no longer applies anything — `_apply_template` is the press that does."""
+    value = saved_picker.NONE_OPTION if template_id is None else template_id
+    app.selectbox(key=session.DC_TEMPLATE_PICK_KEY).set_value(value).run()
+    return app
+
+
+def _apply_template(app):
+    """Presses Apply cleaning steps, the one thing that runs a template's recipes."""
+    app.button(key="dc_template_apply").click().run()
+    return app
+
+
+def _use_template(app, template_id):
+    """Choose, then apply — the whole motion, for tests that are about the outcome."""
+    return _apply_template(_pick_template(app, template_id))
+
+
+def _trim(app, table_id: str):
+    _open(app, table_id, "trim_whitespace")
+    return _click_and_settle(app, f"dc_apply_trim_whitespace_{table_id}")
+
+
+def test_the_template_bar_offers_a_new_template_by_default(tmp_path, monkeypatch):
+    app = _make_app(tmp_path, monkeypatch)
+
+    assert not app.exception
+    assert app.selectbox(key=session.DC_TEMPLATE_PICK_KEY).value == saved_picker.NONE_OPTION
+    # Disabled rather than absent, so the bar keeps its shape on "new template".
+    assert app.button(key="dc_template_schema").disabled
+    assert app.button(key="dc_template_update").disabled
+
+
+def test_saving_a_template_stores_every_uploaded_file_and_its_steps(tmp_path, monkeypatch):
+    app = _upload(
+        _make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV), ("other.csv", OTHER_CSV)
+    )
+    salaries = next(table for table in _sources(app) if table.file_name == "salaries.csv")
+    _trim(app, salaries.table_id)
+
+    _save_as_template(app, "Receivables", "Monthly pack.")
+
+    assert not app.exception
+    rows = list_templates(1)
+    assert len(rows) == 1
+    stored = load_template(rows[0]["template_id"], 1)
+    assert sorted(stored.table_names()) == ["other", "salaries"]
+    assert "trim_whitespace" in [step["action"] for step in stored.table("salaries").steps]
+    assert stored.description == "Monthly pack."
+
+
+def test_a_saved_template_stores_no_upload_scoped_identity(tmp_path, monkeypatch):
+    """`table_id` and `file_id` are Streamlit's per-upload UUIDs. One stored here would
+    point at nothing in the session that opens this template next month."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    file_id = _only_table(app).file_id
+    _save_as_template(app, "Receivables")
+
+    text = to_json(load_template(list_templates(1)[0]["template_id"], 1))
+    assert file_id not in text
+    assert "table_id" not in text
+
+
+def test_applying_a_template_puts_its_steps_on_a_fresh_upload(tmp_path, monkeypatch):
+    """And choosing it does not — the press is the whole action, and it is visible."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _trim(app, _only_table(app).table_id)
+    _save_as_template(app, "Receivables")
+    template_id = list_templates(1)[0]["template_id"]
+
+    # A second session, the way next month arrives: the same file, none of the steps.
+    fresh = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    assert "trim_whitespace" not in [step["action"] for step in _only_table(fresh).steps]
+
+    _pick_template(fresh, template_id)
+    assert fresh.session_state[session.DC_TEMPLATE_ID_KEY] == template_id
+    assert "trim_whitespace" not in [step["action"] for step in _only_table(fresh).steps]
+
+    _apply_template(fresh)
+
+    assert not fresh.exception
+    assert "trim_whitespace" in [step["action"] for step in _only_table(fresh).steps]
+
+
+def test_a_template_chosen_before_the_upload_still_cleans_it(tmp_path, monkeypatch):
+    """The order users actually work in — choose the pack, then upload this month's files.
+    Selecting used to be the only thing that applied, so nothing ran and the page sat there
+    showing raw data under a template it claimed to be cleaning under."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _trim(app, _only_table(app).table_id)
+    _save_as_template(app, "Receivables")
+    template_id = list_templates(1)[0]["template_id"]
+
+    fresh = _make_app(tmp_path, monkeypatch)
+    _pick_template(fresh, template_id)
+    _upload(fresh, ("salaries.csv", SALARIES_CSV))
+    _apply_template(fresh)
+
+    assert not fresh.exception
+    assert "trim_whitespace" in [step["action"] for step in _only_table(fresh).steps]
+
+
+def test_applying_a_template_rebuilds_its_summary_tables(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    _save_group_summary(app, _only_table(app).table_id, ["region"], ["amount"], ["sum"])
+    saved_name = _only_summary(app).output_sheet_name
+    _save_as_template(app, "Sales pack")
+    template_id = list_templates(1)[0]["template_id"]
+
+    fresh = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    assert not _summaries(fresh)
+
+    _use_template(fresh, template_id)
+
+    assert not fresh.exception
+    rebuilt = _only_summary(fresh)
+    assert rebuilt.output_sheet_name == saved_name
+    assert rebuilt.reshape["action"] == "group_summarise"
+
+
+def test_applying_a_template_twice_does_not_duplicate_its_summaries(tmp_path, monkeypatch):
+    """The template states what the working set should contain, not what to add to it."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    _save_group_summary(app, _only_table(app).table_id, ["region"], ["amount"], ["sum"])
+    _save_as_template(app, "Sales pack")
+    template_id = list_templates(1)[0]["template_id"]
+
+    fresh = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    _use_template(fresh, template_id)
+    _apply_template(fresh)
+
+    assert not fresh.exception
+    assert len(_summaries(fresh)) == 1
+
+
+def test_an_uploaded_file_the_template_does_not_mention_is_left_alone(tmp_path, monkeypatch):
+    """The one place this parts company with a chat type, which drops what it doesn't
+    expect. A template is applied *to* files the user chose to upload."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _save_as_template(app, "Salaries only")
+    template_id = list_templates(1)[0]["template_id"]
+
+    fresh = _upload(
+        _make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV), ("other.csv", OTHER_CSV)
+    )
+    _use_template(fresh, template_id)
+
+    assert not fresh.exception
+    assert sorted(table.file_name for table in _sources(fresh)) == ["other.csv", "salaries.csv"]
+
+
+def test_a_missing_expected_file_refuses_the_apply(tmp_path, monkeypatch):
+    """Half a working set is not what the template's name means, so nothing is applied and
+    the missing file is named. The button stays there for once it has been uploaded."""
+    app = _upload(
+        _make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV), ("other.csv", OTHER_CSV)
+    )
+    salaries = next(table for table in _sources(app) if table.file_name == "salaries.csv")
+    _trim(app, salaries.table_id)
+    _save_as_template(app, "Receivables")
+    template_id = list_templates(1)[0]["template_id"]
+
+    fresh = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _use_template(fresh, template_id)
+
+    assert not fresh.exception
+    assert "trim_whitespace" not in [step["action"] for step in _only_table(fresh).steps]
+    assert any("other" in error.value for error in fresh.error)
+
+
+def test_deselecting_a_template_keeps_every_step_it_applied(tmp_path, monkeypatch):
+    """Deselecting is not undoing. Reverting a page of cleaning because a dropdown changed
+    would be the worst kind of surprise; Start over is what undoes."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _trim(app, _only_table(app).table_id)
+    _save_as_template(app, "Receivables")
+    template_id = list_templates(1)[0]["template_id"]
+
+    fresh = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _use_template(fresh, template_id)
+    _pick_template(fresh, None)
+
+    assert not fresh.exception
+    assert session.DC_TEMPLATE_ID_KEY not in fresh.session_state
+    assert "trim_whitespace" in [step["action"] for step in _only_table(fresh).steps]
+
+
+def test_updating_a_template_overwrites_it_rather_than_adding_one(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _save_as_template(app, "Receivables")
+    template_id = list_templates(1)[0]["template_id"]
+
+    _trim(app, _only_table(app).table_id)
+    app.button(key="dc_template_update").click().run()
+    _click_and_settle(app, "dc_template_update_confirm")
+
+    assert not app.exception
+    assert _template_ids() == [template_id]
+    stored = load_template(template_id, 1)
+    assert "trim_whitespace" in [step["action"] for step in stored.tables[0].steps]
+
+
+def test_a_name_already_in_use_is_refused_rather_than_silently_overwriting(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _save_as_template(app, "Receivables")
+
+    app.button(key="dc_template_save_as").click().run()
+    app.text_input(key="dc_template_new_name").set_value("receivables").run()
+    app.button(key="dc_template_save_confirm").click().run()
+
+    assert any("already have a template" in error.value for error in app.error)
+    assert len(list_templates(1)) == 1
+
+
+def test_deleting_a_template_takes_it_off_the_picker_without_touching_the_data(
+    tmp_path, monkeypatch
+):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _save_as_template(app, "Receivables")
+    _pick_template(app, list_templates(1)[0]["template_id"])
+
+    app.button(key="dc_template_delete").click().run()
+    _click_and_settle(app, "dc_template_delete_confirm")
+
+    assert not app.exception
+    assert list_templates(1) == []
+    assert session.DC_TEMPLATE_ID_KEY not in app.session_state
+    # The picker's own key held the id that has just stopped being an option, and the
+    # deferred reset is the only thing standing between that and a crash on the next run.
+    assert app.session_state[session.DC_TEMPLATE_PICK_KEY] == saved_picker.NONE_OPTION
+    assert len(_sources(app)) == 1
+
+
+def test_show_expected_files_lists_what_the_template_wants(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _save_as_template(app, "Receivables")
+    _pick_template(app, list_templates(1)[0]["template_id"])
+
+    app.button(key="dc_template_schema").click().run()
+
+    assert not app.exception
+    assert app.button(key="dc_template_schema_close")
+
+
+def test_start_over_keeps_the_selected_template(tmp_path, monkeypatch):
+    """Uploading next month's files against the same saved steps is the normal reason to
+    clear the working set, not a reason to forget which template they belong to."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("salaries.csv", SALARIES_CSV))
+    _save_as_template(app, "Receivables")
+    template_id = list_templates(1)[0]["template_id"]
+    _pick_template(app, template_id)
+
+    app.button(key="dc_start_over_button").click().run()
+    app.run()
+
+    assert not app.exception
+    assert not _tables(app)
+    assert app.session_state[session.DC_TEMPLATE_ID_KEY] == template_id

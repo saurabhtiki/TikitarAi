@@ -22,6 +22,7 @@ from analyst.pipeline import Answer
 from auth.db import init_db, seed_default_admin
 from chat_types.db import init_chat_types_table
 from cleaner import session as cleaner_session
+from cleaner.db import init_cleaning_templates_table
 from dashboard import session as dashboard_session
 from engine import columns as engine_columns
 from engine import session as engine_session
@@ -331,6 +332,7 @@ class TestCleanerHandoff:
         init_db()
         seed_default_admin()
         init_llm_table()
+        init_cleaning_templates_table()
 
         cleaner_app = AppTest.from_file(str(PROJECT_ROOT / "app_pages" / "data_cleaner.py"), default_timeout=60)
         cleaner_app.session_state["user_id"] = 1

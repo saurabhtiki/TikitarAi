@@ -53,7 +53,7 @@ import logging
 import streamlit as st
 
 from analyst import session as chat_session
-from app_pages import report_items_view, report_view, setup_view
+from app_pages import report_items_view, report_view, saved_picker, setup_view
 from app_pages.checks_view import render_checks
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
@@ -390,11 +390,7 @@ def _render_task_gate(user_id: int) -> None:
                 "and the report's arrangement — but not their results, which described data "
                 "that is no longer loaded."
             )
-            # Scrolled rather than paged: the list is one account's own tasks, and a fixed
-            # height keeps the two halves of the gate the same size however many there are.
-            with st.container(height=320):
-                for row in saved:
-                    _render_saved_task_card(user_id, row)
+            _render_saved_task_picker(user_id, saved)
 
     with new_column:
         st.markdown("**Start a new task**")
@@ -429,20 +425,39 @@ def _render_task_gate(user_id: int) -> None:
                 st.rerun(scope="app")
 
 
-def _render_saved_task_card(user_id: int, row: dict) -> None:
-    """One saved Task in the gate's list: what it is, and the two things you can do to it."""
-    task_id = row["task_id"]
+def _render_saved_task_picker(user_id: int, saved: list[dict]) -> None:
+    """The gate's left half: choose a saved Task, see what it is, open or delete it.
+
+    A select box rather than the scrolling list of cards this used to be. Cards read well at
+    five and badly at fifty, and an account is free to save a hundred Tasks — the picker's
+    type-to-filter makes the hundredth cost the same as the first. What the cards showed
+    beyond the name (the description, the date) moves into the detail panel underneath, so
+    choosing is still an informed decision.
+
+    The two buttons are keyed once rather than once per Task: there is one of each now,
+    acting on whichever row is selected.
+    """
+    chosen = saved_picker.select_saved(
+        saved,
+        key="tb_gate_task_pick",
+        id_key="task_id",
+        label="Saved tasks",
+        placeholder="Choose a task…",
+        help="Start typing to filter. Your most recently saved tasks are at the top.",
+    )
+    if chosen is None:
+        st.caption("Pick one to see what it contains.")
+        return
+
+    task_id = chosen["task_id"]
     with st.container(border=True):
-        st.markdown(f"**{row['name']}**")
-        if row.get("description"):
-            st.caption(row["description"])
-        st.caption(f"Last saved {row['updated_at']}")
+        saved_picker.render_detail(chosen)
 
         open_column, delete_column = st.columns([3, 1])
         with open_column:
             if st.button(
                 "Open",
-                key=f"tb_gate_open_{task_id}",
+                key="tb_gate_open",
                 type="primary",
                 width="stretch",
                 help="Open this task and start working on it.",
@@ -453,19 +468,19 @@ def _render_saved_task_card(user_id: int, row: dict) -> None:
                     logger.exception("Could not load task %s.", task_id)
                     st.error(str(error), icon=":material/error:")
                     return
-                tasks_session.queue_flash(f"Opened “{row['name']}”.")
+                tasks_session.queue_flash(f"Opened “{chosen['name']}”.")
                 st.rerun(scope="app")
         with delete_column:
             if st.button(
                 "",
-                key=f"tb_gate_delete_{task_id}",
+                key="tb_gate_delete",
                 icon=":material/delete:",
                 width="stretch",
                 help="Permanently delete this saved task.",
             ):
                 tasks_session.open_dialog(
                     "confirm_delete",
-                    {"user_id": user_id, "task_id": task_id, "name": row["name"]},
+                    {"user_id": user_id, "task_id": task_id, "name": chosen["name"]},
                 )
                 st.rerun(scope="app")
 

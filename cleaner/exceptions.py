@@ -25,3 +25,12 @@ class InvalidStepError(DataCleanerError):
 
 class ExportError(DataCleanerError):
     """The cleaned workbook couldn't be built (nothing to export, or Excel's limits exceeded)."""
+
+
+class TemplateStorageError(DataCleanerError):
+    """A cleaning template couldn't be saved, loaded, listed or deleted.
+
+    Covers both halves of storage — the SQLite row and the JSON inside it — because from
+    the page's point of view they are one failure: the recipe didn't survive. Mirrors
+    `tasks.exceptions.TaskStorageError`, whose `cleaner/db.py` is copied from.
+    """

@@ -17,9 +17,11 @@ from uuid import uuid4
 import pandas as pd
 import streamlit as st
 
-from cleaner import loaders, naming, pipeline, profiling
+from cleaner import loaders, naming, pipeline, profiling, template as template_model
 from cleaner.exceptions import DataCleanerError
+from cleaner.matching import TemplateMatch, check_upload
 from cleaner.pipeline import CLEANING_RECIPE_VERSION, Step, StepOutcome
+from cleaner.template import CleaningTemplate, TemplateSummary, TemplateTable
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,20 @@ DC_TABS_KEY = "dc_tabs"
 DC_DIALOG_KEY = "dc_open_dialog"
 DC_START_OVER_KEY = "dc_start_over_pending"
 DC_FILE_BYTES_KEY = "dc_file_bytes"
+
+# The template currently selected in the bar above the uploader. The id is what saving
+# updates; the name is what the bar shows and what the picker's selection is restored from.
+DC_TEMPLATE_ID_KEY = "dc_template_id"
+DC_TEMPLATE_NAME_KEY = "dc_template_name"
+DC_TEMPLATE_OBJECT_KEY = "dc_template_object"
+# The picker widget's own key, and the flag saying which template the user just chose but
+# which hasn't been acted on yet. The two are separate because the bar draws *above*
+# `st.file_uploader`, and acting on a selection there would end the run before that widget
+# exists — which drops every uploaded file. See `app_pages/data_cleaner.py`.
+DC_TEMPLATE_PICK_KEY = "dc_template_pick"
+DC_TEMPLATE_PENDING_KEY = "dc_template_pending"
+DC_TEMPLATE_DIALOG_KEY = "dc_template_dialog"
+DC_FLASH_KEY = "dc_flash"
 
 MAX_UPLOAD_SIZE_MB = 50
 PREVIEW_ROWS = 500
@@ -274,7 +290,13 @@ def queue_start_over() -> None:
 
 
 def consume_start_over() -> bool:
-    """Applies a queued start-over, if one is pending. Call before the uploader renders."""
+    """Applies a queued start-over, if one is pending. Call before the uploader renders.
+
+    The selected cleaning template is deliberately **kept**, as `chat_types.session` keeps
+    its selection across a start over: uploading next month's files against the same saved
+    steps is the normal reason to clear the working set, not a reason to also forget which
+    template those files belong to.
+    """
     if not st.session_state.pop(DC_START_OVER_KEY, False):
         return False
     clear_tables()
@@ -416,3 +438,238 @@ def build_download(tables: list[TableState], file_bytes_by_id: dict[str, bytes])
         log[sheet_name] = pipeline.describe_steps(effective_steps(table))
 
     return export.build_workbook(payload, log)
+
+
+# --------------------------------------------------------------------------------------
+# Cleaning templates
+#
+# The working set read out as a saved recipe, and a saved recipe read back onto it. The
+# formats and the matching live in `cleaner/template.py` and `cleaner/matching.py`, which
+# know nothing about Streamlit; this is the only part that touches session state.
+# --------------------------------------------------------------------------------------
+
+
+def source_tables() -> list[TableState]:
+    """The uploaded tables, in tab order — every table that has a file behind it.
+
+    Derived tables are left out because they have no file of their own: a template stores
+    them as reshapes to rebuild, not as expected uploads.
+    """
+    return [table for table in get_tables().values() if table.derived_from is None]
+
+
+def summaries_of(table_id: str) -> list[TableState]:
+    """Every derived table saved off `table_id`, in the order they were added."""
+    return [table for table in get_tables().values() if table.derived_from == table_id]
+
+
+def _cleaned_columns(table: TableState) -> list[str]:
+    """The column names this table has once its recipe has run, for the schema dialog.
+
+    A best effort, not a guarantee: this is shown to a user deciding whether a template is
+    the one they want, so a file that can no longer be read costs an empty list rather than
+    a refused save.
+    """
+    file_bytes = cached_file_bytes().get(table.file_id)
+    if file_bytes is None:
+        return []
+    try:
+        frame, _ = cleaned_table(table, file_bytes)
+    except DataCleanerError:
+        logger.warning("Could not read '%s' while capturing a template.", table.source_label)
+        return []
+    return [str(column) for column in frame.columns]
+
+
+def capture_template(
+    name: str, *, description: str = "", template_id: int | None = None
+) -> CleaningTemplate:
+    """Reads the whole working set out as a saved template.
+
+    One entry per uploaded file with its recipe, plus every Pivot / Group & total / Unpivot
+    saved off one of them — which is what "whole set" means: "Receivables" brings back
+    `billwise_due`, `customer_master`, `sales` and the summary tables together.
+    """
+    tables: list[TemplateTable] = []
+    summaries: list[TemplateSummary] = []
+
+    for table in source_tables():
+        entry_name = template_model.source_key(table.file_name, table.sheet_name)
+        tables.append(
+            TemplateTable(
+                name=entry_name,
+                file_name=table.file_name,
+                sheet_name=table.sheet_name,
+                output_sheet_name=table.output_sheet_name,
+                steps=[dict(step) for step in table.steps],
+                columns=_cleaned_columns(table),
+                recipe_version=table.recipe_version,
+            )
+        )
+        for summary in summaries_of(table.table_id):
+            if summary.reshape is None:
+                continue
+            summaries.append(
+                TemplateSummary(
+                    parent=entry_name,
+                    name=summary.output_sheet_name,
+                    reshape=dict(summary.reshape),
+                )
+            )
+
+    return template_model.capture(
+        name,
+        description=description,
+        tables=tables,
+        summaries=summaries,
+        template_id=template_id,
+    )
+
+
+def match_template(template: CleaningTemplate) -> TemplateMatch:
+    """Measures the current upload against a template. Never raises — see `cleaner.matching`."""
+    loaded = {
+        table.table_id: (table.file_name, table.sheet_name) for table in source_tables()
+    }
+    return check_upload(template, loaded)
+
+
+def apply_template(template: CleaningTemplate, match: TemplateMatch) -> tuple[int, int]:
+    """Writes a template's recipes onto the matched tables and rebuilds its summaries.
+
+    Returns `(tables cleaned, summary tables rebuilt)` so the caller can say what happened.
+
+    A matched table's **existing summaries are discarded first**. Applying a template twice
+    would otherwise leave two copies of every derived table, each one a `naming` de-dupe
+    away from the last — and the template is the statement of what this working set should
+    contain, not an addition to it.
+
+    An unmatched file is left completely alone, steps and summaries both: `cleaner.matching`
+    reports it as extra and this does nothing about it, which is the promise that module's
+    docstring makes.
+
+    Nothing is validated against the columns actually present. That check already happens
+    where the user can see it — `pipeline.apply_steps_with_report` skips a step whose column
+    has gone and the table's cleaning log says so.
+    """
+    cleaned = 0
+    rebuilt = 0
+
+    for table_name, table_id in match.matched.items():
+        entry = template.table(table_name)
+        if entry is None or get_table(table_id) is None:
+            continue
+
+        for stale in summaries_of(table_id):
+            remove_table(stale.table_id)
+
+        set_steps(table_id, [dict(step) for step in entry.steps])
+        cleaned += 1
+
+        for summary in template.summaries_of(table_name):
+            if add_summary_table(table_id, dict(summary.reshape), summary.name) is not None:
+                rebuilt += 1
+
+    logger.info(
+        "Applied cleaning template '%s': %d table(s) cleaned, %d summary table(s) rebuilt.",
+        template.display_name(),
+        cleaned,
+        rebuilt,
+    )
+    return cleaned, rebuilt
+
+
+# --------------------------------------------------------------------------------------
+# Which template is selected, and the messages that outlive a rerun
+# --------------------------------------------------------------------------------------
+
+
+def active_template() -> tuple[int | None, str]:
+    """The selected template's id and name, or `(None, "")` when none is selected."""
+    return st.session_state.get(DC_TEMPLATE_ID_KEY), st.session_state.get(DC_TEMPLATE_NAME_KEY, "")
+
+
+def active_template_object() -> CleaningTemplate | None:
+    """The selected template itself, held since it was chosen.
+
+    Kept in session state rather than re-read from SQLite each run, because the match
+    report is redrawn on **every** rerun — the upload can change under a selected template
+    at any time — and a database round trip per keystroke to say "3 files matched" would be
+    a cost with nothing to show for it. It is a recipe, so nothing here can go stale except
+    by the user editing the template on another screen, which reselects it anyway.
+    """
+    return st.session_state.get(DC_TEMPLATE_OBJECT_KEY)
+
+
+def set_active_template(template: CleaningTemplate) -> None:
+    """Records which saved template the working set is being cleaned under."""
+    st.session_state[DC_TEMPLATE_ID_KEY] = template.template_id
+    st.session_state[DC_TEMPLATE_NAME_KEY] = template.display_name()
+    st.session_state[DC_TEMPLATE_OBJECT_KEY] = template
+
+
+def clear_active_template() -> None:
+    """Goes back to `— New template —` without touching a single cleaning step.
+
+    Deselecting is not undoing: the steps a template put on the tables stay exactly where
+    they are. Undoing them is what Start over is for, and quietly reverting a page's worth
+    of cleaning because a dropdown changed would be the worst kind of surprise.
+    """
+    st.session_state.pop(DC_TEMPLATE_ID_KEY, None)
+    st.session_state.pop(DC_TEMPLATE_NAME_KEY, None)
+    st.session_state.pop(DC_TEMPLATE_OBJECT_KEY, None)
+
+
+def queue_template_selection(selection: object) -> None:
+    """Asks for the picker to be showing `selection` on the next run.
+
+    Takes whatever the picker uses as an option value — a template id, or
+    `saved_picker.NONE_OPTION` — rather than an id alone, because the two callers want
+    opposite ends of that list and neither one is `None`.
+
+    Deferred, not written, for the reason every deferral in this codebase is: Streamlit
+    forbids writing a widget's own session_state key once that widget exists this run, and
+    both callers — saving, and deleting — run in a dialog below the bar, well past that
+    point. Leaving the key alone is not an option either: after a delete it would still hold
+    an id that is no longer one of the picker's options.
+    """
+    st.session_state[DC_TEMPLATE_PENDING_KEY] = selection
+
+
+def consume_template_selection() -> None:
+    """Applies a queued picker selection. Call before the picker is created."""
+    if DC_TEMPLATE_PENDING_KEY not in st.session_state:
+        return
+    st.session_state[DC_TEMPLATE_PICK_KEY] = st.session_state.pop(DC_TEMPLATE_PENDING_KEY)
+
+
+def open_template_dialog(name: str, payload: dict | None = None) -> None:
+    """Marks which template dialog should be showing, on the same grounds as `open_dialog`."""
+    st.session_state[DC_TEMPLATE_DIALOG_KEY] = {"name": name, "payload": payload or {}}
+
+
+def close_template_dialog() -> None:
+    """Dismisses whichever template dialog is open."""
+    st.session_state.pop(DC_TEMPLATE_DIALOG_KEY, None)
+
+
+def pending_template_dialog() -> tuple[str, dict] | None:
+    """Returns the (name, payload) of the open template dialog, or None if none is open."""
+    pending = st.session_state.get(DC_TEMPLATE_DIALOG_KEY)
+    if not pending:
+        return None
+    return pending["name"], pending.get("payload") or {}
+
+
+def queue_flash(message: str) -> None:
+    """Holds a message for the next run.
+
+    Every caller here ends in `st.rerun`, and anything written just before one never
+    reaches the screen — the same reason `tasks.session.queue_flash` exists.
+    """
+    st.session_state[DC_FLASH_KEY] = message
+
+
+def consume_flash() -> str | None:
+    """Takes the queued message, if there is one."""
+    return st.session_state.pop(DC_FLASH_KEY, None)

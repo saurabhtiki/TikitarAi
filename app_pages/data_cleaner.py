@@ -14,16 +14,23 @@ the button reads False, and the dialog closes mid-edit.
 Each table's tab body is an `st.fragment` and the tab set is gated on `tab.open`, so a
 widget interaction costs one panel's rerun rather than re-running every loaded table's
 pipeline.
+
+Above the uploader sits the **cleaning template** bar: a saved working set — every expected
+file with its steps, plus the summary tables saved off them — picked by name. A bar rather
+than Task Builder's gate, and one that only ever records intent; see the "Cleaning
+templates" section below for both reasons, the second of which is load-bearing.
 """
 
 import logging
 
 import streamlit as st
 
+from app_pages import saved_picker
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
-from cleaner import loaders, naming, pipeline, profiling, session
-from cleaner.exceptions import DataCleanerError, InvalidStepError
+from cleaner import db as cleaner_db
+from cleaner import display, loaders, naming, pipeline, profiling, session
+from cleaner.exceptions import DataCleanerError, InvalidStepError, TemplateStorageError
 from cleaner.steps import (
     AGGREGATION_FUNCTIONS,
     CASE_CHOICES,
@@ -761,7 +768,7 @@ def _render_reshape_preview(table: session.TableState, action: str, frame, param
 
     st.caption(f"Preview — {len(result):,} row(s) × {len(result.columns):,} column(s).")
     st.dataframe(
-        result.head(PREVIEW_ROWS_IN_DIALOG),
+        display.arrow_safe(result.head(PREVIEW_ROWS_IN_DIALOG)),
         key=f"dc_reshape_preview_{action}_{table.table_id}",
         width="stretch",
         hide_index=True,
@@ -1066,6 +1073,547 @@ def _render_pending_dialog(table: session.TableState, frame) -> None:
 
 
 # --------------------------------------------------------------------------------------
+# Cleaning templates
+#
+# A named, saved working set — every expected file with its steps, plus the Pivot / Group &
+# total / Unpivot tables saved off them — so that next month's files are cleaned by picking
+# a name instead of by repeating a dozen dialogs. `cleaner/template.py` says what one is,
+# `cleaner/matching.py` measures an upload against one, `cleaner/db.py` stores it.
+#
+# A **bar, not a gate.** Task Builder makes choosing a Task the whole first screen because a
+# Task *is* that page. Cleaning files nobody has a template for is this page's entire
+# existing purpose, so a wall in front of the uploader would be a regression. The picker's
+# `— New template —` is the same "open one, or start a new one" offer, with nothing gated
+# behind it.
+#
+# **The bar records intent; nothing here acts.** It draws above `st.file_uploader`, and a
+# run that ends before that widget is created drops every uploaded file — so a button that
+# reran from here would trade the user's data for their recipe. Buttons set a flag and let
+# the run continue; the selection is read back by `_select_template` below the uploader, and
+# every dialog renders there too. This is the same rule `chat_with_data.py` follows for its
+# chat type bar, and it is load-bearing.
+#
+# **Choosing a template selects it; Apply cleaning steps runs it.** The two used to be one
+# motion — picking a name applied its recipes there and then — which read as broken in the
+# one order users actually work in: choose the template, *then* upload this month's files.
+# The picker had not changed by the time the files arrived, so nothing ran and the page sat
+# there showing raw data under a template it claimed to be cleaning under. The rule now is
+# the one a user can see: the recipes run when, and only when, the button is pressed. That
+# also makes it repeatable — upload a file you forgot, press it again — which is safe
+# because `session.apply_template` restates a matched table's recipe rather than adding to
+# it. The button lives below the uploader with everything else that reruns.
+# --------------------------------------------------------------------------------------
+
+TEMPLATE_NEW_LABEL = "— New template —"
+
+
+def _saved_templates(user_id: int) -> list[dict] | None:
+    """Every saved template for this account, or None when the list couldn't be read.
+
+    None rather than `[]`, on the grounds `task_builder._saved_tasks` gives: "you have none"
+    and "we couldn't look" lead to two different next actions.
+    """
+    try:
+        return cleaner_db.list_templates(user_id)
+    except TemplateStorageError as error:
+        logger.exception("Could not list cleaning templates for user %s.", user_id)
+        st.error(str(error), icon=":material/error:")
+        return None
+
+
+def _template_name_taken(user_id: int, name: str, ignoring: int | None = None) -> bool:
+    """Whether another saved template already answers to this name.
+
+    Worth checking before saving: `cleaner.db.save_template` treats a name already in use as
+    "update that row", so a collision is not an error later — it is a silent overwrite of
+    somebody's other template.
+
+    A lookup that fails returns False: refusing a name because the database hiccuped would
+    block the user for a reason that has nothing to do with them.
+    """
+    wanted = (name or "").strip().casefold()
+    if not wanted:
+        return False
+    try:
+        rows = cleaner_db.list_templates(user_id)
+    except TemplateStorageError:
+        logger.exception("Could not check template names for user %s.", user_id)
+        return False
+    return any(
+        str(row["name"]).strip().casefold() == wanted and row["template_id"] != ignoring
+        for row in rows
+    )
+
+
+def _there_is_something_to_save() -> bool:
+    """Whether the Save/Update buttons should be live.
+
+    The uploader's own session_state key is consulted alongside the working set, and it is
+    the half that matters: the bar draws *above* `st.file_uploader`, so on the run where a
+    file first arrives `sync_tables` has not run yet and the working set is still the
+    previous run's — empty. Streamlit fills a widget's key from the browser before the
+    script starts, so the uploader's value is already the new one at this point, while
+    `source_tables()` would leave Save greyed out over a page full of freshly loaded data
+    until the user happened to click something else.
+    """
+    return bool(session.source_tables() or st.session_state.get(session.DC_UPLOADER_KEY))
+
+
+def _render_template_bar(rows: list[dict] | None) -> None:
+    """The picker and its four buttons, above the uploader. Records intent only.
+
+    A select box rather than a list of cards, because an account is free to save a hundred
+    templates and a dropdown has type-to-filter for nothing.
+    """
+    active_id, active_name = session.active_template()
+    listing = rows or []
+    savable = _there_is_something_to_save()
+
+    with st.container(border=True):
+        picker_column, status_column = st.columns([2, 3], vertical_alignment="center")
+
+        with picker_column:
+            if rows is None:
+                st.caption("Your saved templates couldn't be listed — the message above says why.")
+            else:
+                saved_picker.select_saved(
+                    listing,
+                    key=session.DC_TEMPLATE_PICK_KEY,
+                    id_key="template_id",
+                    label="Cleaning template",
+                    help=(
+                        "A saved set of files and the steps that clean each one. Choosing one "
+                        "selects it — press Apply cleaning steps, below the uploader, to run "
+                        "it against your files. Start typing to filter."
+                    ),
+                    include_none=True,
+                    none_label=TEMPLATE_NEW_LABEL,
+                    index=saved_picker.option_index(
+                        listing, id_key="template_id", selected_id=active_id, include_none=True
+                    ),
+                )
+
+        with status_column:
+            if active_id is None:
+                st.caption(
+                    "Clean your files as usual, then **Save as template** to do it in one "
+                    "click next month."
+                )
+            else:
+                st.caption(f"Selected: **{active_name}**.")
+
+        schema_column, save_column, update_column, delete_column = st.columns(4)
+        with schema_column:
+            # Disabled rather than hidden on `— New template —`, so the bar keeps its shape
+            # — the same call `chat_with_data.py`'s Show schema button makes.
+            if st.button(
+                "Show expected files",
+                key="dc_template_schema",
+                icon=":material/schema:",
+                width="stretch",
+                disabled=active_id is None,
+                help="What this template expects to be uploaded, and what it does to each file.",
+            ):
+                session.open_template_dialog("schema")
+        with save_column:
+            if st.button(
+                "Save as template",
+                key="dc_template_save_as",
+                icon=":material/bookmark_add:",
+                width="stretch",
+                disabled=not savable,
+                help="Save every uploaded file's steps, and the summary tables, under a new name.",
+            ):
+                session.open_template_dialog("save_as")
+        with update_column:
+            if st.button(
+                "Update template",
+                key="dc_template_update",
+                icon=":material/save:",
+                type="primary",
+                width="stretch",
+                disabled=active_id is None or not savable,
+                help="Overwrite this template with the steps currently on screen.",
+            ):
+                session.open_template_dialog("update", {"template_id": active_id, "name": active_name})
+        with delete_column:
+            if st.button(
+                "",
+                key="dc_template_delete",
+                icon=":material/delete:",
+                width="stretch",
+                disabled=active_id is None,
+                help="Permanently delete this saved template.",
+            ):
+                session.open_template_dialog("delete", {"template_id": active_id, "name": active_name})
+
+
+def _select_template(user_id: int) -> None:
+    """Reads the picker back and records the choice. Applies nothing.
+
+    Called below `st.file_uploader` and below `sync_tables`, which is both halves of the
+    reason it isn't done in the bar: a run ending up there would drop the uploaded files,
+    and the working set it reports on wouldn't yet include what was just uploaded.
+
+    Selecting is deliberately not applying — see this section's header comment. Choosing
+    `— New template —` deselects without touching a single step either: deselecting is not
+    undoing, see `session.clear_active_template`.
+    """
+    raw = st.session_state.get(session.DC_TEMPLATE_PICK_KEY)
+    # `— New template —` is a sentinel in the option list, not `None`: `st.selectbox` reserves
+    # `None` for "nothing is selected", so an option carrying it could be offered and never
+    # chosen. Both forms mean the same thing here.
+    selected_id = None if raw in (None, saved_picker.NONE_OPTION) else raw
+    active_id, _ = session.active_template()
+    if selected_id == active_id:
+        return
+
+    if selected_id is None:
+        session.clear_active_template()
+        # The bar has already drawn "Selected: X" further up this run, so the caption would
+        # contradict the picker until the next interaction without this.
+        st.rerun(scope="app")
+        return
+
+    try:
+        template = cleaner_db.load_template(selected_id, user_id)
+    except TemplateStorageError as error:
+        logger.exception("Could not load cleaning template %s.", selected_id)
+        st.error(str(error), icon=":material/error:")
+        session.clear_active_template()
+        # The picker still holds the id that just refused to load, and leaving it there
+        # would retry — and re-report — the same failure on every rerun from now on.
+        session.queue_template_selection(saved_picker.NONE_OPTION)
+        return
+
+    session.set_active_template(template)
+    st.rerun(scope="app")
+
+
+def _render_template_apply() -> None:
+    """The Apply button, and what happens when it is pressed.
+
+    The whole action of a template, in one visible press. It is drawn below the uploader
+    because it reruns, and because the working set it measures itself against is only
+    complete once `sync_tables` has seen this run's upload.
+
+    A missing expected file **refuses the whole apply** rather than cleaning the rest: half
+    a working set is not what "Receivables" means, the summaries a template rebuilds can
+    read from any of its tables, and a user who has just been told three files are expected
+    can upload the third. Nothing is lost by waiting — the button is still there.
+    """
+    template = session.active_template_object()
+    if template is None:
+        return
+
+    pressed = st.button(
+        f"Apply cleaning steps from “{template.display_name()}”",
+        key="dc_template_apply",
+        icon=":material/play_arrow:",
+        type="primary",
+        width="stretch",
+        disabled=not session.source_tables(),
+        help=(
+            "Checks your uploaded files against this template, then runs each file's saved "
+            "steps and rebuilds its summary tables. Safe to press again after uploading "
+            "more files."
+        ),
+    )
+    if not pressed:
+        return
+
+    match = session.match_template(template)
+    if not match.ok:
+        for problem in match.problems():
+            st.error(problem, icon=":material/error:")
+        st.caption("Nothing was applied. Upload the missing file(s) and press Apply again.")
+        return
+
+    cleaned, rebuilt = session.apply_template(template, match)
+    session.queue_flash(
+        f"Applied “{template.display_name()}” — {cleaned} file(s) cleaned, "
+        f"{rebuilt} summary table(s) rebuilt."
+    )
+    # The tab strip is built from the working set, which this has just changed: applying a
+    # template adds and removes whole tables, so the run has to start again to draw them.
+    st.rerun(scope="app")
+
+
+def _render_template_status() -> None:
+    """How the current upload measures up against the selected template.
+
+    Drawn after the uploader for the same reason the selection is acted on there — before
+    `sync_tables` the working set is still the previous run's, so this would report on files
+    the user has already replaced.
+    """
+    template = session.active_template_object()
+    if template is None:
+        return
+
+    match = session.match_template(template)
+    if match.ok and not match.has_notes:
+        st.success(match.summary(), icon=":material/check_circle:")
+        return
+
+    with st.expander(f"{template.display_name()} — {match.status_word()}", expanded=not match.ok):
+        st.caption(match.summary())
+        for problem in match.problems():
+            st.warning(problem, icon=":material/error:")
+        for note in match.notes():
+            st.info(note, icon=":material/info:")
+        if not match.ok:
+            st.caption(
+                "Apply is refused until every expected file is here. Upload the missing "
+                "one(s), then press Apply cleaning steps."
+            )
+
+
+def _dismiss_template_dialog() -> None:
+    """Clears the flag when a dialog is dismissed by the X, ESC or a click outside.
+
+    Without it the flag survives and the next unrelated rerun reopens the same dialog — the
+    same reason `session.open_dialog` exists for the cleaning actions.
+    """
+    session.close_template_dialog()
+
+
+@st.dialog("What this template expects", on_dismiss=_dismiss_template_dialog)
+def _dialog_template_schema(user_id: int, payload: dict) -> None:
+    """The saved schema, read on demand rather than announced above the uploader.
+
+    "Receivables expects billwise_due, customer_master and sales" is the answer to a
+    question the user asks once — printing it permanently would put a box between them and
+    their data on every run after that.
+    """
+    template = session.active_template_object()
+    if template is None:
+        st.info("No template is selected.", icon=":material/info:")
+        return
+
+    st.caption(template.summary_line())
+    if template.description:
+        st.write(template.description)
+
+    match = session.match_template(template)
+    for table in template.tables:
+        found = table.name in match.matched
+        icon = ":material/check_circle:" if found else ":material/error:"
+        with st.expander(f"{table.name} — {'uploaded' if found else 'not uploaded'}", icon=icon):
+            st.caption(f"Saved from **{table.file_name or table.name}**.")
+            if table.columns:
+                st.caption("Columns after cleaning:")
+                st.write(", ".join(f"`{column}`" for column in table.columns))
+            else:
+                st.caption("No column list was saved with this file.")
+
+            described = pipeline.describe_steps(table.steps)
+            if described:
+                st.caption(f"{len(described)} cleaning step(s):")
+                for position, line in enumerate(described, start=1):
+                    st.write(f"{position}. {line}")
+            else:
+                st.caption("No cleaning steps — this file is used as uploaded.")
+
+            for summary in template.summaries_of(table.name):
+                st.caption(f"Summary table **{summary.name}** — {pipeline.describe_step(summary.reshape)}")
+
+    if st.button(
+        "Close",
+        key="dc_template_schema_close",
+        width="stretch",
+        help="Close this and carry on cleaning.",
+    ):
+        session.close_template_dialog()
+        st.rerun(scope="app")
+
+
+@st.dialog("Save as template", on_dismiss=_dismiss_template_dialog)
+def _dialog_save_template(user_id: int, payload: dict) -> None:
+    """Names the working set and writes it.
+
+    A name already belonging to another template is refused rather than obeyed: `save_template`
+    reads it as "update that row", which from here would be a silent overwrite of somebody
+    else's month of work.
+    """
+    tables = session.source_tables()
+    st.caption(
+        f"{len(tables)} uploaded file(s) and their steps, plus every summary table saved off "
+        "them, stored under one name."
+    )
+
+    typed = st.text_input(
+        "Template name",
+        key="dc_template_new_name",
+        placeholder="e.g. Receivables",
+        help="What this template is called when you come back to pick it.",
+    )
+    description = st.text_area(
+        "What it's for (optional)",
+        key="dc_template_new_description",
+        placeholder="e.g. Monthly receivables pack — billwise due, customer master and sales.",
+        help="Shown under the picker, so this can be identified six months from now.",
+    )
+
+    confirm_column, cancel_column = st.columns(2)
+    with confirm_column:
+        if st.button(
+            "Save template",
+            key="dc_template_save_confirm",
+            type="primary",
+            width="stretch",
+            disabled=not typed.strip(),
+            help="Write these files and their steps to a new saved template.",
+        ):
+            if _template_name_taken(user_id, typed):
+                st.error(
+                    f"You already have a template called “{typed.strip()}” — pick it above and "
+                    "use Update template, or choose another name.",
+                    icon=":material/error:",
+                )
+                return
+            _write_template(user_id, typed, description=description, template_id=None)
+    with cancel_column:
+        if st.button(
+            "Cancel",
+            key="dc_template_save_cancel",
+            width="stretch",
+            help="Close without saving anything.",
+        ):
+            session.close_template_dialog()
+            st.rerun(scope="app")
+
+
+@st.dialog("Update this template?", on_dismiss=_dismiss_template_dialog)
+def _dialog_update_template(user_id: int, payload: dict) -> None:
+    """Confirms overwriting the selected template with what is on screen.
+
+    Asked rather than assumed: the button sits beside a picker, and overwriting a saved
+    recipe is not something to discover afterwards.
+    """
+    name = payload.get("name") or ""
+    template = session.active_template_object()
+    st.write(
+        f"**{name}** will be replaced by the {len(session.source_tables())} uploaded file(s) "
+        "and their steps as they stand now. The previous version isn't kept."
+    )
+
+    confirm_column, cancel_column = st.columns(2)
+    with confirm_column:
+        if st.button(
+            "Update template",
+            key="dc_template_update_confirm",
+            type="primary",
+            width="stretch",
+            help="Overwrite the saved template with what is on screen.",
+        ):
+            _write_template(
+                user_id,
+                name,
+                description=template.description if template is not None else "",
+                template_id=payload.get("template_id"),
+            )
+    with cancel_column:
+        if st.button(
+            "Cancel",
+            key="dc_template_update_cancel",
+            width="stretch",
+            help="Leave the saved template as it is.",
+        ):
+            session.close_template_dialog()
+            st.rerun(scope="app")
+
+
+@st.dialog("Delete this template?", on_dismiss=_dismiss_template_dialog)
+def _dialog_delete_template(user_id: int, payload: dict) -> None:
+    """Confirms deleting a saved template. The cleaning on screen is untouched either way."""
+    name = payload.get("name") or ""
+    template_id = payload.get("template_id")
+    st.write(f"**{name}** will be permanently deleted. This can't be undone.")
+    st.caption("The files and steps currently on screen aren't affected.")
+
+    confirm_column, cancel_column = st.columns(2)
+    with confirm_column:
+        if st.button(
+            "Delete template",
+            key="dc_template_delete_confirm",
+            type="primary",
+            width="stretch",
+            help="Permanently delete this saved template.",
+        ):
+            try:
+                cleaner_db.delete_template(template_id, user_id)
+            except TemplateStorageError as error:
+                logger.exception("Could not delete cleaning template %s.", template_id)
+                st.error(str(error), icon=":material/error:")
+                return
+            session.clear_active_template()
+            # The picker's own key still holds the id that has just stopped being an option,
+            # and this is well past the point where Streamlit will let it be written — so the
+            # reset is queued for the top of the next run.
+            session.queue_template_selection(saved_picker.NONE_OPTION)
+            session.close_template_dialog()
+            session.queue_flash(f"Deleted “{name}”.")
+            st.rerun(scope="app")
+    with cancel_column:
+        if st.button(
+            "Cancel",
+            key="dc_template_delete_cancel",
+            width="stretch",
+            help="Keep this template.",
+        ):
+            session.close_template_dialog()
+            st.rerun(scope="app")
+
+
+def _write_template(user_id: int, name: str, *, description: str, template_id: int | None) -> None:
+    """Captures the working set and stores it, or says why it couldn't.
+
+    Shared by Save as and Update because the two differ only in whether an id is carried:
+    `cleaner.db.save_template` inserts or updates from that alone.
+    """
+    try:
+        captured = session.capture_template(name, description=description, template_id=template_id)
+        saved = cleaner_db.save_template(user_id, captured)
+    except DataCleanerError as error:
+        logger.exception("Could not save cleaning template '%s' for user %s.", name, user_id)
+        st.error(str(error), icon=":material/error:")
+        return
+
+    session.set_active_template(saved)
+    session.queue_template_selection(saved.template_id)
+    session.close_template_dialog()
+    session.queue_flash(f"Saved “{saved.display_name()}” — {saved.summary_line()}.")
+    st.rerun(scope="app")
+
+
+TEMPLATE_DIALOGS = {
+    "schema": _dialog_template_schema,
+    "save_as": _dialog_save_template,
+    "update": _dialog_update_template,
+    "delete": _dialog_delete_template,
+}
+
+
+def _render_pending_template_dialog(user_id: int) -> None:
+    """Opens whichever template dialog is flagged.
+
+    Rendered below the uploader, never from the bar that sets the flag: a dialog's own
+    buttons end their run with `st.rerun`, and doing that above `st.file_uploader` would
+    drop every uploaded file.
+    """
+    pending = session.pending_template_dialog()
+    if pending is None:
+        return
+
+    name, payload = pending
+    if name not in TEMPLATE_DIALOGS:
+        session.close_template_dialog()
+        return
+
+    TEMPLATE_DIALOGS[name](user_id, payload)
+
+
+# --------------------------------------------------------------------------------------
 # Upload
 # --------------------------------------------------------------------------------------
 
@@ -1220,12 +1768,19 @@ def _render_preview(table: session.TableState, cleaned) -> None:
     st.subheader("Preview", divider="grey")
     #if len(cleaned) > session.PREVIEW_ROWS:
         #st.caption(f"Showing the first {session.PREVIEW_ROWS:,} of {len(cleaned):,} rows.")
+    shown, as_text = display.to_arrow_safe(cleaned)
     st.dataframe(
-        cleaned,
+        shown,
         key=f"dc_preview_{table.table_id}",
         width="stretch",
         hide_index=True,
     )
+    if as_text:
+        st.caption(
+            "Shown as text because the column holds a mix of numbers and text: "
+            + ", ".join(f"**{name}**" for name in as_text)
+            + ". The data itself is untouched — set a type, or clean the odd values, to fix it."
+        )
 
     with st.expander("Column details", icon=":material/analytics:"):
         st.dataframe(
@@ -1437,10 +1992,35 @@ def _render_export_menu() -> None:
 if profile is not None:
     render_sidebar(profile)
 
+    user_id = st.session_state["user_id"]
+
     st.subheader("🧹Data Cleaner")
     st.write(":blue[**Upload files, clean each table, and download one multi-sheet workbook.**]")
 
+    # A container that is always here and usually empty. Writing the message straight onto
+    # the page would make every element below it sit one position lower on the runs that
+    # have something to say, which is how a browser ends up showing both positions at once.
+    with st.container():
+        template_flash = session.consume_flash()
+        if template_flash:
+            st.success(template_flash, icon=":material/check_circle:")
+
+    # Applied before the picker is created, since Streamlit forbids writing a widget's own
+    # key once it exists this run. Saving and deleting are what queue one.
+    session.consume_template_selection()
+
+    template_rows = _saved_templates(user_id)
+    # Above the uploader, and records intent only — see this section's header comment.
+    _render_template_bar(template_rows)
+
     loaded_tables = _render_upload()
+
+    # Everything that can end a run now runs *below* `st.file_uploader`, so ending one
+    # cannot drop the files it holds.
+    _select_template(user_id)
+    _render_pending_template_dialog(user_id)
+    _render_template_status()
+    _render_template_apply()
 
     if not loaded_tables:
         st.info("Upload a CSV or Excel file to get started.", icon=":material/upload_file:")

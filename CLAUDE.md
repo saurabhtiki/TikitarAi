@@ -464,7 +464,7 @@ Known pre-existing failures, unchanged by this stage:
 `test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body` and
 `TestRelationships::test_confirming_a_bad_link_keeps_it_declared_but_unenforced`.
 
-Stage 12 (current): Run a Task (requirement 8) — build-order item 10 — complete. A new page,
+Stage 12 (previous): Run a Task (requirement 8) — build-order item 10 — complete. A new page,
 `app_pages/run_task.py`, in the **Automate** section and open to **any logged-in user** (Task
 Builder is the admin half of the pair); the section is now registered for everyone and Task
 builder appended to it for `admin`/`superuser`. One new package, `runner/`, mirroring
@@ -537,6 +537,104 @@ Task against the same files doesn't arrive with the files gone. And a run **rewr
 session's setup**: `apply_recorded_setup` clears the relationships and the statement list before
 handing off to `chat_types.session.apply_setup`, so the Task's links and column meanings replace
 whatever was there. The panel says so above the button.
+
+Known pre-existing failures, unchanged by this stage:
+`test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body` and
+`TestRelationships::test_confirming_a_bad_link_keeps_it_declared_but_unenforced`.
+
+Stage 13 (current): Cleaning Templates, and a searchable saved-thing picker — complete. Two
+asks, one shape: the Data Cleaner forgot everything between sessions, and both pages that
+offer saved recipes listed them as cards, which read well at five and badly at fifty.
+
+Three new modules in `cleaner/` (`template.py`, `matching.py`, `db.py`, only `session.py`
+still importing Streamlit), one new shared page module (`app_pages/saved_picker.py`), and a
+new SQLite table `cleaning_templates` registered in `bootstrap_database()`. `cleaner/db.py`
+is `tasks/db.py` line for line — one name per account, and saving under a taken name updates
+that row, which is what makes **Update template** a plain call to `save_template`.
+
+A template is the **whole working set**, per the user: "Receivables" means `billwise_due`,
+`customer_master` and `sales` together, each with its own steps, plus the Pivot / Group &
+total / Unpivot tables saved off them. Not one table's recipe — that is not how the work
+arrives.
+
+Three things are deliberately not stored. **`table_id` and `file_id`**, both built from
+Streamlit's per-upload UUID and meaningless next month — a template is matched back by the
+file's own name, which is `template.source_key`: the stem plus the sheet, extension dropped
+(so re-saving a CSV as `.xlsx` still matches) and case-folded. **A summary's own steps**,
+empty by construction because `session.effective_steps` resolves a derived table's recipe
+live from its parent, so a stored copy could only go stale. And **any data** — the one thing
+naming data is `TemplateTable.columns`, a list of names for the schema dialog.
+
+`chat_types/matching.py` is **not reused**: it imports `engine.loading` and reports how a
+DuckDB column converted, which has no meaning against a pandas frame. `cleaner/matching.py`
+is table-level only, because the recipe already degrades gracefully —
+`pipeline.apply_steps_with_report` skips a step whose column has gone and says so in that
+table's own log, which is where the user is looking. Checking columns here would report the
+same problem twice, once somewhere they cannot act on it.
+
+The load-bearing departure from `chat_types.matching`: **an extra uploaded file is left
+alone, never discarded.** A chat type gates a load; a template is applied *to* files the
+user chose to upload, and throwing one away because a saved recipe doesn't mention it would
+destroy work. A missing expected file is reported and blocks only itself — the files that
+did match are still cleaned. Applying a template **discards the matched tables' existing
+summaries first**, because the template states what the working set should contain rather
+than what to add to it. Deselecting is **not** undoing: the steps stay exactly where they
+are, and Start over is what undoes.
+
+**Choosing a template selects it; Apply cleaning steps runs it.** The two were one motion at
+first — picking a name applied its recipes there and then — which read as broken in the order
+users actually work in: choose the pack, *then* upload this month's files. The picker had not
+changed by the time the files arrived, so nothing ran and the page sat showing raw data under a
+template it claimed to be cleaning under. The rule is now the one a user can see, and it is
+repeatable — upload a file you forgot and press again — which is safe because `apply_template`
+restates a matched table's recipe rather than adding to it. The button sits **below** the
+uploader with everything else that reruns. A **missing expected file now refuses the whole
+apply** rather than cleaning the rest: half a working set is not what "Receivables" means, and
+nothing is lost by waiting, since the button is still there once the file is uploaded.
+
+A **bar, not a gate.** Task Builder gates because a Task *is* that page; cleaning files
+nobody has a template for is the Data Cleaner's entire existing purpose, so a wall in front
+of the uploader would be a regression. `— New template —` is the same "open one, or start a
+new one" offer with nothing gated behind it.
+
+**The bar records intent; nothing in it acts.** It draws above `st.file_uploader`, and a run
+that ends before that widget is created drops every uploaded file — so its buttons set a
+flag and let the run continue, and `_act_on_template_selection`, every dialog and the match
+report all run *below* the uploader, where `st.rerun` is safe and where `sync_tables` has
+already registered what was just uploaded. The one thing that could not wait is the
+Save/Update buttons' `disabled=`: `_there_is_something_to_save` consults the uploader's own
+session_state key beside the working set, because Streamlit fills a widget's key from the
+browser before the script starts while `source_tables()` is still the previous run's — which
+would grey out Save over a page of freshly loaded data.
+
+`saved_picker.NONE_OPTION` is a sentinel string, not `None`: `st.selectbox` reserves `None`
+for *nothing is selected*, so an option carrying it can be offered and never chosen.
+`select_saved` also passes `index=` **only on the run that creates the widget** — alongside a
+stored value it sets a default that is immediately overridden, which Streamlit warns about,
+and the user's own last choice is the one that should win. Deleting a template queues the
+picker's reset through `queue_template_selection` rather than writing it: the delete dialog
+is below the bar, past the point Streamlit allows a widget's own key to be written, and
+leaving it alone would strand an id that is no longer an option.
+
+Task Builder's gate keeps every piece of its logic — `_saved_tasks` (still `None` on a read
+failure, distinct from `[]`), `_name_taken`, `_save_task`, the confirm-delete dialog — and
+changes only how the left column draws: `_render_saved_task_card` became
+`_render_saved_task_picker`, and the per-task `tb_gate_open_{id}` / `tb_gate_delete_{id}`
+keys became one `tb_gate_open` and one `tb_gate_delete` acting on whatever is selected.
+
+Out of band, since: **a mixed column no longer breaks the preview.** Streamlit serialises a
+frame to Arrow before sending it, and Arrow types a *column* — a payment-term column holding
+`45` on one row and `45D` on the next is typed `int64` from the first values and raises
+`ArrowInvalid` on the text one, so the raw upload rendered as a red box rather than a grid,
+before the user had any chance to clean the column. `cleaner/display.py`'s `to_arrow_safe`
+shows exactly those columns as text and names them in a caption under the preview. **The
+check is the conversion itself, not a guess about the values**: a "more than one Python type"
+heuristic both misses `Decimal`s and lists and fires on ints beside floats, which would strip
+a perfectly good number column of its formatting for nothing. Only `object` columns are
+tried, and the frame is returned unchanged — the same object — when nothing failed, so the
+usual render costs one dtype check per column. Positional, never by name, because an uploaded
+sheet can repeat a header. Display only: the steps, the stats and the export still see what
+the column actually holds.
 
 Known pre-existing failures, unchanged by this stage:
 `test_chat_with_data_page.py::TestSteps::test_a_collapsed_step_does_not_run_its_body` and

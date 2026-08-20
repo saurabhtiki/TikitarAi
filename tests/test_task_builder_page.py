@@ -76,9 +76,21 @@ def _make_app(tmp_path, monkeypatch, role="admin", name=TASK_NAME):
     return app
 
 
+def _select_saved(app, task_id):
+    """Picks a saved task in the gate's select box, which reveals Open and Delete.
+
+    A select box rather than a card each, so both buttons are keyed once and act on
+    whatever is chosen — choosing is now a step of its own.
+    """
+    app.selectbox(key="tb_gate_task_pick").set_value(task_id).run()
+    assert not app.exception
+    return app
+
+
 def _open_saved(app, task_id):
     """Opens a saved task from the gate."""
-    app.button(key=f"tb_gate_open_{task_id}").click().run()
+    _select_saved(app, task_id)
+    app.button(key="tb_gate_open").click().run()
     assert not app.exception
     return app
 
@@ -210,13 +222,14 @@ class TestTheGate:
         assert app.segmented_control(key="tb_view") is not None
 
     def test_deleting_from_the_gate_asks_first(self, tmp_path, monkeypatch):
-        """Open and Delete are the same motion on a card, unlike the dropdown this replaced."""
+        """Delete asks first: it sits beside Open, acting on whatever the picker holds."""
         app = _make_app(tmp_path, monkeypatch)
         app.button(key="tb_save_task").click().run()
         _switch(app)
         task_id = list_tasks(1)[0]["task_id"]
 
-        app.button(key=f"tb_gate_delete_{task_id}").click().run()
+        _select_saved(app, task_id)
+        app.button(key="tb_gate_delete").click().run()
 
         assert not app.exception
         assert list_tasks(1) != []
@@ -231,7 +244,8 @@ class TestTheGate:
         app.button(key="tb_save_task").click().run()
         _switch(app)
         task_id = list_tasks(1)[0]["task_id"]
-        app.button(key=f"tb_gate_delete_{task_id}").click().run()
+        _select_saved(app, task_id)
+        app.button(key="tb_gate_delete").click().run()
 
         app.button(key="tb_delete_cancel").click().run()
 

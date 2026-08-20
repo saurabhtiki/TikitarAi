@@ -10,6 +10,8 @@ from chat_types.db import init_chat_types_table
 from chat_types.exceptions import ChatTypeStorageError
 from checks.db import init_check_sets_table
 from checks.exceptions import ChecksStorageError
+from cleaner.db import init_cleaning_templates_table
+from cleaner.exceptions import TemplateStorageError
 from llm.db import init_llm_table
 from llm.exceptions import LLMDatabaseError
 from meetings.db import init_meetings_tables
@@ -41,6 +43,7 @@ def bootstrap_database() -> bool:
         init_check_sets_table()
         init_meetings_tables()
         init_tasks_table()
+        init_cleaning_templates_table()
     except (
         AuthDatabaseError,
         LLMDatabaseError,
@@ -48,6 +51,7 @@ def bootstrap_database() -> bool:
         ChatTypeStorageError,
         MeetingStorageError,
         TaskStorageError,
+        TemplateStorageError,
     ):
         logger.exception("Failed to bootstrap the application database.")
         raise
@@ -56,7 +60,13 @@ def bootstrap_database() -> bool:
 
 try:
     bootstrap_database()
-except (AuthDatabaseError, LLMDatabaseError, ChecksStorageError, MeetingStorageError):
+except (
+    AuthDatabaseError,
+    LLMDatabaseError,
+    ChecksStorageError,
+    MeetingStorageError,
+    TemplateStorageError,
+):
     st.error("The application couldn't start because the database is unavailable.")
     st.stop()
 
