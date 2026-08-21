@@ -13,7 +13,8 @@ out of scope (requirement 9).
 
 Two screens, in the order requirement 8.1 asks for.
 
-**The picker.** Saved Tasks as cards, each with **Run** and **Show schema** — the dialog
+**The picker.** A search box over the saved Tasks, then one line each with **Run** and
+**Schema** — a compact list because an account can hold hundreds of them. Schema opens the dialog
 §8.1 step 2 asks for, listing the expected files, every column's type, the links and the
 column meanings, so the user knows what to upload before they upload it.
 
@@ -170,7 +171,7 @@ def _dialog_schema(payload: dict) -> None:
     if task.schema.relationships:
         st.markdown("##### How the files link together")
         for link in task.schema.relationships:
-            st.markdown(f"- {link.explained_label()}")
+            st.markdown(f"- {link.explained_label}")
 
     if st.button("Close", key="rt_schema_close", icon=":material/close:", help="Close this list."):
         runner_session.close_dialog()
@@ -223,6 +224,14 @@ def _render_pending_dialog() -> None:
 # --------------------------------------------------------------------------------------
 
 
+# How many tasks the picker draws before it stops and offers Show more. An account can hold
+# hundreds, and every row is three widgets Streamlit rebuilds on every rerun — so the list is
+# a search box first and a list second.
+_PAGE_SIZE = 25
+_SHOWN_KEY = "rt_shown_count"
+_SEARCH_SEEN_KEY = "rt_search_seen"
+
+
 def _render_picker(user_id: int) -> None:
     """Requirement 8.1 step 1: which task, asked on a screen with nothing else on it."""
     st.markdown("#### Pick a task to run")
@@ -248,46 +257,111 @@ def _render_picker(user_id: int) -> None:
         "same report over the new numbers."
     )
 
-    for row in saved:
-        _render_task_card(user_id, row)
+    search_column, sort_column = st.columns([3, 1], vertical_alignment="center")
+    with search_column:
+        query = st.text_input(
+            "Search tasks",
+            key="rt_search",
+            placeholder="Search by name or description",
+            help="Type part of a task's name or description. Every word you type has to appear.",
+            label_visibility="collapsed",
+        )
+    with sort_column:
+        order = st.selectbox(
+            "Sort tasks",
+            options=["Last saved", "Name (A–Z)"],
+            key="rt_sort",
+            help="Newest edit first, or alphabetical by name.",
+            label_visibility="collapsed",
+        )
+
+    # A new search starts at the top of its own list, not part-way down the last one's.
+    if st.session_state.get(_SEARCH_SEEN_KEY) != query:
+        st.session_state[_SEARCH_SEEN_KEY] = query
+        st.session_state[_SHOWN_KEY] = _PAGE_SIZE
+
+    matches = _filter_tasks(saved, query)
+    if order == "Name (A–Z)":
+        matches = sorted(matches, key=lambda row: row["name"].strip().lower())
+
+    if not matches:
+        st.info(
+            f"No saved task matches “{query}”. Clear the box to see all {len(saved)}.",
+            icon=":material/search_off:",
+        )
+        return
+
+    shown = min(st.session_state.get(_SHOWN_KEY, _PAGE_SIZE), len(matches))
+    st.caption(f"Showing {shown} of {len(matches)} tasks.")
+    for row in matches[:shown]:
+        _render_task_row(user_id, row)
+
+    if shown < len(matches):
+        if st.button(
+            f"Show {min(_PAGE_SIZE, len(matches) - shown)} more",
+            key="rt_show_more",
+            icon=":material/expand_more:",
+            width="stretch",
+            help="Add the next batch to the list. Searching is usually quicker.",
+        ):
+            st.session_state[_SHOWN_KEY] = shown + _PAGE_SIZE
+            st.rerun(scope="app")
 
 
-def _render_task_card(user_id: int, row: dict) -> None:
-    """One saved Task: what it is, what it expects, and the button that opens it."""
+def _filter_tasks(saved: list[dict], query: str) -> list[dict]:
+    """The rows whose name or description contains every word typed, case-insensitively.
+
+    Word-by-word rather than whole-string so "sales aug" finds "August sales report".
+    """
+    words = query.lower().split()
+    if not words:
+        return list(saved)
+    return [
+        row
+        for row in saved
+        if all(word in f"{row['name']} {row.get('description') or ''}".lower() for word in words)
+    ]
+
+
+def _render_task_row(user_id: int, row: dict) -> None:
+    """One saved Task as a single line: what it is, and the two buttons that open it."""
     task_id = row["task_id"]
-    with st.container(border=True, key=f"rt_card_{task_id}"):
+    name_column, saved_column, run_column, schema_column = st.columns(
+        [5, 2, 2, 2], vertical_alignment="center"
+    )
+    with name_column:
         st.markdown(f"**{row['name']}**")
         if row.get("description"):
             st.caption(row["description"])
-        st.caption(f"Last saved {row['updated_at']}")
-
-        run_column, schema_column = st.columns([2, 1])
-        with run_column:
-            if st.button(
-                "Run this task",
-                key=f"rt_open_{task_id}",
-                type="primary",
-                icon=":material/play_arrow:",
-                width="stretch",
-                help="Open this task, upload your files and produce its report.",
-            ):
-                task = _load_task(task_id, user_id)
-                if task is not None:
-                    runner_session.open_task(task)
-                    runner_session.queue_flash(f"Opened “{row['name']}”. Upload this month's files below.")
-                    st.rerun(scope="app")
-        with schema_column:
-            if st.button(
-                "Show schema",
-                key=f"rt_schema_{task_id}",
-                icon=":material/table_chart:",
-                width="stretch",
-                help="See which files and columns this task expects, before you upload anything.",
-            ):
-                task = _load_task(task_id, user_id)
-                if task is not None:
-                    runner_session.open_dialog("schema", {"task": task})
-                    st.rerun(scope="app")
+    with saved_column:
+        st.caption(f"Saved {row['updated_at']}")
+    with run_column:
+        if st.button(
+            "Run",
+            key=f"rt_open_{task_id}",
+            type="primary",
+            icon=":material/play_arrow:",
+            width="stretch",
+            help="Open this task, upload your files and produce its report.",
+        ):
+            task = _load_task(task_id, user_id)
+            if task is not None:
+                runner_session.open_task(task)
+                runner_session.queue_flash(f"Opened “{row['name']}”. Upload this month's files below.")
+                st.rerun(scope="app")
+    with schema_column:
+        if st.button(
+            "Schema",
+            key=f"rt_schema_{task_id}",
+            icon=":material/table_chart:",
+            width="stretch",
+            help="See which files and columns this task expects, before you upload anything.",
+        ):
+            task = _load_task(task_id, user_id)
+            if task is not None:
+                runner_session.open_dialog("schema", {"task": task})
+                st.rerun(scope="app")
+    st.divider()
 
 
 def _load_task(task_id: int, user_id: int) -> Task | None:

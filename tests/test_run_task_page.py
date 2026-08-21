@@ -67,7 +67,7 @@ def _schema() -> ChatType:
     )
 
 
-def _task(*, with_check=True) -> Task:
+def _task(*, with_check=True, name=TASK_NAME) -> Task:
     item = ReportItem(heading="Headcount", request="People per department", sql=HEADCOUNT_SQL)
     check = Check(name="Bonus within policy", criteria_text="Bonus at most 5% of basic.", sql=BONUS_SQL)
 
@@ -89,7 +89,7 @@ def _task(*, with_check=True) -> Task:
     report.sections = [section]
 
     return Task(
-        name=TASK_NAME,
+        name=name,
         description="Run after payroll closes.",
         persona="You are a payroll controller.",
         schema=_schema(),
@@ -176,6 +176,33 @@ class TestThePicker:
 
         assert "salary" in _texts(app)
         assert [frame for frame in app.dataframe]
+
+    def test_the_search_box_keeps_only_the_tasks_that_match_every_word(self, tmp_path, monkeypatch):
+        """An account can hold hundreds of Tasks, so the list is a search before it is a list."""
+        app, task_id = _app(tmp_path, monkeypatch)
+        other = save_task(1, _task(name="Quarterly stock count"))
+        app.run()
+
+        app.text_input(key="rt_search").set_value("stock count").run()
+
+        assert not app.exception
+        assert [button for button in app.button if button.key == f"rt_open_{other.task_id}"]
+        assert not [button for button in app.button if button.key == f"rt_open_{task_id}"]
+
+    def test_a_long_list_is_cut_short_until_show_more_is_pressed(self, tmp_path, monkeypatch):
+        """Every row is three widgets Streamlit rebuilds on every rerun; the batch caps that."""
+        app, _task_id = _app(tmp_path, monkeypatch)
+        for number in range(30):
+            save_task(1, _task(name=f"Task {number:02d}"))
+        app.run()
+
+        drawn = len([button for button in app.button if button.key.startswith("rt_open_")])
+        assert drawn == 25
+
+        app.button(key="rt_show_more").click().run()
+
+        assert not app.exception
+        assert len([button for button in app.button if button.key.startswith("rt_open_")]) == 31
 
     def test_the_upload_widgets_are_mounted_on_the_picker_too(self, tmp_path, monkeypatch):
         """A widget that stops being rendered stops reporting its value, and `sync_tables`

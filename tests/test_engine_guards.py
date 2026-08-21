@@ -75,6 +75,14 @@ class TestRejected:
         with pytest.raises(UnsafeSqlError, match="users"):
             assert_safe_sql("ALTER TABLE users ADD COLUMN x INTEGER", SESSION_TABLES)
 
+    def test_altering_a_quoted_table_outside_the_session(self):
+        with pytest.raises(UnsafeSqlError, match="users"):
+            assert_safe_sql('ALTER TABLE "users" ADD COLUMN x INTEGER', SESSION_TABLES)
+
+    def test_a_quoted_name_with_a_space_is_still_checked(self):
+        with pytest.raises(UnsafeSqlError, match="my table"):
+            assert_safe_sql('DROP TABLE "my table"', SESSION_TABLES)
+
     def test_no_allowed_tables_means_no_table_may_be_mutated(self):
         with pytest.raises(UnsafeSqlError):
             assert_safe_sql("DROP TABLE sales")
@@ -104,6 +112,23 @@ class TestAllowed:
 
     def test_table_names_are_matched_case_insensitively(self):
         assert assert_safe_sql("DROP TABLE SALES", SESSION_TABLES)
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            'ALTER TABLE "sales" ADD COLUMN "tax" DOUBLE',
+            'ALTER TABLE "sales" DROP COLUMN "tax"',
+            'CREATE OR REPLACE TABLE "sales" AS SELECT 1',
+            'ALTER TABLE main."sales" ADD COLUMN tax DOUBLE',
+        ],
+    )
+    def test_a_quoted_session_table_is_allowed(self, sql):
+        """Every statement this app generates quotes its identifiers.
+
+        Blanking the quotes left `ADD` looking like the table name, so replaying a saved
+        calculated column failed with \"'ADD' isn't one of this session's tables\".
+        """
+        assert assert_safe_sql(sql, SESSION_TABLES) == sql
 
 
 class TestExpressions:

@@ -193,9 +193,9 @@ def _render_chat_type_bar(user_id: int, loaded_tables: list[session.EngineTable]
             
 
     if not loaded_tables and chat_type_session.active() is None:
-        st.caption(
-            ":grey[No chat type selected — upload anything and set it up by hand, then save it "
-            "as a chat type to skip the setup next time.]"
+        st.write(
+            "No chat type selected — upload anything and set it up by hand, then save it "
+            "as a chat type to skip the setup next time."
         )
 
     return chosen, saved
@@ -1056,9 +1056,9 @@ def _render_mismatch_gate(report: matching.MatchReport | None, reason: str, key:
 if profile is not None:
     render_sidebar(profile)
     user_id = st.session_state["user_id"]
-
-    st.subheader("🔍 Chat with Data")
-    st.write(":blue[**Upload your files, tell us how they connect, then ask questions.**]")
+    with st.container(key="de_chat_with_data",horizontal=True):
+        st.subheader("🔍 Chat with Data")
+        st.write(":blue[**Upload your files, tell us how they connect, then ask questions.**]")
 
     # Pinning from here — from an answer or from the Checks view — goes to the session
     # Dashboard. Said even though it is the default: the choice outlives the run that made

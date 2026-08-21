@@ -54,12 +54,18 @@ _FORBIDDEN_STATEMENTS = (
     "call",
 )
 
+# A table name as it can legally appear in SQL: bare, or double-quoted because it holds
+# a space or a reserved word. Every statement this app generates quotes its identifiers,
+# so the quoted form is the common case rather than the exotic one.
+_IDENTIFIER = r'(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)'
+
 # Statements that name a table they will change. Everything else is read-only enough
-# that the allowlist doesn't apply.
+# that the allowlist doesn't apply. An optional schema qualifier (`main.sales`) is
+# matched and discarded so the captured group is always the table name itself.
 _TABLE_MUTATING = re.compile(
     r"\b(?:drop|alter|truncate|create(?:\s+or\s+replace)?)\s+"
     r"(?:temp\s+|temporary\s+)?(?:table|view)\s+(?:if\s+exists\s+)?"
-    r"([A-Za-z_][A-Za-z0-9_]*)",
+    rf"(?:{_IDENTIFIER}\s*\.\s*)?({_IDENTIFIER})",
     re.IGNORECASE,
 )
 
@@ -81,6 +87,30 @@ def strip_literals(sql: str) -> str:
     """
     without_comments = _BLOCK_COMMENT.sub(" ", _LINE_COMMENT.sub(" ", sql))
     return _QUOTED.sub(lambda match: " " * len(match.group(0)), without_comments)
+
+
+def strip_string_literals(sql: str) -> str:
+    """Returns `sql` with comments and single-quoted strings blanked, identifiers kept.
+
+    The table allowlist has to read the table's *name*, so it cannot use
+    `strip_literals`: that blanks `"salaries"` too, leaving `ALTER TABLE  ADD COLUMN …`
+    and making the next word — `ADD` — look like the table being changed. Here only the
+    value literals are blanked, so a quoted identifier survives to be matched.
+    """
+    without_comments = _BLOCK_COMMENT.sub(" ", _LINE_COMMENT.sub(" ", sql))
+    return _QUOTED.sub(
+        lambda match: match.group(0)
+        if match.group(0).startswith('"')
+        else " " * len(match.group(0)),
+        without_comments,
+    )
+
+
+def unquote_identifier(name: str) -> str:
+    """Returns a matched identifier with its double quotes and escaping removed."""
+    if len(name) >= 2 and name.startswith('"') and name.endswith('"'):
+        return name[1:-1].replace('""', '"')
+    return name
 
 
 def split_statements(sql: str) -> list[str]:
@@ -149,8 +179,8 @@ def assert_safe_sql(sql: str, allowed_tables: set[str] | None = None) -> str:
             )
 
     permitted = {name.lower() for name in (allowed_tables or set())}
-    for match in _TABLE_MUTATING.finditer(scrubbed):
-        target = match.group(1)
+    for match in _TABLE_MUTATING.finditer(strip_string_literals(sql)):
+        target = unquote_identifier(match.group(1))
         if target.lower() not in permitted:
             logger.warning("Rejected SQL targeting table '%s', which isn't in this session.", target)
             raise UnsafeSqlError(
