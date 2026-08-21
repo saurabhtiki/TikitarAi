@@ -110,7 +110,12 @@ else:
             st.Page("app_pages/run_task.py", title="Run a task", icon="📊")
         ],
         "Utilities": [
-            st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon="🧹")
+            st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon="🧹"),
+            st.Page("app_pages/add_files.py", title="Append Files", icon="➕"),
+            st.Page("app_pages/mergedata.py", title="Merge Files", icon="🔀"),
+            st.Page("app_pages/PdfExtracter.py", title="PDF Extracter", icon="🗂️"),
+            st.Page("app_pages/reco_any.py", title="Reconcile Data", icon="↔️"),
+            st.Page("app_pages/reco2B.py", title="Reconcile GSTR-2B", icon="📄")
         ],
         "Account": [st.Page("app_pages/settings.py", title="Settings", icon=":material/settings:")],
     }
