@@ -913,6 +913,41 @@ def _aggregation_label(column: str, function: str) -> str:
     return f"{function}_of_{column}"
 
 
+def apply_output_names(result: pd.DataFrame, params: dict) -> pd.DataFrame:
+    """Renames a reshape's own output columns, from the dialog's "Rename columns" boxes.
+
+    Anything named here that the reshape didn't produce is skipped without a warning: a
+    pivot's spread-across columns come from the data, so last month's `North` legitimately
+    disappears when this month has no northern rows.
+    """
+    output_names = params.get("output_names") or {}
+    if not output_names:
+        return result
+
+    renamed = [str(output_names.get(column, column)) for column in result.columns]
+    result = result.copy()
+    result.columns = _dedupe_columns(renamed)
+    return result
+
+
+def _validate_output_names(params: dict, action: str) -> None:
+    """Checks the optional `output_names` param shared by the three reshapes.
+
+    The names it maps *from* are the reshape's own output, which isn't known until it
+    runs, so only the shape and the new names are checked here.
+    """
+    output_names = params.get("output_names")
+    if output_names is None:
+        return
+    if not isinstance(output_names, dict):
+        raise InvalidStepError(f"{action}: the column renames must be a mapping.")
+    for produced, new_name in output_names.items():
+        if not isinstance(produced, str):
+            raise InvalidStepError(f"{action}: '{produced}' isn't a column name.")
+        if not isinstance(new_name, str) or not new_name.strip():
+            raise InvalidStepError(f"{action}: '{produced}' needs a non-empty new name.")
+
+
 def _apply_group_summarise(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, list[str]]:
     group_by = list(params.get("group_by") or [])
     aggregations = list(params.get("aggregations") or [])
@@ -955,7 +990,7 @@ def _apply_group_summarise(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFr
         constant = pd.Series(0, index=frame.index)
         result = frame.groupby(constant, observed=True).agg(**named).reset_index(drop=True)
 
-    return result, warnings_out
+    return apply_output_names(result, params), warnings_out
 
 
 def _describe_group_summarise(params: dict) -> str:
@@ -969,7 +1004,8 @@ def _describe_group_summarise(params: dict) -> str:
 
 
 def _validate_group_summarise(params: dict, columns: list[str]) -> None:
-    _require_keys(params, {"group_by", "aggregations"}, "Summarise")
+    _require_keys(params, {"group_by", "aggregations", "output_names"}, "Summarise")
+    _validate_output_names(params, "Summarise")
 
     group_by = params.get("group_by") or []
     if group_by:
@@ -1002,36 +1038,88 @@ def _summarise_columns(params: dict) -> list[str]:
     return list(params.get("group_by") or []) + [column for column in aggregated if isinstance(column, str)]
 
 
+def _pivot_aggregations(params: dict) -> list[tuple[str, str]]:
+    """The pivot's value columns and the function each is combined with.
+
+    Two shapes are accepted. The current one is `aggregations`, a list of
+    `{"column", "function"}` — one pivot can show the min and the max of the same column.
+    Templates saved before that held a single `values` column and one `function`, and are
+    read here as a one-entry list rather than migrated, so an old saved template replays
+    to exactly what it produced when it was saved.
+    """
+    aggregations = params.get("aggregations")
+    if isinstance(aggregations, list):
+        return [
+            (aggregation.get("column"), aggregation.get("function"))
+            for aggregation in aggregations
+            if isinstance(aggregation, dict)
+        ]
+    return [(params.get("values"), params.get("function") or "sum")]
+
+
+def _pivot_value_label(column: str, function: str, spread_value, single: bool) -> str:
+    """Names one cell column of the pivot.
+
+    A pivot with one value column keeps the bare spread-across value as its heading — the
+    familiar `Jan`, `Feb` — because there is nothing to tell apart. Several of them need
+    the value and its function in the heading or the columns are unreadable.
+    """
+    heading = _flatten_label(spread_value)
+    if single:
+        return heading
+    return f"{_aggregation_label(column, function)} / {heading}"
+
+
 def _apply_pivot(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, list[str]]:
     index = list(params.get("index") or [])
     pivot_column = params.get("columns")
-    value_column = params.get("values")
-    function = params.get("function", "sum")
 
     existing_index, missing_index = _present(frame, index)
     warnings_out = _missing_warning(missing_index)
 
-    absent = [column for column in (pivot_column, value_column) if column not in frame.columns]
-    if absent or not existing_index:
+    if pivot_column not in frame.columns or not existing_index:
         warnings_out.append("Pivot needs its row, column and value columns, so the table is unchanged.")
         return frame, warnings_out
-    if function in NUMERIC_ONLY_AGGREGATIONS and not is_numeric_dtype(frame[value_column]):
-        warnings_out.append(
-            f"'{value_column}' isn't a numeric column, so it can't be pivoted with {function}. "
-            f"Set it to numeric first, or pivot with count."
-        )
+
+    usable: list[tuple[str, str]] = []
+    for column, function in _pivot_aggregations(params):
+        if column not in frame.columns:
+            warnings_out.append(f"Skipped the {function} of '{column}': it isn't in the table any more.")
+            continue
+        if function in NUMERIC_ONLY_AGGREGATIONS and not is_numeric_dtype(frame[column]):
+            warnings_out.append(
+                f"'{column}' isn't a numeric column, so it can't be pivoted with {function}. "
+                f"Set it to numeric first, or pivot with count."
+            )
+            continue
+        usable.append((column, function))
+
+    if not usable:
+        warnings_out.append("Pivot has no value column left to fill the grid, so the table is unchanged.")
         return frame, warnings_out
 
-    result = pd.pivot_table(
-        frame,
-        index=existing_index,
-        columns=pivot_column,
-        values=value_column,
-        aggfunc=PANDAS_AGGREGATIONS[function],
-        dropna=False,
-        observed=True,
-    ).reset_index()
-    result.columns = _dedupe_columns([_flatten_label(label) for label in result.columns])
+    # One `pivot_table` call per value-and-function pair, joined side by side, rather than
+    # one call with a dict `aggfunc`: pandas nests the resulting labels differently
+    # depending on how many values and functions it was given, and naming the columns here
+    # keeps a two-function pivot reading the same way as a one-function pivot.
+    single = len(usable) == 1
+    blocks = []
+    labels: list[str] = list(existing_index)
+    for column, function in usable:
+        block = pd.pivot_table(
+            frame,
+            index=existing_index,
+            columns=pivot_column,
+            values=column,
+            aggfunc=PANDAS_AGGREGATIONS[function],
+            dropna=False,
+            observed=True,
+        )
+        labels.extend(_pivot_value_label(column, function, label, single) for label in block.columns)
+        blocks.append(block)
+
+    result = pd.concat(blocks, axis=1).reset_index()
+    result.columns = _dedupe_columns(labels)
 
     fill_value = _coerce_fill_value(params.get("fill_value"))
     if fill_value is not None:
@@ -1039,45 +1127,60 @@ def _apply_pivot(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, list[
         # renamed a spread-across column that clashed with a row column's name.
         warnings_out.extend(_fill_pivot_gaps(result, list(result.columns)[len(existing_index) :], fill_value))
 
+    result = apply_output_names(result, params)
     if len(result.columns) > MAX_PIVOT_COLUMNS:
         warnings_out.append(
             f"This pivot produced {len(result.columns):,} columns. Anything past about "
             f"{MAX_PIVOT_COLUMNS:,} is hard to read and slow to export — pick a column with fewer "
-            f"distinct values to spread across."
+            f"distinct values to spread across, or fewer values to show."
         )
     return result, warnings_out
 
 
 def _describe_pivot(params: dict) -> str:
+    pairs = ", ".join(f"{function} of {column}" for column, function in _pivot_aggregations(params))
     return (
-        f"Pivoted {params.get('function')} of {params.get('values')} with "
-        f"{', '.join(params.get('index') or [])} down the side and {params.get('columns')} across the top"
+        f"Pivoted {pairs} with {', '.join(params.get('index') or [])} down the side and "
+        f"{params.get('columns')} across the top"
     )
 
 
 def _validate_pivot(params: dict, columns: list[str]) -> None:
-    _require_keys(params, {"index", "columns", "values", "function", "fill_value"}, "Pivot")
+    # Either shape of value parameters is accepted, but not a mix of the two: `aggregations`
+    # alongside a stale `values` would leave it unclear which one the pivot ran on.
+    allowed = {"index", "columns", "fill_value", "output_names"}
+    allowed |= {"aggregations"} if "aggregations" in params else {"values", "function"}
+    _require_keys(params, allowed, "Pivot")
+    _validate_output_names(params, "Pivot")
     _require_columns_exist(params.get("index") or [], columns, "Pivot")
 
     index = params["index"]
     pivot_column = params.get("columns")
-    value_column = params.get("values")
+    if pivot_column not in columns:
+        raise InvalidStepError(f"Pivot: no such column to spread across the top: {pivot_column}.")
+    if pivot_column in index:
+        raise InvalidStepError("Pivot: a row column can't also be the column spread across the top.")
 
-    for role, column in (("column to spread across the top", pivot_column), ("value column", value_column)):
+    aggregations = _pivot_aggregations(params)
+    if not aggregations:
+        raise InvalidStepError("Pivot needs at least one column to fill the grid.")
+
+    for column, function in aggregations:
         if column not in columns:
-            raise InvalidStepError(f"Pivot: no such {role}: {column}.")
-    if pivot_column == value_column:
-        raise InvalidStepError("Pivot: the column spread across the top can't also be the value column.")
-    if pivot_column in index or value_column in index:
-        raise InvalidStepError("Pivot: a row column can't also be the column spread across the top or the value.")
-    if params.get("function") not in AGGREGATION_FUNCTIONS:
-        raise InvalidStepError(
-            f"Pivot: '{params.get('function')}' isn't a valid function. Choose one of {', '.join(AGGREGATION_FUNCTIONS)}."
-        )
+            raise InvalidStepError(f"Pivot: no such value column: {column}.")
+        if column == pivot_column or column in index:
+            raise InvalidStepError(
+                "Pivot: a value column can't also be a row column or the column spread across the top."
+            )
+        if function not in AGGREGATION_FUNCTIONS:
+            raise InvalidStepError(
+                f"Pivot: '{function}' isn't a valid function for '{column}'. "
+                f"Choose one of {', '.join(AGGREGATION_FUNCTIONS)}."
+            )
 
 
 def _pivot_columns(params: dict) -> list[str]:
-    named = [params.get("columns"), params.get("values")]
+    named = [params.get("columns")] + [column for column, _ in _pivot_aggregations(params)]
     return list(params.get("index") or []) + [column for column in named if isinstance(column, str)]
 
 
@@ -1111,7 +1214,7 @@ def _apply_unpivot(frame: pd.DataFrame, params: dict) -> tuple[pd.DataFrame, lis
     # answer there; a single-type stack keeps whatever type it already had.
     if result[value_name].dtype == "object":
         result[value_name] = result[value_name].astype("string")
-    return result, warnings_out
+    return apply_output_names(result, params), warnings_out
 
 
 def _describe_unpivot(params: dict) -> str:
@@ -1123,7 +1226,10 @@ def _describe_unpivot(params: dict) -> str:
 
 
 def _validate_unpivot(params: dict, columns: list[str]) -> None:
-    _require_keys(params, {"id_columns", "value_columns", "variable_name", "value_name"}, "Unpivot")
+    _require_keys(
+        params, {"id_columns", "value_columns", "variable_name", "value_name", "output_names"}, "Unpivot"
+    )
+    _validate_output_names(params, "Unpivot")
     _require_columns_exist(params.get("id_columns") or [], columns, "Unpivot")
 
     id_columns = params["id_columns"]

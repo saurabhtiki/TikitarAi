@@ -694,6 +694,160 @@ def test_pivot_warns_when_it_produces_too_many_columns():
     assert any("columns" in warning for warning in warnings_out)
 
 
+def test_pivot_shows_several_values_each_with_its_own_function():
+    """The whole point of `aggregations`: a min and a max of the same column side by side,
+    which one `values` column and one `function` could never express."""
+    result, warnings_out = run(
+        "pivot",
+        sales_frame(),
+        {
+            "index": ["region"],
+            "columns": "month",
+            "aggregations": [
+                {"column": "amount", "function": "min"},
+                {"column": "amount", "function": "max"},
+            ],
+            "fill_value": None,
+        },
+    )
+
+    assert list(result.columns) == [
+        "region",
+        "min_of_amount / Feb",
+        "min_of_amount / Jan",
+        "max_of_amount / Feb",
+        "max_of_amount / Jan",
+    ]
+    assert result.set_index("region").loc["N", "min_of_amount / Jan"] == 5.0
+    assert result.set_index("region").loc["N", "max_of_amount / Jan"] == 10.0
+    assert warnings_out == []
+
+
+def test_a_pivot_saved_before_several_values_still_replays():
+    """Templates hold the params they were saved with, so the old `values` + `function`
+    pair has to keep producing exactly what it produced then — bare month headings and
+    all."""
+    old_shape, _ = run(
+        "pivot",
+        sales_frame(),
+        {"index": ["region"], "columns": "month", "values": "amount", "function": "sum", "fill_value": None},
+    )
+    new_shape, _ = run(
+        "pivot",
+        sales_frame(),
+        {
+            "index": ["region"],
+            "columns": "month",
+            "aggregations": [{"column": "amount", "function": "sum"}],
+            "fill_value": None,
+        },
+    )
+
+    pd.testing.assert_frame_equal(old_shape, new_shape)
+    assert list(old_shape.columns) == ["region", "Feb", "Jan"]
+
+
+def test_pivot_skips_a_value_column_that_has_gone_and_keeps_the_rest():
+    result, warnings_out = run(
+        "pivot",
+        sales_frame(),
+        {
+            "index": ["region"],
+            "columns": "month",
+            "aggregations": [
+                {"column": "gone", "function": "sum"},
+                {"column": "amount", "function": "sum"},
+            ],
+            "fill_value": None,
+        },
+    )
+
+    assert list(result.columns) == ["region", "Feb", "Jan"]
+    assert "gone" in warnings_out[0]
+
+
+def test_pivot_rejects_a_mix_of_the_old_and_new_value_parameters():
+    with pytest.raises(InvalidStepError, match="unexpected parameters"):
+        get_spec("pivot").validate(
+            {
+                "index": ["region"],
+                "columns": "month",
+                "values": "amount",
+                "aggregations": [{"column": "amount", "function": "sum"}],
+                "fill_value": None,
+            },
+            ["region", "month", "amount"],
+        )
+
+
+def test_a_summary_renames_its_own_output_columns():
+    result, warnings_out = run(
+        "group_summarise",
+        sales_frame(),
+        {
+            "group_by": ["region"],
+            "aggregations": [{"column": "amount", "function": "sum"}],
+            "output_names": {"sum_of_amount": "Total sales", "region": "Area"},
+        },
+    )
+
+    assert list(result.columns) == ["Area", "Total sales"]
+    assert warnings_out == []
+
+
+def test_a_rename_of_a_column_the_reshape_no_longer_produces_is_ignored():
+    """A pivot's headings come from the data, so last month's `North` legitimately
+    disappears when this month has no northern rows. That is not worth a warning."""
+    result, warnings_out = run(
+        "pivot",
+        sales_frame(),
+        {
+            "index": ["region"],
+            "columns": "month",
+            "values": "amount",
+            "function": "sum",
+            "fill_value": None,
+            "output_names": {"Jan": "January", "Mar": "March"},
+        },
+    )
+
+    assert list(result.columns) == ["region", "Feb", "January"]
+    assert warnings_out == []
+
+
+def test_renaming_two_output_columns_to_one_name_keeps_them_apart():
+    """Duplicate labels break the DuckDB registration behind Chat with Data, so they are
+    made unique the way a promoted header is rather than rejected."""
+    result, _ = run(
+        "group_summarise",
+        sales_frame(),
+        {
+            "group_by": ["region"],
+            "aggregations": [
+                {"column": "amount", "function": "min"},
+                {"column": "amount", "function": "max"},
+            ],
+            "output_names": {"min_of_amount": "Amount", "max_of_amount": "Amount"},
+        },
+    )
+
+    assert list(result.columns) == ["region", "Amount", "Amount.1"]
+
+
+def test_a_summary_rejects_a_blank_new_column_name():
+    with pytest.raises(InvalidStepError, match="non-empty new name"):
+        get_spec("unpivot").validate(
+            {
+                "id_columns": ["region"],
+                "value_columns": ["amount"],
+                "variable_name": "Attribute",
+                "value_name": "Value",
+                "output_names": {"Value": "  "},
+            },
+            ["region", "month", "amount"],
+        )
+
+
 def test_pivot_rejects_reusing_one_column_in_two_roles():
     with pytest.raises(InvalidStepError, match="can't also be"):
         get_spec("pivot").validate(

@@ -41,8 +41,10 @@ from cleaner.steps import (
     FILL_STRATEGIES,
     MAX_PIVOT_COLUMNS,
     MAX_ROUNDING_DECIMALS,
+    NUMERIC_ONLY_AGGREGATIONS,
     RESHAPE_ACTIONS,
     ROUNDING_DIRECTIONS,
+    apply_output_names,
     get_spec,
 )
 from engine import session as engine_session
@@ -744,17 +746,17 @@ def _still_an_option(value, options: list):
     return options[0] if options else None
 
 
-def _render_reshape_preview(table: session.TableState, action: str, frame, params: dict):
-    """Runs the reshape and shows the result, returning it so the footer can gate on it.
+def _run_reshape(table: session.TableState, action: str, frame, params: dict):
+    """Runs the reshape for the dialog, returning `(result, warnings)` or None if it can't.
 
-    A live grid rather than the `_impact_caption` sentence the cleaning dialogs use: "this
-    removes 40 rows" says nothing useful about a pivot, whereas seeing the shape is the
-    whole decision.
+    Split from the preview below because the "Rename columns" boxes need the reshape's
+    output column names before anything is drawn, and running the reshape a second time
+    each rerun just to learn them would double the work on a large table.
     """
     try:
         spec = get_spec(action)
         spec.validate(params, list(frame.columns))
-        result, warnings_out = spec.apply(frame, params)
+        return spec.apply(frame, params)
     except InvalidStepError as error:
         st.info(str(error), icon=":material/info:")
         return None
@@ -763,6 +765,38 @@ def _render_reshape_preview(table: session.TableState, action: str, frame, param
         st.error(f"This couldn't be worked out from the current data: {error}")
         return None
 
+
+def _rename_output_columns(table: session.TableState, action: str, saved: dict, columns: list[str]) -> dict:
+    """The "Rename columns" section: one box per column the reshape produces.
+
+    An expander rather than a second dialog, because Streamlit will not open a dialog from
+    inside a dialog. Blank means "leave this heading alone", so the renames saved with the
+    step are only the ones actually typed.
+    """
+    saved_names = saved.get("output_names") or {}
+    with st.expander("Rename columns", icon=":material/edit:"):
+        st.caption("Give the new table friendlier headings. Leave a box empty to keep the heading as it is.")
+        renames = {}
+        for column in columns:
+            typed = st.text_input(
+                column,
+                value=str(saved_names.get(column, "")),
+                placeholder=column,
+                key=f"dc_rename_output_{action}_{table.table_id}_{column}",
+                help=f"The heading '{column}' will carry in the new table and in the download.",
+            ).strip()
+            if typed and typed != column:
+                renames[column] = typed
+    return renames
+
+
+def _show_reshape_preview(table: session.TableState, action: str, result, warnings_out: list[str]) -> None:
+    """Shows the reshape's result.
+
+    A live grid rather than the `_impact_caption` sentence the cleaning dialogs use: "this
+    removes 40 rows" says nothing useful about a pivot, whereas seeing the shape is the
+    whole decision.
+    """
     for warning in warnings_out:
         st.warning(warning, icon=":material/error:")
 
@@ -773,7 +807,61 @@ def _render_reshape_preview(table: session.TableState, action: str, frame, param
         width="stretch",
         hide_index=True,
     )
-    return result
+
+
+def _render_reshape(table: session.TableState, action: str, frame, params: dict, ready: bool):
+    """Runs the reshape, offers a rename of its output columns, and previews the result.
+
+    Returns that result together with the params that produced it: the renames are part of
+    the saved step, so they have to be folded back in before the Save footer runs.
+    """
+    if not ready:
+        return None, params
+
+    ran = _run_reshape(table, action, frame, params)
+    if ran is None:
+        return None, params
+    result, warnings_out = ran
+
+    output_names = _rename_output_columns(table, action, _saved_params(table, action), list(result.columns))
+    if output_names:
+        params = {**params, "output_names": output_names}
+        result = apply_output_names(result, params)
+
+    _show_reshape_preview(table, action, result, warnings_out)
+    return result, params
+
+
+def _aggregation_rows(
+    table: session.TableState, action: str, frame, columns: list[str], saved: list[dict]
+) -> list[dict]:
+    """One "Using" picker per chosen column, and the aggregations they add up to.
+
+    A single shared picker would cross every column with every function, so asking for the
+    min of Salary and the count of Days would also produce a meaningless min of Days. Each
+    column is offered only the functions its own type supports.
+    """
+    numeric = set(profiling.numeric_columns(frame))
+    aggregations = []
+    for column in columns:
+        options = (
+            AGGREGATION_FUNCTIONS
+            if column in numeric
+            else [function for function in AGGREGATION_FUNCTIONS if function not in NUMERIC_ONLY_AGGREGATIONS]
+        )
+        saved_functions = [
+            aggregation.get("function") for aggregation in saved if aggregation.get("column") == column
+        ]
+        default = _keep_options(saved_functions, options) or ["sum" if column in numeric else "count"]
+        functions = st.multiselect(
+            f"Using — {column}",
+            options=options,
+            default=default,
+            key=f"dc_agg_functions_{action}_{table.table_id}_{column}",
+            help=f"What to work out for {column}. Pick more than one to get a column each, such as a min and a max.",
+        )
+        aggregations.extend({"column": column, "function": function} for function in functions)
+    return aggregations
 
 
 def _save_summary(table: session.TableState, action: str, params: dict, result) -> None:
@@ -848,7 +936,8 @@ def _dialog_group_summarise(table, frame) -> None:
     )
     value_options = [column for column in all_columns if column not in group_by]
     numeric = set(profiling.numeric_columns(frame))
-    saved_values = [aggregation.get("column") for aggregation in saved.get("aggregations") or []]
+    saved_aggregations = saved.get("aggregations") or []
+    saved_values = [aggregation.get("column") for aggregation in saved_aggregations]
 
     columns = st.multiselect(
         "Total up",
@@ -858,21 +947,25 @@ def _dialog_group_summarise(table, frame) -> None:
         key=f"dc_summarise_values_{table.table_id}",
         help="Sum, average and median need a numeric column — the others work on text too.",
     )
-    functions = st.multiselect(
-        "Using",
-        options=AGGREGATION_FUNCTIONS,
-        default=list(dict.fromkeys(aggregation.get("function") for aggregation in saved.get("aggregations") or []))
-        or ["sum"],
-        key=f"dc_summarise_functions_{table.table_id}",
-        help="Pick more than one to get a column per function, such as both a sum and a count.",
-    )
+    aggregations = _aggregation_rows(table, "group_summarise", frame, columns, saved_aggregations)
 
-    params = {
-        "group_by": group_by,
-        "aggregations": [{"column": column, "function": function} for column in columns for function in functions],
-    }
-    result = _render_reshape_preview(table, "group_summarise", frame, params) if columns and functions else None
+    params = {"group_by": group_by, "aggregations": aggregations}
+    result, params = _render_reshape(table, "group_summarise", frame, params, ready=bool(aggregations))
     _save_summary(table, "group_summarise", params, result)
+
+
+def _saved_pivot_aggregations(saved: dict) -> list[dict]:
+    """The saved pivot's value columns, in either params shape.
+
+    A pivot saved before several values were allowed holds one `values` column and one
+    `function`; reading that as a one-entry list lets Edit open it without losing anything.
+    """
+    aggregations = saved.get("aggregations")
+    if isinstance(aggregations, list) and aggregations:
+        return aggregations
+    if saved.get("values"):
+        return [{"column": saved["values"], "function": saved.get("function") or "sum"}]
+    return []
 
 
 def _dialog_pivot(table, frame) -> None:
@@ -898,41 +991,34 @@ def _dialog_pivot(table, frame) -> None:
         across_options,
     )
     value_options = [column for column in across_options if column != across]
-    values = _still_an_option(
-        st.selectbox(
-            "Values",
-            options=value_options,
-            index=_option_index(saved.get("values"), value_options) if value_options else None,
-            key=f"dc_pivot_values_{table.table_id}",
-            help="The column filling the grid.",
-        ),
-        value_options,
+    numeric = set(profiling.numeric_columns(frame))
+    saved_aggregations = _saved_pivot_aggregations(saved)
+    saved_values = [aggregation.get("column") for aggregation in saved_aggregations]
+
+    values = st.multiselect(
+        "Values",
+        options=value_options,
+        default=_keep_options(list(dict.fromkeys(saved_values)), value_options),
+        format_func=lambda column: column if column in numeric else f"{column} (text)",
+        key=f"dc_pivot_values_{table.table_id}",
+        help="The columns filling the grid. Pick more than one to show, say, a min and a max side by side.",
     )
-    function_column, fill_column = st.columns(2)
-    with function_column:
-        function = st.selectbox(
-            "Using",
-            options=AGGREGATION_FUNCTIONS,
-            index=_option_index(saved.get("function"), AGGREGATION_FUNCTIONS),
-            key=f"dc_pivot_function_{table.table_id}",
-            help="How to combine rows that land in the same cell.",
-        )
-    with fill_column:
-        fill_value = st.text_input(
-            "Fill empty cells with",
-            value=str(saved.get("fill_value") or ""),
-            key=f"dc_pivot_fill_{table.table_id}",
-            help="Leave blank to leave empty cells empty. Type 0 to show gaps as zeroes.",
-        ).strip()
+    aggregations = _aggregation_rows(table, "pivot", frame, values, saved_aggregations)
+
+    fill_value = st.text_input(
+        "Fill empty cells with",
+        value=str(saved.get("fill_value") or ""),
+        key=f"dc_pivot_fill_{table.table_id}",
+        help="Leave blank to leave empty cells empty. Type 0 to show gaps as zeroes.",
+    ).strip()
 
     params = {
         "index": index,
         "columns": across,
-        "values": values,
-        "function": function,
+        "aggregations": aggregations,
         "fill_value": fill_value or None,
     }
-    result = _render_reshape_preview(table, "pivot", frame, params) if index and across and values else None
+    result, params = _render_reshape(table, "pivot", frame, params, ready=bool(index and across and aggregations))
     _save_summary(table, "pivot", params, result)
 
 
@@ -977,7 +1063,7 @@ def _dialog_unpivot(table, frame) -> None:
         "variable_name": variable_name or DEFAULT_VARIABLE_NAME,
         "value_name": value_name or DEFAULT_VALUE_NAME,
     }
-    result = _render_reshape_preview(table, "unpivot", frame, params) if id_columns else None
+    result, params = _render_reshape(table, "unpivot", frame, params, ready=bool(id_columns))
     _save_summary(table, "unpivot", params, result)
 
 

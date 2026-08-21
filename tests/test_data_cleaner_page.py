@@ -727,10 +727,16 @@ def _summary_frame(app, table: session.TableState, payload: bytes) -> pd.DataFra
 
 
 def _save_group_summary(app, table_id: str, group_by: list[str], columns: list[str], functions: list[str]):
+    """Fills in the Group & total dialog and saves it.
+
+    `functions` is applied to every column in `columns`; the dialog has a picker per
+    column, so a per-column choice is made by driving those keys directly.
+    """
     _open(app, table_id, "group_summarise")
     app.multiselect(key=f"dc_summarise_groupby_{table_id}").set_value(group_by).run()
     app.multiselect(key=f"dc_summarise_values_{table_id}").set_value(columns).run()
-    app.multiselect(key=f"dc_summarise_functions_{table_id}").set_value(functions).run()
+    for column in columns:
+        app.multiselect(key=f"dc_agg_functions_group_summarise_{table_id}_{column}").set_value(functions).run()
     return _click_and_settle(app, f"dc_save_summary_group_summarise_{table_id}")
 
 
@@ -854,14 +860,69 @@ def test_saving_a_pivot_produces_a_column_per_distinct_value(tmp_path, monkeypat
     _open(app, table_id, "pivot")
     app.multiselect(key=f"dc_pivot_index_{table_id}").set_value(["order_id"]).run()
     app.selectbox(key=f"dc_pivot_columns_{table_id}").set_value("region").run()
-    app.selectbox(key=f"dc_pivot_values_{table_id}").set_value("amount").run()
-    app.selectbox(key=f"dc_pivot_function_{table_id}").set_value("sum").run()
+    app.multiselect(key=f"dc_pivot_values_{table_id}").set_value(["amount"]).run()
+    app.multiselect(key=f"dc_agg_functions_pivot_{table_id}_amount").set_value(["sum"]).run()
     _click_and_settle(app, f"dc_save_summary_pivot_{table_id}")
 
     assert not app.exception
     frame = _summary_frame(app, _only_summary(app), SALES_CSV)
     assert list(frame.columns) == ["order_id", "North", "South"]
     assert frame.set_index("order_id").loc["a", "North"] == 15.0
+
+
+def test_a_pivot_can_show_several_values_each_with_its_own_function(tmp_path, monkeypatch):
+    """The point of the per-column pickers: a min and a max of the same column side by
+    side, which the old single value + single function pair could not express."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    table_id = _only_table(app).table_id
+
+    _open(app, table_id, "pivot")
+    app.multiselect(key=f"dc_pivot_index_{table_id}").set_value(["order_id"]).run()
+    app.selectbox(key=f"dc_pivot_columns_{table_id}").set_value("region").run()
+    app.multiselect(key=f"dc_pivot_values_{table_id}").set_value(["amount"]).run()
+    app.multiselect(key=f"dc_agg_functions_pivot_{table_id}_amount").set_value(["min", "max"]).run()
+    _click_and_settle(app, f"dc_save_summary_pivot_{table_id}")
+
+    assert not app.exception
+    frame = _summary_frame(app, _only_summary(app), SALES_CSV)
+    assert list(frame.columns) == [
+        "order_id",
+        "min_of_amount / North",
+        "min_of_amount / South",
+        "max_of_amount / North",
+        "max_of_amount / South",
+    ]
+
+
+def test_renaming_a_summarys_columns_carries_into_the_saved_table(tmp_path, monkeypatch):
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    table_id = _only_table(app).table_id
+
+    _open(app, table_id, "group_summarise")
+    app.multiselect(key=f"dc_summarise_groupby_{table_id}").set_value(["region"]).run()
+    app.multiselect(key=f"dc_summarise_values_{table_id}").set_value(["amount"]).run()
+    app.multiselect(key=f"dc_agg_functions_group_summarise_{table_id}_amount").set_value(["sum"]).run()
+    app.text_input(key=f"dc_rename_output_group_summarise_{table_id}_sum_of_amount").set_value("Total sales").run()
+    _click_and_settle(app, f"dc_save_summary_group_summarise_{table_id}")
+
+    assert not app.exception
+    summary = _only_summary(app)
+    assert summary.reshape["params"]["output_names"] == {"sum_of_amount": "Total sales"}
+    assert list(_summary_frame(app, summary, SALES_CSV).columns) == ["region", "Total sales"]
+
+
+def test_a_text_column_is_not_offered_the_numeric_only_functions(tmp_path, monkeypatch):
+    """Sum, average and median need numbers, so offering them for a text column would only
+    produce a warning and a missing column later."""
+    app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+    table_id = _only_table(app).table_id
+
+    _open(app, table_id, "group_summarise")
+    app.multiselect(key=f"dc_summarise_groupby_{table_id}").set_value(["region"]).run()
+    app.multiselect(key=f"dc_summarise_values_{table_id}").set_value(["order_id"]).run()
+
+    offered = app.multiselect(key=f"dc_agg_functions_group_summarise_{table_id}_order_id").options
+    assert "sum" not in offered and "count" in offered
 
 
 def test_saving_an_unpivot_stacks_the_chosen_columns(tmp_path, monkeypatch):
