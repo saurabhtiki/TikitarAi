@@ -1,4 +1,8 @@
 import logging
+import zipfile
+import json
+from datetime import datetime, date
+from io import BytesIO
 from pathlib import Path
 import streamlit as st
 from PIL import Image
@@ -114,11 +118,63 @@ else:
     # conditionally rather than left in the sidebar for everyone to be refused at, the same
     # call `user_management.py` gets — the page still carries its own `require_role` guard,
     # since navigation is not access control.
+    if "backup_zip" not in st.session_state:
+        st.session_state.backup_zip = None
+
+    if "backup_ready" not in st.session_state:
+        st.session_state.backup_ready = False
+    #function to create a zip file of the backup paths
+    def create_backup_zip():
+        settings_path = Path("settings.json")
+        with open(settings_path, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+
+        backup_list = settings.get("backup", {}).get("backupList", [])
+        if not backup_list:
+            raise ValueError("No backup paths configured in settings.json")
+
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for entry in backup_list:
+                path = Path(entry)
+                if not path.exists():
+                    raise FileNotFoundError(f"Backup path not found: {entry}")
+
+                if path.is_file():
+                    zf.write(path, path.name)
+                elif path.is_dir():
+                    for file_path in sorted(path.rglob("*")):
+                        if file_path.is_file():
+                            arcname = str(file_path.relative_to(path.parent))
+                            zf.write(file_path, arcname)
+
+        buffer.seek(0)
+        return buffer
     if st.session_state.get("role") in ("admin", "superuser"):
         pages["Automate"].append(
             st.Page("app_pages/task_builder.py", title="Task builder", icon="🛠️")
         )
+    #button for backup on click download backup files
+        if st.sidebar.button(":material/backup: Backup", width="stretch", key="backup_btn"):
+            try:
+                zip_buffer = create_backup_zip()
+                st.session_state.backup_zip = zip_buffer.getvalue()
+                st.session_state.backup_ready = True
+                st.toast("Backup created successfully!", icon="✅")
+            except Exception as e:
+                st.toast(f"Backup failed: {str(e)}", icon="❌")
 
+            if st.session_state.get("backup_ready"):
+                if st.sidebar.download_button(
+                    "📥 Download Backup",
+                    data=st.session_state.backup_zip,
+                    file_name=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                    mime="application/zip",
+                    key="download_backup_btn"
+                ):
+                    st.toast("Backup downloaded successfully!", icon="✅")
+                    st.session_state.backup_ready = False
+                    st.session_state.backup_zip = None
     if st.session_state.get("role") == "superuser":
         pages["Admin"] = [
             st.Page(

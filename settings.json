@@ -1,0 +1,8 @@
+{
+"backup": {
+      "backupList": [
+        "data",
+        "settings.json"
+      ]
+    }
+}
