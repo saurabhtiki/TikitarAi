@@ -1707,40 +1707,43 @@ def _render_pending_template_dialog(user_id: int) -> None:
 def _render_upload() -> list[session.TableState]:
     # Consumed before the uploader is instantiated: Streamlit won't allow a widget's own
     # session_state key to be written once that widget exists this run.
-    session.consume_start_over()
-
-    uploads = st.file_uploader(
-        "Upload CSV or Excel files",
-        type=["csv", "txt", "tsv", "xlsx", "xlsm"],
-        accept_multiple_files=True,
-        key=session.DC_UPLOADER_KEY,
-        max_upload_size=session.MAX_UPLOAD_SIZE_MB,
-        help="Every cell is read as text first, so leading zeros in IDs and account numbers survive.",
-    )
-
-    sheet_selection: dict[str, list[str]] = {}
-    for upload in uploads or []:
-        if loaders.is_csv(upload.name):
-            continue
-        try:
-            available = loaders.list_sheet_names(upload.getvalue(), upload.name)
-        except DataCleanerError as error:
-            st.error(str(error))
-            continue
-        sheet_selection[upload.file_id] = st.multiselect(
-            f"Sheets to clean from {upload.name}",
-            options=available,
-            default=available,
-            key=f"dc_sheets_{upload.file_id}",
-            help="Each selected sheet becomes its own tab and its own sheet in the download.",
+    #session.consume_start_over()
+   
+    #show in 2 columns in 1 container
+    with st.container(border=True,horizontal=True):
+        session.consume_start_over()
+        uploads = st.file_uploader(
+            "Upload CSV or Excel files,Each sheet in an Excel file becomes its own table.",
+            type=["csv", "txt", "tsv", "xlsx", "xlsm"],
+            accept_multiple_files=True,
+            key=session.DC_UPLOADER_KEY,
+            max_upload_size=session.MAX_UPLOAD_SIZE_MB,
+            help="Every cell is read as text first, so leading zeros in IDs and account numbers survive.",
         )
 
-    try:
-        return session.sync_tables(uploads, sheet_selection)
-    except DataCleanerError as error:
-        logger.exception("Could not load one or more uploaded tables.")
-        st.error(str(error))
-        return []
+        sheet_selection: dict[str, list[str]] = {}
+        for upload in uploads or []:
+            if loaders.is_csv(upload.name):
+                continue
+            try:
+                available = loaders.list_sheet_names(upload.getvalue(), upload.name)
+            except DataCleanerError as error:
+                st.error(str(error))
+                continue
+            sheet_selection[upload.file_id] = st.multiselect(
+                f"Sheets to clean from {upload.name}",
+                options=available,
+                default=available,
+                key=f"dc_sheets_{upload.file_id}",
+                help="Each selected sheet becomes its own tab and its own sheet in the download.",
+            )
+
+        try:
+            return session.sync_tables(uploads, sheet_selection)
+        except DataCleanerError as error:
+            logger.exception("Could not load one or more uploaded tables.")
+            st.error(str(error))
+            return []
 
 
 # --------------------------------------------------------------------------------------
@@ -1989,7 +1992,7 @@ def _render_table_tab(table: session.TableState, file_bytes: bytes) -> None:
     _render_command_bar(table)
     _render_pending_dialog(table, cleaned)
 
-    preview_column, log_column = st.columns([3, 2])
+    preview_column, log_column = st.columns([3, 1])
     with preview_column:
         _render_preview(table, cleaned)
     with log_column:
@@ -2079,9 +2082,9 @@ if profile is not None:
     render_sidebar(profile)
 
     user_id = st.session_state["user_id"]
-
-    st.subheader("🧹Data Cleaner")
-    st.write(":blue[**Upload files, clean each table, and download one multi-sheet workbook.**]")
+    with st.container(horizontal=True):
+        st.subheader("🧹Data Cleaner")
+        st.write(":blue[**Upload files, clean each table, and download one multi-sheet workbook.**]")
 
     # A container that is always here and usually empty. Writing the message straight onto
     # the page would make every element below it sit one position lower on the runs that
