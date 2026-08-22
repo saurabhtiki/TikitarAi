@@ -7,7 +7,15 @@
 {# The one deliberately unescaped value in this template. It is the reason
    `css_presets.validate_css` screens for `<script`, `<style` and `@import` — nothing
    else reaches the page unescaped. #}
-<style>{{ css | safe }}</style>
+{# Comments are typed in a text box, so the line breaks in them are the user's own.
+   HTML collapses every newline into a space, which would run a three-line comment
+   together as one line — `pre-wrap` keeps the breaks and still wraps long lines.
+   Written *before* the report stylesheet so a preset or a hand-edited sheet can still
+   override it. #}
+<style>
+.comment { white-space: pre-wrap; }
+{{ css | safe }}
+</style>
 </head>
 <body>
 <div class="report">

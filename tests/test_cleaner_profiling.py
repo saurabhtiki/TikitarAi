@@ -1,6 +1,12 @@
 import pandas as pd
 
 from cleaner.profiling import (
+    DATE_SAMPLE_ROWS,
+    DEFAULT_DATE_FORMAT,
+    best_date_format,
+    date_format_failures,
+    date_format_preview,
+    date_format_scores,
     CATEGORICAL,
     DATE,
     ID,
@@ -162,3 +168,107 @@ def test_text_columns_excludes_numeric_ones():
     frame = pd.DataFrame({"t": ["x"], "n": [1.0]})
 
     assert text_columns(frame) == ["t"]
+
+
+# --------------------------------------------------------------------------------------
+# Date format suggestion — the retype dialog pre-selects from these, so a wrong pick here
+# silently rewrites real dates (05-08-2024 read as 8 May instead of 5 August)
+# --------------------------------------------------------------------------------------
+
+
+DAY_FIRST_DATES = [
+    "05-08-2024",
+    "07-08-2024",
+    "14-08-2024",
+    "15-08-2024",
+    "17-08-2024",
+    "24-08-2024",
+    "30-08-2024",
+    "22-11-2024",
+]
+
+
+def test_day_first_dates_suggest_the_day_first_format():
+    """The reported bug: pandas guessed month-first off the first row and blanked every
+    date whose day exceeded 12."""
+    date_format, parsed, present, ambiguous = best_date_format(pd.Series(DAY_FIRST_DATES))
+
+    assert date_format == "%d-%m-%Y"
+    assert parsed == present == len(DAY_FIRST_DATES)
+    assert ambiguous is False
+
+
+def test_the_us_format_fails_on_days_past_the_twelfth():
+    scores = dict((fmt, hits) for fmt, hits, _ in date_format_scores(pd.Series(DAY_FIRST_DATES)))
+
+    assert scores["%d-%m-%Y"] == len(DAY_FIRST_DATES)
+    assert scores["%m-%d-%Y"] < len(DAY_FIRST_DATES)
+
+
+def test_slash_and_month_name_and_iso_styles_are_each_recognised():
+    assert best_date_format(pd.Series(["14/08/2024", "03/09/2024"]))[0] == "%d/%m/%Y"
+    assert best_date_format(pd.Series(["14-Aug-2024", "03-Sep-2024"]))[0] == "%d-%b-%Y"
+    assert best_date_format(pd.Series(["14-Aug-24", "03-Sep-24"]))[0] == "%d-%b-%y"
+    assert best_date_format(pd.Series(["2024-08-14", "2024-09-03"]))[0] == "%Y-%m-%d"
+
+
+def test_dates_that_fit_both_orders_are_flagged_ambiguous():
+    """Every day is 12 or lower, so day-first and month-first both parse — and disagree.
+    The user has to settle it, so the dialog must not present the guess as certain."""
+    _, _, _, ambiguous = best_date_format(pd.Series(["05-08-2024", "07-08-2024", "01-02-2024"]))
+
+    assert ambiguous is True
+
+
+def test_a_tie_prefers_day_first_over_the_us_order():
+    date_format, _, _, _ = best_date_format(pd.Series(["05-08-2024", "07-08-2024"]))
+
+    assert date_format == "%d-%m-%Y"
+
+
+def test_an_all_blank_column_suggests_the_default_without_failing():
+    date_format, parsed, present, ambiguous = best_date_format(pd.Series([None, None], dtype="object"))
+
+    assert date_format == DEFAULT_DATE_FORMAT
+    assert (parsed, present, ambiguous) == (0, 0, False)
+
+
+def test_scoring_reads_at_most_the_sample_cap():
+    long_column = pd.Series(["14-08-2024"] * (DATE_SAMPLE_ROWS + 250))
+
+    _, parsed, present, _ = best_date_format(long_column)
+
+    assert present == parsed == DATE_SAMPLE_ROWS
+
+
+def test_preview_shows_the_reading_so_a_wrong_pick_is_visible():
+    day_first = date_format_preview(pd.Series(["05-08-2024"]), "%d-%m-%Y")
+    month_first = date_format_preview(pd.Series(["05-08-2024"]), "%m-%d-%Y")
+
+    assert day_first == [("05-08-2024", "05 Aug 2024")]
+    assert month_first == [("05-08-2024", "08 May 2024")]
+
+
+def test_failures_name_the_values_that_could_not_be_read():
+    failures = date_format_failures(pd.Series(DAY_FIRST_DATES), "%m-%d-%Y")
+
+    assert "14-08-2024" in failures
+    assert "05-08-2024" not in failures
+
+
+def test_a_malformed_custom_format_scores_zero_instead_of_raising():
+    """The dialog lets the user type their own format; a typo must show as a red preview,
+    not a traceback."""
+    scores = date_format_scores(pd.Series(["14-08-2024"]), [("typo", "%Q-%Z-%Q")])
+
+    assert scores[0][1] == 0
+    assert date_format_preview(pd.Series(["14-08-2024"]), "%Q-%Z-%Q") == []
+
+
+def test_an_already_converted_column_still_previews():
+    """Retyping a date column that is already dates must not report a total wipe-out."""
+    already = pd.to_datetime(pd.Series(["2024-08-14", "2024-09-03"]))
+
+    _, parsed, present, _ = best_date_format(already)
+
+    assert parsed == present == 2

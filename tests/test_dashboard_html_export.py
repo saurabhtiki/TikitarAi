@@ -85,6 +85,18 @@ def test_headings_and_comments_are_escaped(frame):
     assert "5 &lt; 6 &amp; 7 &gt; 2" in html
 
 
+def test_a_multi_line_comment_keeps_its_line_breaks(frame):
+    item = PinnedItem(heading="Sales", frame=frame, comment="a\nb\nc")
+    html = build_html(_report_with(item), _css())
+    assert "a\nb\nc" in html  # the newlines survive into the page
+    assert ".comment { white-space: pre-wrap; }" in html  # and the browser honours them
+
+
+def test_the_report_stylesheet_still_wins_over_the_line_break_rule(frame):
+    html = build_html(_report_with(PinnedItem(heading="Sales", frame=frame)), _css())
+    assert html.index("white-space: pre-wrap") < html.index(_css())
+
+
 def test_cell_values_are_escaped():
     frame = pd.DataFrame({"note": ["<b>bold</b>"]})
     html = build_html(_report_with(PinnedItem(heading="Notes", frame=frame)), _css())

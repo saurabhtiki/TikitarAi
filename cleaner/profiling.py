@@ -110,6 +110,138 @@ def parse_datetime_series(series: pd.Series, date_format: str | None = None) -> 
     return parsed, failed
 
 
+DATE_FORMAT_CHOICES: list[tuple[str, str | None]] = [
+    ("Day-Month-Year — 14-08-2024", "%d-%m-%Y"),
+    ("Day-Month-Year — 14/08/2024", "%d/%m/%Y"),
+    ("Day-Month-Year (short) — 14-08-24", "%d-%m-%y"),
+    ("Day-Mon-Year — 14-Aug-2024", "%d-%b-%Y"),
+    ("Day-Mon-Year (short) — 14-Aug-24", "%d-%b-%y"),
+    ("Day Month Year — 14 August 2024", "%d %B %Y"),
+    ("Month-Day-Year (US) — 08-14-2024", "%m-%d-%Y"),
+    ("Month-Day-Year (US) — 08/14/2024", "%m/%d/%Y"),
+    ("Year-Month-Day — 2024-08-14", "%Y-%m-%d"),
+    ("Year/Month/Day — 2024/08/14", "%Y/%m/%d"),
+    ("Month-Year — 08-2024", "%m-%Y"),
+    ("Mon-Year — Aug-2024", "%b-%Y"),
+    ("With time — 14-08-2024 15:30", "%d-%m-%Y %H:%M"),
+    ("With time — 2024-08-14 15:30:00", "%Y-%m-%d %H:%M:%S"),
+    ("Auto-detect (risky — may read days as months)", None),
+]
+
+DEFAULT_DATE_FORMAT = "%d-%m-%Y"
+
+# Both orders parse the same string whenever every day-of-month is 12 or lower, and the
+# two readings disagree ("05-08-2024" is either 5 Aug or 8 May). A perfect score on one
+# is therefore not proof it is the right one, so `best_date_format` flags the clash.
+_DAY_FIRST_CODES = ("%d-%m-", "%d/%m/", "%d.%m.")
+_MONTH_FIRST_CODES = ("%m-%d-", "%m/%d/", "%m.%d.")
+
+# Scoring every candidate format over a large column inside a dialog is slow and adds
+# nothing: a few hundred values settle which format fits.
+DATE_SAMPLE_ROWS = 500
+
+
+def _format_orientation(date_format: str | None) -> str | None:
+    """'day', 'month' or None — which unit a numeric format puts first."""
+    if not date_format:
+        return None
+    if any(code in date_format for code in _DAY_FIRST_CODES):
+        return "day"
+    if any(code in date_format for code in _MONTH_FIRST_CODES):
+        return "month"
+    return None
+
+
+def date_format_scores(
+    series: pd.Series, choices: list[tuple[str, str | None]] | None = None
+) -> list[tuple[str | None, int, int]]:
+    """Scores each candidate date format against the column's real values.
+
+    Returns `(date_format, parsed_count, present_count)` per candidate, best first. Only
+    the first `DATE_SAMPLE_ROWS` present values are tested so a large column stays
+    responsive inside a dialog; the counts are therefore of the sample, not the column.
+    """
+    candidates = [date_format for _, date_format in (choices or DATE_FORMAT_CHOICES)]
+    sample = series[series.notna()].head(DATE_SAMPLE_ROWS)
+    present = int(len(sample))
+    if present == 0:
+        return [(date_format, 0, 0) for date_format in candidates]
+
+    scores: list[tuple[str | None, int, int]] = []
+    for date_format in candidates:
+        try:
+            _, failed = parse_datetime_series(sample, date_format)
+            scores.append((date_format, present - len(failed), present))
+        except (ValueError, TypeError) as error:
+            # A malformed directive raises rather than coercing; it simply scores zero.
+            logger.debug("Date format %r could not be scored: %s", date_format, error)
+            scores.append((date_format, 0, present))
+
+    # A stable sort keeps catalogue order within a tie, so the day-first default wins
+    # against the US order on data that fits both.
+    scores.sort(key=lambda score: -score[1])
+    return scores
+
+
+def best_date_format(
+    series: pd.Series, choices: list[tuple[str, str | None]] | None = None
+) -> tuple[str | None, int, int, bool]:
+    """Picks the format that reads the most values, for pre-selecting the dropdown.
+
+    Returns `(date_format, parsed_count, present_count, is_ambiguous)`. `is_ambiguous` is
+    True when a day-first and a month-first format both score perfectly — the data fits
+    either reading and only the user knows which one is meant.
+    """
+    scores = date_format_scores(series, choices)
+    if not scores:
+        return None, 0, 0, False
+
+    date_format, parsed, present = scores[0]
+    perfect_orientations = {
+        _format_orientation(candidate)
+        for candidate, hits, total in scores
+        if total > 0 and hits == total
+    }
+    is_ambiguous = {"day", "month"} <= perfect_orientations
+    return date_format, parsed, present, is_ambiguous
+
+
+def date_format_preview(
+    series: pd.Series, date_format: str | None, limit: int = 3
+) -> list[tuple[str, str]]:
+    """Sample `(original, parsed)` pairs so the user can eyeball the reading before applying."""
+    sample = series[series.notna()].head(DATE_SAMPLE_ROWS)
+    if sample.empty:
+        return []
+    try:
+        parsed, _ = parse_datetime_series(sample, date_format)
+    except (ValueError, TypeError) as error:
+        logger.debug("Date format %r could not be previewed: %s", date_format, error)
+        return []
+
+    pairs: list[tuple[str, str]] = []
+    for original, value in zip(sample.astype("string"), parsed):
+        if pd.isna(value):
+            continue
+        pairs.append((str(original), value.strftime("%d %b %Y")))
+        if len(pairs) >= limit:
+            break
+    return pairs
+
+
+def date_format_failures(series: pd.Series, date_format: str | None, limit: int = 3) -> list[str]:
+    """The first few values this format cannot read, to name in the warning."""
+    sample = series[series.notna()].head(DATE_SAMPLE_ROWS)
+    if sample.empty:
+        return []
+    try:
+        _, failed = parse_datetime_series(sample, date_format)
+    except (ValueError, TypeError) as error:
+        logger.debug("Date format %r could not be checked for failures: %s", date_format, error)
+        return [str(value) for value in sample.astype("string").head(limit)]
+    return [str(value) for value in sample.loc[failed].astype("string").head(limit)]
+
+
 def numeric_parse_rate(series: pd.Series, decimal_separator: str = ".") -> float:
     """Fraction of the column's present values that parse as numbers. 0.0 if all missing."""
     present = series.notna().sum()

@@ -1,12 +1,12 @@
 """The report workspace — arrange pinned items, preview the report, download it.
 
 Requirements 6.3 and 6.4, rendered. Extracted from `app_pages/dashboard.py` so Task Builder
-(requirement 7.3 step 5) can put the same three views over a Task's own report. Not a
+(requirement 7.3 step 5) can put the same two views over a Task's own report. Not a
 `st.Page`: a page script's body executes on import, so importing one is not an option — this
 follows `checks_view.py` and `setup_view.py` in being a plain module a page calls.
 
-Three views on one `st.segmented_control`, because they are three different jobs rather than
-three parts of one screen:
+Two views on one `st.segmented_control`, because they are two different jobs rather than
+two parts of one screen:
 
 - **Build** — the unplaced pool on the left, the section/subsection tree on the right.
   Placing an item is a dropdown and a button, and every row of the tree carries the same
@@ -15,11 +15,11 @@ three parts of one screen:
   layout switch — "Show in columns with above" — and a run of them becomes a row of
   equal-width columns; `model.group_into_rows` is what both this view's warning and the
   exports read, so a row is never described one way here and built another way there.
-- **Preview** — the report read top to bottom, walked through `dashboard.model.walk`,
-  which is the same function both exporters use. What is previewed is what downloads.
-- **Download** — the CSS preset, the optional hand-edit, the two buttons, and the finished
-  HTML shown in an iframe beneath them. The two previews answer different questions:
-  Preview says whether the *report* is right, Download says whether the *stylesheet* is.
+- **Preview & Download** — the report read top to bottom (the same walk the exporters use,
+  so what is previewed is what downloads), the CSS preset, the optional hand-edit, the two
+  download buttons, and the finished HTML shown in an iframe beneath them. One view now
+  answers both "is the report right" and "is the stylesheet right", since the second
+  question can't be answered without the first already being visible on the same screen.
 
 Every widget key is `db_*`, kept byte-identical to what `dashboard.py` used: the pages that
 call this never render in the same run, and renaming them would have broken every saved
@@ -84,7 +84,7 @@ from dashboard.theme_db import ThemeStorageError
 
 logger = logging.getLogger(__name__)
 
-VIEWS = ["Build", "Preview", "Download"]
+VIEWS = ["Build", "Preview & Download"]
 
 # The HTML preview scrolls inside this rather than sizing to its content: a report is as
 # long as it is, and letting the iframe grow to match would push the download buttons off
@@ -1439,7 +1439,7 @@ def render_report_output(report: Report, *, key: str = "rt_output_view") -> None
 
 
 def render_report_workspace(report: Report, *, empty_pool: EmptyPool | None = None) -> None:
-    """The title box, the view toggle and whichever of the three views is selected.
+    """The title box, the view toggle and whichever of the two views is selected.
 
     `empty_pool` is what to show when nothing has been pinned yet — the message and the
     button that leads to wherever items come from on this page. Passing none leaves a plain
@@ -1465,14 +1465,12 @@ def render_report_workspace(report: Report, *, empty_pool: EmptyPool | None = No
         # page does — so without this, coming back to check one more answer lands the user
         # on Build again rather than where they left off.
         persist_state="session",
-        help="Build the structure, preview the finished report, then download it.",
+        help="Build the structure, then preview and download the finished report.",
     )
 
     render_pending_dialog()
 
-    if view == "Preview":
-        _render_preview(report)
-    elif view == "Download":
+    if view == "Preview & Download":
         _render_download(report)
     else:
         pool_column, tree_column = st.columns([2, 3], gap="medium")

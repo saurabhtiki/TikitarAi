@@ -372,43 +372,15 @@ class TestColumnLayout:
         assert [len(row) for row in group_into_rows(self._placed(app))] == [MAX_ROW_COLUMNS, 1]
         assert any("starts a new row" in caption.value for caption in app.caption)
 
-    def test_the_preview_lays_a_row_out_in_columns(self, tmp_path, monkeypatch):
-        report = _placed_report(
-            PinnedItem(item_id="a", heading="Sales", frame=FRAME),
-            PinnedItem(item_id="b", heading="Costs", frame=FRAME, column_with_previous=True),
-        )
-        app = _set_view(_make_app(tmp_path, monkeypatch, report=report), "Preview")
-
-        assert not app.exception
-        assert len(app.dataframe) == 2
-        assert any("Sales" in markdown.value for markdown in app.markdown)
-        assert any("Costs" in markdown.value for markdown in app.markdown)
-
-
-class TestPreview:
-    def test_an_empty_report_says_what_to_do(self, tmp_path, monkeypatch):
-        app = _set_view(_make_app(tmp_path, monkeypatch), "Preview")
-        assert any("Nothing placed yet" in info.value for info in app.info)
-
-    def test_it_renders_the_tree_in_order(self, tmp_path, monkeypatch):
-        report = _placed_report(PinnedItem(item_id="a", heading="Sales by region", frame=FRAME))
-        app = _set_view(_make_app(tmp_path, monkeypatch, report=report), "Preview")
-
-        assert not app.exception
-        assert any("1. Sales" in heading.value for heading in app.subheader)
-        assert any("Sales by region" in markdown.value for markdown in app.markdown)
-        assert app.dataframe
-
-
 class TestDownload:
     def test_an_empty_report_offers_no_downloads(self, tmp_path, monkeypatch):
-        app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
+        app = _set_view(_make_app(tmp_path, monkeypatch), "Preview & Download")
         assert not app.get("download_button")
         assert any("Place at least one" in info.value for info in app.info)
 
     def test_a_placed_report_offers_both_formats(self, tmp_path, monkeypatch):
         report = _placed_report(PinnedItem(item_id="a", heading="Sales", frame=FRAME))
-        app = _set_view(_make_app(tmp_path, monkeypatch, report=report), "Download")
+        app = _set_view(_make_app(tmp_path, monkeypatch, report=report), "Preview & Download")
 
         assert not app.exception
         keys = {button.key for button in app.get("download_button")}
@@ -420,30 +392,30 @@ class TestDownload:
         element, so what is asserted is that the page renders it without blowing up and
         says what it is — the bytes themselves are covered in `test_dashboard_html_export`."""
         report = _placed_report(PinnedItem(item_id="a", heading="Sales", frame=FRAME))
-        app = _set_view(_make_app(tmp_path, monkeypatch, report=report), "Download")
+        app = _set_view(_make_app(tmp_path, monkeypatch, report=report), "Preview & Download")
 
         assert not app.exception
         assert any("This is the file itself" in caption.value for caption in app.caption)
 
     def test_an_empty_report_previews_nothing(self, tmp_path, monkeypatch):
-        app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
+        app = _set_view(_make_app(tmp_path, monkeypatch), "Preview & Download")
         assert not any("This is the file itself" in caption.value for caption in app.caption)
 
     def test_the_three_presets_and_custom_are_offered(self, tmp_path, monkeypatch):
-        app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
+        app = _set_view(_make_app(tmp_path, monkeypatch), "Preview & Download")
         picker = app.segmented_control(key="db_preset_picker")
         assert picker.options == ["Clean", "Corporate", "Compact", CUSTOM_PRESET]
         assert picker.value == DEFAULT_PRESET
 
     def test_the_customize_button_only_appears_under_custom(self, tmp_path, monkeypatch):
-        app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
+        app = _set_view(_make_app(tmp_path, monkeypatch), "Preview & Download")
         assert "db_style_open" not in [button.key for button in app.button]
 
         app.segmented_control(key="db_preset_picker").set_value(CUSTOM_PRESET).run()
         assert "db_style_open" in [button.key for button in app.button]
 
     def test_a_broken_stylesheet_is_refused_and_the_previous_one_stays(self, tmp_path, monkeypatch):
-        app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
+        app = _set_view(_make_app(tmp_path, monkeypatch), "Preview & Download")
 
         app.text_area(key=f"db_css_editor_{DEFAULT_PRESET}").set_value("body { color: red;").run()
         app.button(key="db_css_apply").click().run()
@@ -452,7 +424,7 @@ class TestDownload:
         assert dashboard_session.DB_CSS_KEY not in app.session_state
 
     def test_a_valid_stylesheet_is_accepted(self, tmp_path, monkeypatch):
-        app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
+        app = _set_view(_make_app(tmp_path, monkeypatch), "Preview & Download")
 
         app.text_area(key=f"db_css_editor_{DEFAULT_PRESET}").set_value("body { color: red; }").run()
         app.button(key="db_css_apply").click().run()
@@ -466,7 +438,7 @@ class TestTheCustomStyleEditor:
     Apply, which is the property most of these check."""
 
     def _open(self, tmp_path, monkeypatch):
-        app = _set_view(_make_app(tmp_path, monkeypatch, report=_placed_report()), "Download")
+        app = _set_view(_make_app(tmp_path, monkeypatch, report=_placed_report()), "Preview & Download")
         init_report_themes_table()
         app.segmented_control(key="db_preset_picker").set_value(CUSTOM_PRESET).run()
         app.button(key="db_style_open").click().run()
@@ -575,11 +547,6 @@ class TestTheCustomStyleEditor:
 class TestItemNumbers:
     def test_the_build_view_numbers_each_placed_item(self, tmp_path, monkeypatch):
         app = _make_app(tmp_path, monkeypatch, report=_ONE_ITEM())
-
-        assert any("1.1.1" in markdown.value for markdown in app.markdown)
-
-    def test_the_preview_numbers_each_item(self, tmp_path, monkeypatch):
-        app = _set_view(_make_app(tmp_path, monkeypatch, report=_ONE_ITEM()), "Preview")
 
         assert any("1.1.1" in markdown.value for markdown in app.markdown)
 

@@ -21,6 +21,7 @@ than Task Builder's gate, and one that only ever records intent; see the "Cleani
 templates" section below for both reasons, the second of which is load-bearing.
 """
 
+import hashlib
 import logging
 
 import streamlit as st
@@ -435,6 +436,112 @@ def _dialog_rename_columns(table, frame) -> None:
     _footer(table.table_id, "rename_columns", params, disabled=not (source and target.strip()))
 
 
+_CUSTOM_DATE_FORMAT = "Custom…"
+
+
+def _date_format_picker(frame, columns: list[str], table_id: str) -> str | None:
+    """The date-format control for the retype dialog: a plain-English dropdown, pre-set to
+    whichever format reads the most of the column's real values, plus a live preview.
+
+    A free-text `%d-%m-%Y` box asks the user to know strptime; the preview instead lets
+    them pick by result — the message turns green when the format fits. The widget key
+    carries the chosen columns so switching column re-runs the pre-selection, which an
+    `index=` alone would not do once the key holds a value.
+    """
+    sample_column = columns[0] if columns else None
+    sample = frame[sample_column] if sample_column is not None else None
+
+    suggested = profiling.DEFAULT_DATE_FORMAT
+    is_ambiguous = False
+    if sample is not None:
+        try:
+            suggested, _, _, is_ambiguous = profiling.best_date_format(sample)
+        except (ValueError, TypeError) as error:
+            logger.warning("Could not suggest a date format for %r: %s", sample_column, error)
+            st.caption("Couldn't test this column's dates — pick a format below and check the preview.")
+
+    labels = [label for label, _ in profiling.DATE_FORMAT_CHOICES] + [_CUSTOM_DATE_FORMAT]
+    formats = {label: date_format for label, date_format in profiling.DATE_FORMAT_CHOICES}
+    suggested_label = next(
+        (label for label, date_format in profiling.DATE_FORMAT_CHOICES if date_format == suggested),
+        labels[0],
+    )
+
+    # Hashed rather than joined: column names can contain the separator, and ["a_b"]
+    # colliding with ["a", "b"] would leave the stale pre-selection in place.
+    columns_key = hashlib.md5(repr(columns).encode(), usedforsecurity=False).hexdigest()[:8]
+    choice = st.selectbox(
+        "Date format",
+        options=labels,
+        index=labels.index(suggested_label),
+        key=f"dc_type_date_choice_{table_id}_{columns_key}",
+        help=(
+            "How the dates are written in your file, not how you want them shown. "
+            "The example beside each option is 14 August 2024 in that style. "
+            "Pre-set to whichever option reads the most of your values — check the preview below."
+        ),
+    )
+
+    if choice == _CUSTOM_DATE_FORMAT:
+        typed = st.text_input(
+            "Custom format",
+            value=profiling.DEFAULT_DATE_FORMAT,
+            key=f"dc_type_date_custom_{table_id}",
+            help="Python date codes: %d day, %m month number, %b Mon, %B month name, %y 2-digit year, %Y 4-digit year.",
+        )
+        date_format = typed.strip() or None
+    else:
+        date_format = formats[choice]
+
+    if sample is not None:
+        if len(columns) > 1:
+            st.caption(f"Preview below is '{sample_column}'; this format applies to all {len(columns)} columns.")
+        _date_format_feedback(sample, date_format, is_ambiguous)
+    return date_format
+
+
+def _date_format_feedback(sample, date_format: str | None, is_ambiguous: bool) -> None:
+    """Shows how the chosen format reads the column, so a wrong pick is visible before Apply."""
+    try:
+        scores = profiling.date_format_scores(sample, [("chosen", date_format)])
+        preview = profiling.date_format_preview(sample, date_format)
+    except (ValueError, TypeError) as error:
+        logger.warning("Could not preview date format %r: %s", date_format, error)
+        st.warning("That format couldn't be read. Check the codes, or pick an option from the list.")
+        return
+
+    _, parsed, present = scores[0]
+    if present == 0:
+        st.caption("This column has no values to preview.")
+        return
+
+    # Scoring reads at most `DATE_SAMPLE_ROWS` values, so on a longer column the counts
+    # describe that sample; saying so keeps "all 500 will convert" from reading as a
+    # promise about all 40,000 rows.
+    total = int(sample.notna().sum())
+    scope = f"{present} values" if present >= total else f"the first {present} values"
+    if parsed == present:
+        st.success(f"All {scope} convert cleanly.")
+    elif parsed == 0:
+        st.error(f"None of {scope} match this format — they would all become blank.")
+    else:
+        st.warning(f"Only {parsed} of {scope} convert — {present - parsed} would become blank.")
+
+    if preview:
+        st.caption("Reads as: " + ", ".join(f"{original} → {reading}" for original, reading in preview))
+
+    if parsed < present:
+        failures = profiling.date_format_failures(sample, date_format)
+        if failures:
+            st.caption("Can't read: " + ", ".join(failures))
+        st.caption("Tip: try a different option — the message turns green when the format fits.")
+    elif is_ambiguous:
+        st.caption(
+            "Both day-first and month-first fit these values, so the list can't tell them apart. "
+            "Check the reading above is the date you expect."
+        )
+
+
 def _dialog_set_column_types(table, frame) -> None:
     st.caption("Detected types are applied automatically on upload. Override any of them here.")
     columns = st.multiselect(
@@ -459,12 +566,7 @@ def _dialog_set_column_types(table, frame) -> None:
             help="Never guessed: '1.200' is twelve hundred in some locales and 1.2 in others.",
         )
     elif target_type == profiling.DATE:
-        date_format = st.text_input(
-            "Date format (optional)",
-            key=f"dc_type_date_format_{table.table_id}",
-            help="Leave blank to detect automatically, or give a format such as %d/%m/%Y.",
-        )
-        settings["date_format"] = date_format.strip() or None
+        settings["date_format"] = _date_format_picker(frame, columns, table.table_id)
 
     params = {"by_column": {column: settings for column in columns}}
     if columns:
