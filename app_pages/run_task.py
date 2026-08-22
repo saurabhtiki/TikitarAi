@@ -1,4 +1,4 @@
-"""Run a Task — pick a saved recipe, upload this month's files, get the report (requirement 8).
+"""Run a Task — pick a saved recipe, upload Current files, get the report (requirement 8).
 
 Task Builder records a whole analysis; this page plays it back. Nothing is typed and, when
 every stored statement still works, **nothing is asked of a model to produce the numbers**:
@@ -140,7 +140,7 @@ def _dialog_schema(payload: dict) -> None:
     if task.schema.tables:
         st.caption(
             "Each table below is one file. **Download a blank file** gives you its headers to "
-            "paste this month's data into — uploaded back, it matches with nothing to remap."
+            "paste Current data into — uploaded back, it matches with nothing to remap."
         )
 
     for table in task.schema.tables:
@@ -253,7 +253,7 @@ def _render_picker(user_id: int) -> None:
 
     st.caption(
         "A task brings its own schema, links, column meanings, calculated columns, report "
-        "items and checks. Upload this month's files on the next screen and it produces the "
+        "items and checks. Upload Current files on the next screen and it produces the "
         "same report over the new numbers."
     )
 
@@ -347,7 +347,7 @@ def _render_task_row(user_id: int, row: dict) -> None:
             task = _load_task(task_id, user_id)
             if task is not None:
                 runner_session.open_task(task)
-                runner_session.queue_flash(f"Opened “{row['name']}”. Upload this month's files below.")
+                runner_session.queue_flash(f"Opened “{row['name']}”. Upload Current files below.")
                 st.rerun(scope="app")
     with schema_column:
         if st.button(
@@ -420,7 +420,7 @@ def _render_match(report: matching.MatchReport, loaded_tables: list) -> None:
     """
     if not loaded_tables:
         st.info(
-            "Upload this month's files above. Press **Show schema** if you need to check what "
+            "Upload Current files above. Press **Show schema** if you need to check what "
             "this task expects.",
             icon=":material/upload_file:",
         )
@@ -440,7 +440,7 @@ def _render_match(report: matching.MatchReport, loaded_tables: list) -> None:
 def _render_remap(task: Task, report: matching.MatchReport, loaded_tables: list) -> None:
     """Requirement 8.1 step 5: fix the mismatch by hand rather than abort the whole run.
 
-    Two remaps, because two things can be named differently in this month's files: which
+    Two remaps, because two things can be named differently in Current files: which
     **file** is which of the recipe's tables, and which **column** is which of its columns.
 
     The table remap is not in §8.1 step 5's letter, which names only columns, but it is the
@@ -589,7 +589,7 @@ def _render_run_controls(user_id: int, report: matching.MatchReport, loaded_tabl
         return
 
     st.checkbox(
-        "Rewrite the comments for this month's numbers",
+        "Rewrite the comments for Current numbers",
         key=runner_session.RT_REWRITE_KEY,
         value=runner_session.rewrite_comments(),
         help=(
@@ -710,7 +710,7 @@ if profile is not None:
 
     st.subheader("▶️ Run a task")
     st.write(
-        ":blue[**Pick a saved task, upload this month's files, and get its report — nothing "
+        ":blue[**Pick a saved task, upload Current files, and get its report — nothing "
         "to type, and no AI needed to produce the numbers while the saved SQL still runs.**]"
     )
 
@@ -756,7 +756,7 @@ if profile is not None:
 
         with st.container(key=UPLOAD_SLOT):
             with st.expander(
-                "Step 1 · This month's files",
+                "Step 1 · Current files",
                 key=engine_session.STEP_UPLOAD,
                 on_change="rerun",
                 # A **constant**, like every `expanded=` in this app: Streamlit re-applies the
