@@ -38,6 +38,8 @@ INSTRUCTIONS = (
     "You translate a request to change a table's columns into structured parameters. "
     "You never write SQL statements — only the fragments asked for. "
     "Pick the table and column names exactly as they appear in the schema, matching case. "
+    "Wrap any column name that contains a space, a bracket or any other non-word character "
+    'in double quotes wherever it appears in a fragment, e.g. `"Sales Amount (Actual)" * 0.1`. '
     "For `add`, `expression` is normally a DuckDB SQL expression over that table's own "
     "columns (e.g. `basic * 0.10`), and `column` is the new column's name. "
     "If the formula genuinely needs a column that lives on a different table, and the "

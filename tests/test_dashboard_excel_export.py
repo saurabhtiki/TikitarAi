@@ -141,6 +141,14 @@ def test_a_sheet_carries_the_heading_the_comment_and_every_row(frame):
     assert "120" in text and "340" in text
 
 
+def test_an_item_heading_carries_the_same_number_the_html_report_gives_it(frame):
+    report = _one_item_report(frame)
+    sheet = load_workbook(io.BytesIO(build_report_workbook(report)))["1.1 General"]
+    text = "\n".join(str(cell.value) for row in sheet.iter_rows() for cell in row if cell.value is not None)
+
+    assert "1.1.1 Sales by region" in text
+
+
 def test_a_full_table_is_written_with_no_row_limit():
     frame = pd.DataFrame({"n": range(500)})
     report = _one_item_report(frame)

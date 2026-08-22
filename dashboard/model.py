@@ -22,6 +22,7 @@ Three decisions are worth stating, because the rest of the package leans on them
   so reordering can never leave a row pointing at an item that moved out of it.
 """
 
+import base64
 import logging
 import uuid
 from dataclasses import dataclass, field
@@ -44,6 +45,21 @@ UNTITLED_REPORT = "Untitled report"
 # where a table inside one stops being readable, and past that the HTML wraps anyway — so
 # the cap is enforced in `group_into_rows` rather than left to the stylesheet.
 MAX_ROW_COLUMNS = 4
+
+# Where the logo sits relative to the title. Three answers cover what a report header can
+# reasonably be; anything else is a stylesheet's job, not a picker's.
+LOGO_POSITIONS = ("left", "right", "above")
+DEFAULT_LOGO_POSITION = "left"
+
+# The logo is embedded in every HTML export and stored inside the saved Task, so it is
+# capped at the size a header image actually needs. A 2 MB photograph in a corner of the
+# page is a slow download for no visible gain.
+MAX_LOGO_BYTES = 512_000
+
+# How tall the logo is printed, in CSS pixels. The width follows the aspect ratio.
+MIN_LOGO_HEIGHT = 24
+MAX_LOGO_HEIGHT = 160
+DEFAULT_LOGO_HEIGHT = 56
 
 
 def new_id() -> str:
@@ -129,9 +145,126 @@ class Report:
     sections: list[Section] = field(default_factory=list)
     pool: list[PinnedItem] = field(default_factory=list)
 
+    # The header logo, printed beside the title in the HTML export. Bytes rather than a
+    # path, for the same reason the exports embed charts as base64: the downloaded file has
+    # to open on a machine that has never seen this app, so it cannot point at a file.
+    logo: bytes | None = None
+    logo_mime: str = ""
+    logo_height: int = DEFAULT_LOGO_HEIGHT
+    logo_position: str = DEFAULT_LOGO_POSITION
+
+    def has_logo(self) -> bool:
+        return bool(self.logo) and bool(self.logo_mime)
+
+    def logo_data_uri(self) -> str:
+        """The logo as a `data:` URI, or "" when there is none.
+
+        Built here rather than in the HTML exporter because the Preview view wants the same
+        string, and two places encoding the same bytes is two places to get the mime type
+        wrong.
+        """
+        if not self.has_logo():
+            return ""
+        return f"data:{self.logo_mime};base64," + base64.b64encode(self.logo).decode("ascii")
+
     def is_empty(self) -> bool:
         """True when there is nothing to export — no placed item anywhere."""
         return not any(subsection.items for section in self.sections for subsection in section.subsections)
+
+
+# --------------------------------------------------------------------------------------
+# The header logo
+# --------------------------------------------------------------------------------------
+
+# What an `<img src="data:…">` in a self-contained page can actually show. SVG is left out
+# on purpose: it is a document, not a picture, and one embedded in the export would be the
+# second string in the file that isn't escaped.
+LOGO_MIME_BY_SUFFIX = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+}
+
+LOGO_FILE_TYPES = ("png", "jpg", "jpeg", "gif", "webp")
+
+
+def logo_problems(data: bytes | None, filename: str) -> list[str]:
+    """Everything wrong with a would-be logo, in plain English. Empty means accept.
+
+    Same shape as `css_presets.validate_css` and for the same reason: the page needs
+    something to *show* the user, not an exception to catch. Nothing is stored on the report
+    until this comes back empty.
+    """
+    problems: list[str] = []
+
+    if not data:
+        return ["That file is empty, so there is nothing to show."]
+
+    suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if suffix not in LOGO_MIME_BY_SUFFIX:
+        problems.append(
+            "The logo has to be a PNG, JPG, GIF or WEBP picture — those are what an "
+            "offline HTML file can carry."
+        )
+
+    if len(data) > MAX_LOGO_BYTES:
+        problems.append(
+            f"The logo is {len(data) / 1024:,.0f} KB, over the {MAX_LOGO_BYTES // 1024} KB "
+            "limit. It goes inside every download, so a small header-sized picture is all "
+            "that is needed."
+        )
+
+    return problems
+
+
+def set_logo(report: Report, data: bytes, filename: str) -> list[str]:
+    """Stores a logo on the report, or returns why it was refused.
+
+    Refusing leaves whatever logo was already there in place, on the same grounds the
+    stylesheet editor keeps the previous stylesheet: a rejected change costs the change and
+    never the report.
+    """
+    problems = logo_problems(data, filename)
+    if problems:
+        logger.info("Refused a logo for report '%s': %s", report.title, "; ".join(problems))
+        return problems
+
+    suffix = filename.rsplit(".", 1)[-1].lower()
+    report.logo = bytes(data)
+    report.logo_mime = LOGO_MIME_BY_SUFFIX[suffix]
+    return []
+
+
+def clear_logo(report: Report) -> None:
+    report.logo = None
+    report.logo_mime = ""
+
+
+def set_logo_height(report: Report, height) -> int:
+    """Stores the printed logo height, clamped to what the slider offers.
+
+    Clamped here rather than trusted from the widget, because the same value comes back out
+    of a saved Task, where it was written by whatever version of this app saved it — and it
+    is interpolated straight into the export's markup.
+    """
+    try:
+        clamped = max(MIN_LOGO_HEIGHT, min(int(height), MAX_LOGO_HEIGHT))
+    except (TypeError, ValueError):
+        clamped = DEFAULT_LOGO_HEIGHT
+    report.logo_height = clamped
+    return clamped
+
+
+def set_logo_position(report: Report, position: str) -> str:
+    """Stores where the logo sits, falling back to the default for an unknown value.
+
+    The value becomes a CSS class in the exported page, so an unrecognized one is replaced
+    rather than passed through.
+    """
+    report.logo_position = position if position in LOGO_POSITIONS else DEFAULT_LOGO_POSITION
+    return report.logo_position
 
 
 # --------------------------------------------------------------------------------------
@@ -149,6 +282,20 @@ def numbered_subsections(section: Section, section_number: str) -> list[tuple[st
     return [
         (f"{section_number}.{position}", subsection)
         for position, subsection in enumerate(section.subsections, start=1)
+    ]
+
+
+def numbered_items(items: list[PinnedItem], subsection_number: str) -> list[tuple[str, PinnedItem]]:
+    """A subsection's items as `("2.1.1", item)`, in order.
+
+    The third level of the same derived numbering `numbered_sections` and
+    `numbered_subsections` already do: position in the list, never a stored value, so a
+    reorder renumbers for free. It reads as `section.subsection.point`, which is the shape
+    every numbered document uses, so "2.1.3" is unambiguous the first time it is seen.
+    """
+    return [
+        (f"{subsection_number}.{position}", item)
+        for position, item in enumerate(items, start=1)
     ]
 
 
@@ -398,6 +545,21 @@ class RenderedSubsection:
         one block under the next, and a "column" there would mean something else entirely.
         """
         return group_into_rows(self.items)
+
+    def numbered(self) -> list[tuple[str, PinnedItem]]:
+        """The items as `("2.1.1", item)`. What the Excel export writes above each block."""
+        return numbered_items(self.items, self.number)
+
+    def numbered_rows(self) -> list[list[tuple[str, PinnedItem]]]:
+        """`rows()`, with each item carrying its number.
+
+        Numbers are handed out in **reading order**, not per row, so three items side by
+        side are 2.1.1, 2.1.2 and 2.1.3 across — which is how they are read. The grouping
+        is still `group_into_rows`'s, drawn on rather than repeated, so layout is decided
+        in exactly one place.
+        """
+        numbers = iter(number for number, _ in self.numbered())
+        return [[(next(numbers), item) for item in row] for row in self.rows()]
 
 
 @dataclass

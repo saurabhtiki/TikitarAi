@@ -136,8 +136,10 @@ def _write_subsection(writer: pd.ExcelWriter, sheet_name: str, subsection, forma
     cursor = 2
     widths: dict[int, int] = {}
 
-    for item in subsection.items:
-        worksheet.write(cursor, 0, item.display_heading(), formats["heading"])
+    # Numbered through the model's own `numbered()`, the same call the HTML export makes,
+    # so "2.1.3" names the same item in the workbook as it does in the page.
+    for number, item in subsection.numbered():
+        worksheet.write(cursor, 0, f"{number} {item.display_heading()}", formats["heading"])
         cursor += 2
 
         png = item_png(item)

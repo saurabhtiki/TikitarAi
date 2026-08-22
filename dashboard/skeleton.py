@@ -19,15 +19,20 @@ is a report whose arrangement is already right and whose contents are pending.
 No Streamlit here. `dashboard/session.py` owns the state; this module owns the serialization.
 """
 
+import base64
+import binascii
 import json
 import logging
 
 from dashboard.exceptions import ReportSkeletonError
 from dashboard.model import (
+    MAX_LOGO_BYTES,
     PinnedItem,
     Report,
     Section,
     Subsection,
+    set_logo_height,
+    set_logo_position,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +90,14 @@ def to_dict(report: Report) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
         "title": report.title,
+        # The logo is the one picture a skeleton carries, and it is not an exception to the
+        # "no data" rule: it is a setting, like the title, and it is what makes a saved Task
+        # produce the same branded report on every run. It is capped at `MAX_LOGO_BYTES`
+        # before it is ever stored, so the base64 here is header-sized.
+        "logo": base64.b64encode(report.logo).decode("ascii") if report.has_logo() else "",
+        "logo_mime": report.logo_mime,
+        "logo_height": report.logo_height,
+        "logo_position": report.logo_position,
         "sections": [
             {
                 "node_id": section.node_id,
@@ -106,6 +119,7 @@ def to_dict(report: Report) -> dict:
 def from_dict(raw: dict) -> Report:
     """A report tree with every item empty of data. See the module docstring."""
     report = Report(title=str(raw.get("title") or ""))
+    _restore_logo(report, raw)
 
     for raw_section in raw.get("sections") or []:
         section = Section(name=str(raw_section.get("name") or Section().name))
@@ -122,6 +136,40 @@ def from_dict(raw: dict) -> Report:
         report.sections.append(section)
 
     return report
+
+
+def _restore_logo(report: Report, raw: dict) -> None:
+    """Puts a stored logo back on the report, or leaves it without one.
+
+    Anything wrong with the stored value — unreadable base64, no mime type, a picture larger
+    than the current cap — leaves the report logo-less rather than raising. A saved Task
+    whose logo can no longer be read is still a Task worth running, and a report without a
+    logo is a report; a load that failed outright would cost the user everything else in it.
+    """
+    encoded = raw.get("logo")
+    mime = str(raw.get("logo_mime") or "")
+    set_logo_height(report, raw.get("logo_height"))
+    set_logo_position(report, str(raw.get("logo_position") or ""))
+
+    if not encoded or not mime:
+        return
+
+    try:
+        data = base64.b64decode(str(encoded), validate=True)
+    except (binascii.Error, ValueError):
+        logger.warning("A saved report's logo couldn't be decoded; the report loads without it.")
+        return
+
+    if not data or len(data) > MAX_LOGO_BYTES:
+        logger.warning(
+            "A saved report's logo is %s bytes, outside the %s byte limit; the report loads without it.",
+            len(data),
+            MAX_LOGO_BYTES,
+        )
+        return
+
+    report.logo = data
+    report.logo_mime = mime
 
 
 def to_json(report: Report) -> str:

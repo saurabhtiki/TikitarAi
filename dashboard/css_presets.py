@@ -43,7 +43,7 @@ _FORBIDDEN = (
 )
 
 
-_SHARED = """
+SHARED_CSS = """
 * { box-sizing: border-box; }
 body { margin: 0; }
 .report { margin: 0 auto; }
@@ -55,10 +55,16 @@ table { border-collapse: collapse; width: 100%; }
 .item-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 24px; }
 .item-row > .item { flex: 1 1 0; min-width: 220px; margin-left: 0; margin-right: 0; }
 @media print { .item-row { page-break-inside: avoid; } }
+.report-header { display: flex; align-items: center; gap: 20px; }
+.report-header.above { flex-direction: column; align-items: flex-start; gap: 12px; }
+.report-header.right { flex-direction: row-reverse; }
+.report-header .titles { flex: 1 1 auto; min-width: 0; }
+.report-logo { flex: 0 0 auto; width: auto; }
+@media print { .report-header { page-break-inside: avoid; } }
 """
 
 CLEAN_CSS = (
-    _SHARED
+    SHARED_CSS
     + """
 body { font-family: Georgia, 'Times New Roman', serif; color: #1f2933; background: #ffffff; line-height: 1.6; }
 .report { max-width: 900px; padding: 48px 32px 72px; }
@@ -78,7 +84,7 @@ td { padding: 8px 12px; border-bottom: 1px solid #f0f2f4; }
 )
 
 CORPORATE_CSS = (
-    _SHARED
+    SHARED_CSS
     + """
 body { font-family: 'Segoe UI', Arial, sans-serif; color: #1a1a1a; background: #f4f6f8; line-height: 1.5; }
 .report { max-width: 1000px; background: #ffffff; padding: 0 0 56px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
@@ -103,7 +109,7 @@ tr:nth-child(even) td { background: #f7f9fb; }
 )
 
 COMPACT_CSS = (
-    _SHARED
+    SHARED_CSS
     + """
 body { font-family: -apple-system, 'Segoe UI', Arial, sans-serif; color: #202020; background: #ffffff; line-height: 1.35; font-size: 13px; }
 .report { max-width: 1180px; padding: 20px 24px 40px; }
@@ -123,6 +129,12 @@ td { padding: 2px 8px; border-bottom: 1px solid #f0f0f0; }
 """
 )
 
+# Not a preset in `PRESETS`, because its stylesheet is generated from the user's own
+# settings rather than stored — see `dashboard/custom_style.py`. It is named here so the
+# picker and the descriptions have one spelling of it to agree on.
+CUSTOM_PRESET = "Custom"
+
+
 PRESETS: dict[str, str] = {
     "Clean": CLEAN_CSS,
     "Corporate": CORPORATE_CSS,
@@ -135,7 +147,11 @@ PRESET_DESCRIPTIONS = {
     "Clean": "Serif headings, generous whitespace, plain rules. Reads like a document.",
     "Corporate": "Navy banded headings and ruled tables, with print page-break rules.",
     "Compact": "Small type and tight spacing, to fit long tables in fewer pages.",
+    CUSTOM_PRESET: "Your own fonts, colours and borders, set with the Customize button.",
 }
+
+# What the style picker offers: the three built-in presets, then the user's own.
+PRESET_OPTIONS: list[str] = [*PRESETS, CUSTOM_PRESET]
 
 
 def preset_css(name: str) -> str:

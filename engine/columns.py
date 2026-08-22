@@ -28,6 +28,12 @@ to use is never taken on trust from a caller-supplied join condition: it is look
 table name in the relationships the user already confirmed in Setup, so the join itself
 is exactly as trustworthy as `engine/relationships.py` already made it.
 
+Every incoming fragment first goes through `quote_known_columns`, which double-quotes the
+session's own column names where they appear bare. Real spreadsheet headers look like
+`Sales Amount (Actual)`, and neither a model nor a user typing a formula reliably quotes
+them — unrepaired, DuckDB stops at the first space with a syntax error naming the second
+word, which tells the user nothing about what went wrong.
+
 Updating values in place (*"mark status as Over due if due_date is before today"*) is the
 third action requirement 5.4 asks for, and it is a single `UPDATE … SET … WHERE`. Both
 halves are user-supplied SQL fragments, so both go through `assert_safe_expression`, and
@@ -50,6 +56,63 @@ from engine.guards import assert_safe_expression
 from engine.relationships import Relationship
 
 logger = logging.getLogger(__name__)
+
+
+# A name DuckDB reads correctly without quotes: a letter or underscore, then letters,
+# digits, underscores or dollars. Anything else — a space, a bracket, a hyphen — has to be
+# double-quoted, or the binder stops at the first space and reports a syntax error there.
+_BARE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+# Runs the repair below must not reach into: text literals, and names already quoted.
+_LITERAL_OR_QUOTED = re.compile(r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"")
+
+
+def quote_known_columns(expression: str, columns: list[str]) -> str:
+    """Double-quotes any of `columns` that appear unquoted in `expression`.
+
+    A column called `Sales Amount (Actual)` is only legal SQL in quotes: written bare,
+    DuckDB binds `Sales`, meets `Amount` and reports `syntax error at or near "Amount"`.
+    Both sources of an expression forget those quotes — a model however firmly the prompt
+    asks for them, and a user typing a formula into the dialog — so the fragment is
+    repaired here rather than trusted.
+
+    Only names that actually need quoting are considered, and only where they appear
+    outside string literals and outside identifiers that are already quoted, so an
+    ordinary expression comes back untouched and repairing twice changes nothing.
+    """
+    expression = str(expression or "")
+    needy = sorted(
+        {name for name in columns if name and _BARE_IDENTIFIER.match(name) is None},
+        key=len,
+        reverse=True,
+    )
+    if not expression.strip() or not needy:
+        return expression
+
+    # Longest name first, so `Sales Amount (Actual)` wins over a shorter `Amount (Actual)`.
+    # The guards stop a match mid-word; `.` is deliberately allowed before a name, because
+    # `employee_master.Sales Amount (Actual)` needs quoting on the column half.
+    pattern = re.compile(
+        r'(?<![A-Za-z0-9_$"])(?:' + "|".join(re.escape(name) for name in needy) + r")(?![A-Za-z0-9_$])",
+        re.IGNORECASE,
+    )
+    real_names = {name.lower(): name for name in needy}
+
+    def _quote(match: re.Match) -> str:
+        return quote_identifier(real_names.get(match.group(0).lower(), match.group(0)))
+
+    repaired: list[str] = []
+    position = 0
+    for skipped in _LITERAL_OR_QUOTED.finditer(expression):
+        repaired.append(pattern.sub(_quote, expression[position : skipped.start()]))
+        repaired.append(skipped.group(0))
+        position = skipped.end()
+    repaired.append(pattern.sub(_quote, expression[position:]))
+
+    result = "".join(repaired)
+    if result != expression:
+        logger.info("Quoted column names that needed it in an expression fragment.")
+    return result
 
 
 def _assert_table_exists(connection: duckdb.DuckDBPyConnection, table: str) -> list[str]:
@@ -121,8 +184,9 @@ def _probe_type(connection: duckdb.DuckDBPyConnection, expression: str, from_sql
 
 def expression_type(connection: duckdb.DuckDBPyConnection, table: str, expression: str) -> str:
     """Returns the SQL type an expression produces against a table, without running it."""
+    columns = _assert_table_exists(connection, table)
+    expression = quote_known_columns(expression, columns)
     assert_safe_expression(expression)
-    _assert_table_exists(connection, table)
     return _probe_type(connection, expression, quote_identifier(table))
 
 
@@ -159,14 +223,19 @@ def add_calculated_column(
             "or remove the existing one first."
         )
 
-    assert_safe_expression(expression)
-
     related_table = str(related_table or "").strip() or None
     join_suffix = ""
     if related_table is None:
+        # Repaired here as well as inside `expression_type`, because the same text goes
+        # into the `UPDATE` below — probing a quoted expression and then writing an
+        # unquoted one would fail after the `ALTER` had already run.
+        expression = quote_known_columns(expression, existing)
+        assert_safe_expression(expression)
         column_type = expression_type(connection, table, expression)
     else:
-        _assert_table_exists(connection, related_table)
+        related_columns = _assert_table_exists(connection, related_table)
+        expression = quote_known_columns(expression, existing + related_columns)
+        assert_safe_expression(expression)
         quoted_parent, join_condition = _resolve_join(table, related_table, relationships or [])
         probe_from = f"{quote_identifier(table)} JOIN {quoted_parent} ON {join_condition}"
         column_type = _probe_type(connection, expression, probe_from)
@@ -246,10 +315,11 @@ def affected_row_count(
             message.
     """
     quoted_table = quote_identifier(table)
-    _assert_table_exists(connection, table)
+    columns = _assert_table_exists(connection, table)
 
     where_clause = ""
     if condition and condition.strip():
+        condition = quote_known_columns(condition, columns)
         assert_safe_expression(condition)
         where_clause = f" WHERE ({condition.strip()})"
 
@@ -286,14 +356,17 @@ def update_column_values(
             compile or to assign.
     """
     resolved_column = _resolve_column(connection, table, column)
+    columns = _assert_table_exists(connection, table)
 
     value_expression = str(value_expression or "").strip()
     if not value_expression:
         raise CalculatedColumnError("Give the column a new value to be set to.")
+    value_expression = quote_known_columns(value_expression, columns)
     assert_safe_expression(value_expression)
 
     condition = str(condition or "").strip()
     if condition:
+        condition = quote_known_columns(condition, columns)
         assert_safe_expression(condition)
 
     # Probing both fragments separately means the error message names the one that is

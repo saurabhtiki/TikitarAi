@@ -11,8 +11,23 @@
 </head>
 <body>
 <div class="report">
+  {# With a logo the header is a flex row (or column) holding the picture and the two
+     lines of text; without one it is exactly the markup it always was, so every preset
+     and every hand-edited stylesheet keeps styling an untouched report the way it did.
+     `logo` is a `data:` URI built from bytes this app stored — never user-supplied text —
+     and the height is an integer clamped by `model.set_logo_height`. #}
+  {% if logo %}
+  <div class="report-header {{ logo_position }}">
+    <img class="report-logo" src="{{ logo }}" alt="{{ title }}" style="height: {{ logo_height }}px;">
+    <div class="titles">
+      <h1>{{ title }}</h1>
+      <p class="subtitle">{{ generated_at }}</p>
+    </div>
+  </div>
+  {% else %}
   <h1>{{ title }}</h1>
   <p class="subtitle">{{ generated_at }}</p>
+  {% endif %}
 
   {% if not sections %}
   <p class="empty">This report has no placed items yet.</p>
@@ -35,7 +50,7 @@
 
         {% for item in row %}
         <div class="item">
-          <h4>{{ item.heading }}</h4>
+          <h4>{{ item.number }} {{ item.heading }}</h4>
 
           {% if item.image %}
           <img src="data:image/png;base64,{{ item.image }}" alt="{{ item.heading }}">

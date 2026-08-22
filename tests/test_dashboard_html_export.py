@@ -7,7 +7,16 @@ import pytest
 from dashboard import html_export, images
 from dashboard.css_presets import DEFAULT_PRESET, preset_css
 from dashboard.html_export import build_html, frame_to_html
-from dashboard.model import UNTITLED_REPORT, PinnedItem, Report, add_section, assign_item
+from dashboard.model import (
+    UNTITLED_REPORT,
+    PinnedItem,
+    Report,
+    add_section,
+    assign_item,
+    set_logo,
+    set_logo_height,
+    set_logo_position,
+)
 
 FAKE_PNG = b"\x89PNG\r\n\x1a\nfake-bytes"
 
@@ -210,3 +219,73 @@ def test_frame_to_html_omits_the_index(frame):
 def test_frame_to_html_blanks_missing_values():
     markup = frame_to_html(pd.DataFrame({"a": [1, None]}))
     assert "NaN" not in markup
+
+
+# --------------------------------------------------------------------------------------
+# Item numbering
+# --------------------------------------------------------------------------------------
+
+
+LOGO_BYTES = b"\x89PNG\r\n\x1a\npretend-this-is-a-logo"
+
+
+def test_each_item_carries_its_section_subsection_point_number(frame):
+    report = _report_with(
+        PinnedItem(heading="First", frame=frame),
+        PinnedItem(heading="Second", frame=frame),
+    )
+
+    html = build_html(report, _css())
+
+    assert "<h4>1.1.1 First</h4>" in html
+    assert "<h4>1.1.2 Second</h4>" in html
+
+
+def test_side_by_side_items_are_numbered_across_the_row(frame):
+    report = _report_with(
+        PinnedItem(heading="Left", frame=frame),
+        PinnedItem(heading="Right", frame=frame, column_with_previous=True),
+    )
+
+    html = build_html(report, _css())
+
+    assert html.index("1.1.1 Left") < html.index("1.1.2 Right")
+    assert "item-row" in html
+
+
+# --------------------------------------------------------------------------------------
+# The header logo
+# --------------------------------------------------------------------------------------
+
+
+def test_a_report_without_a_logo_writes_the_header_it_always_did(frame):
+    """Untouched reports must produce the markup every preset was written against, so the
+    wrapper only appears when there is a logo to wrap. Checked on the body, because the
+    shared stylesheet always carries the rules for it."""
+    body = build_html(_report_with(PinnedItem(heading="One", frame=frame)), _css()).split("<body>")[1]
+
+    assert "report-header" not in body
+    assert "<h1>Q3 review</h1>" in body
+
+
+def test_a_logo_is_embedded_as_a_data_uri_so_the_file_still_works_offline(frame):
+    report = _report_with(PinnedItem(heading="One", frame=frame))
+    set_logo(report, LOGO_BYTES, "company.png")
+
+    html = build_html(report, _css())
+
+    assert 'class="report-logo"' in html
+    assert f'src="data:image/png;base64,{base64.b64encode(LOGO_BYTES).decode("ascii")}"' in html
+    assert "http" not in html.split("<style>")[0]
+
+
+def test_the_logo_position_and_height_reach_the_page(frame):
+    report = _report_with(PinnedItem(heading="One", frame=frame))
+    set_logo(report, LOGO_BYTES, "company.png")
+    set_logo_position(report, "above")
+    set_logo_height(report, 120)
+
+    html = build_html(report, _css())
+
+    assert 'class="report-header above"' in html
+    assert "height: 120px;" in html

@@ -9,6 +9,7 @@ No test here reaches the network, and none can: the page makes no model calls at
 arranges what the chat already produced.
 """
 
+import base64
 from pathlib import Path
 
 import pandas as pd
@@ -16,8 +17,10 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from auth.db import init_db, seed_default_admin
+from app_pages import report_view
+from dashboard import custom_style
 from dashboard import session as dashboard_session
-from dashboard.css_presets import DEFAULT_PRESET
+from dashboard.css_presets import CUSTOM_PRESET, DEFAULT_PRESET
 from dashboard.model import (
     MAX_ROW_COLUMNS,
     PinnedItem,
@@ -26,7 +29,9 @@ from dashboard.model import (
     add_subsection,
     assign_item,
     group_into_rows,
+    set_logo,
 )
+from dashboard.theme_db import init_report_themes_table, list_themes
 from llm.db import create_profile, init_llm_table
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -78,6 +83,18 @@ def _has_button(app, key) -> bool:
 
 def _button(app, key):
     return next(button for button in app.button if button.key == key)
+
+
+# A real 4x4 PNG, because the page draws the stored logo and Streamlit has to decode
+# it. Base64 rather than a bytes literal, so the constant stays readable.
+LOGO_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAE0lEQVR4nGMUsalggAEmOAsvBwAnsADQ0ehM9AAAAABJRU5ErkJggg=="
+)
+
+
+def _ONE_ITEM() -> Report:
+    """A report with one placed item, so numbering and the header have something to show."""
+    return _placed_report(PinnedItem(item_id="a", question="Sales by region", frame=FRAME))
 
 
 def _set_view(app, view):
@@ -412,11 +429,18 @@ class TestDownload:
         app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
         assert not any("This is the file itself" in caption.value for caption in app.caption)
 
-    def test_the_three_presets_are_offered(self, tmp_path, monkeypatch):
+    def test_the_three_presets_and_custom_are_offered(self, tmp_path, monkeypatch):
         app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
         picker = app.segmented_control(key="db_preset_picker")
-        assert picker.options == ["Clean", "Corporate", "Compact"]
+        assert picker.options == ["Clean", "Corporate", "Compact", CUSTOM_PRESET]
         assert picker.value == DEFAULT_PRESET
+
+    def test_the_customize_button_only_appears_under_custom(self, tmp_path, monkeypatch):
+        app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
+        assert "db_style_open" not in [button.key for button in app.button]
+
+        app.segmented_control(key="db_preset_picker").set_value(CUSTOM_PRESET).run()
+        assert "db_style_open" in [button.key for button in app.button]
 
     def test_a_broken_stylesheet_is_refused_and_the_previous_one_stays(self, tmp_path, monkeypatch):
         app = _set_view(_make_app(tmp_path, monkeypatch), "Download")
@@ -435,3 +459,163 @@ class TestDownload:
 
         assert any("Applied" in success.value for success in app.success)
         assert app.session_state[dashboard_session.DB_CSS_KEY] == "body { color: red; }"
+
+
+class TestTheCustomStyleEditor:
+    """Requirement 6.4's stylesheet, set with pickers. Nothing reaches the report until
+    Apply, which is the property most of these check."""
+
+    def _open(self, tmp_path, monkeypatch):
+        app = _set_view(_make_app(tmp_path, monkeypatch, report=_placed_report()), "Download")
+        init_report_themes_table()
+        app.segmented_control(key="db_preset_picker").set_value(CUSTOM_PRESET).run()
+        app.button(key="db_style_open").click().run()
+        return app
+
+    def test_the_editor_opens_with_the_page_and_element_controls(self, tmp_path, monkeypatch):
+        app = self._open(tmp_path, monkeypatch)
+
+        assert app.session_state[report_view.STYLE_PANEL_KEY] is True
+
+        assert app.selectbox(key="db_style_font").value in custom_style.FONT_STACKS
+        assert app.selectbox(key="db_style_element").value == custom_style.ELEMENT_SPECS[0].label
+        assert app.slider(key="db_style_base_size").value == custom_style.default_settings().base_font_size
+
+    def test_moving_a_slider_changes_the_draft_and_not_the_style_in_force(self, tmp_path, monkeypatch):
+        app = self._open(tmp_path, monkeypatch)
+
+        app.slider(key="db_style_base_size").set_value(19).run()
+
+        assert app.session_state[report_view.STYLE_DRAFT_KEY].base_font_size == 19
+        assert app.session_state[dashboard_session.DB_STYLE_KEY].base_font_size != 19
+
+    def test_apply_puts_the_settings_into_force_and_closes_the_editor(self, tmp_path, monkeypatch):
+        app = self._open(tmp_path, monkeypatch)
+
+        app.slider(key="db_style_base_size").set_value(19).run()
+        app.button(key="db_style_apply").click().run()
+
+        assert app.session_state[dashboard_session.DB_STYLE_KEY].base_font_size == 19
+        assert app.session_state[report_view.STYLE_PANEL_KEY] is False
+
+    def test_an_applied_style_is_what_the_download_uses(self, tmp_path, monkeypatch):
+        app = self._open(tmp_path, monkeypatch)
+
+        app.color_picker(key="db_style_page_bg").set_value("#123456").run()
+        app.button(key="db_style_apply").click().run()
+
+        assert "background: #123456" in app.text_area(key=f"db_css_editor_{CUSTOM_PRESET}").value
+
+    def test_every_colour_picker_reaches_the_generated_stylesheet(self, tmp_path, monkeypatch):
+        """All five at once, because they once sat in a dialog, which is the one place the
+        panel a colour picker opens cannot be reached — the swatch showed, and the colour
+        could not be chosen."""
+        app = self._open(tmp_path, monkeypatch)
+
+        app.color_picker(key="db_style_page_bg").set_value("#ff0000").run()
+        app.color_picker(key="db_style_content_bg").set_value("#00ff00").run()
+        app.color_picker(key="db_style_title_text").set_value("#0000ff").run()
+        app.checkbox(key="db_style_title_use_bg").set_value(True).run()
+        app.color_picker(key="db_style_title_bg").set_value("#ffff00").run()
+        app.slider(key="db_style_title_border_width").set_value(3).run()
+        app.color_picker(key="db_style_title_border_colour").set_value("#00ffff").run()
+
+        css = custom_style.build_css(app.session_state[report_view.STYLE_DRAFT_KEY])
+        for colour in ("#ff0000", "#00ff00", "#0000ff", "#ffff00", "#00ffff"):
+            assert colour in css
+
+    def test_closing_without_applying_leaves_the_style_alone(self, tmp_path, monkeypatch):
+        app = self._open(tmp_path, monkeypatch)
+        before = app.session_state[dashboard_session.DB_STYLE_KEY].base_font_size
+
+        app.slider(key="db_style_base_size").set_value(19).run()
+        app.button(key="db_style_close").click().run()
+
+        assert app.session_state[dashboard_session.DB_STYLE_KEY].base_font_size == before
+        assert app.session_state[report_view.STYLE_PANEL_KEY] is False
+
+    def test_an_unreadable_colour_pair_is_warned_about_rather_than_refused(self, tmp_path, monkeypatch):
+        app = self._open(tmp_path, monkeypatch)
+
+        app.selectbox(key="db_style_element").set_value("Paragraph text").run()
+        app.color_picker(key="db_style_paragraph_text").set_value("#f4f4f4").run()
+
+        assert any("hard to read" in warning.value for warning in app.warning)
+        # Still applicable: the check informs, it does not block.
+        app.button(key="db_style_apply").click().run()
+        assert app.session_state[dashboard_session.DB_STYLE_KEY].element("paragraph").text_colour == "#f4f4f4"
+
+    def test_a_theme_can_be_saved_and_loaded_back(self, tmp_path, monkeypatch):
+        app = self._open(tmp_path, monkeypatch)
+
+        app.slider(key="db_style_width").set_value(1240).run()
+        app.text_input(key="db_style_theme_name").set_value("Company blue").run()
+        app.button(key="db_style_theme_save").click().run()
+
+        assert [theme["name"] for theme in list_themes(1)] == ["Company blue"]
+
+        # Change the draft, then load the theme back over it.
+        app.slider(key="db_style_width").set_value(800).run()
+        app.button(key="db_style_theme_load").click().run()
+
+        assert app.session_state[report_view.STYLE_DRAFT_KEY].content_width == 1240
+
+    def test_start_from_the_default_resets_the_draft_only(self, tmp_path, monkeypatch):
+        app = self._open(tmp_path, monkeypatch)
+
+        app.slider(key="db_style_base_size").set_value(19).run()
+        app.button(key="db_style_reset").click().run()
+
+        assert (
+            app.session_state[report_view.STYLE_DRAFT_KEY].base_font_size
+            == custom_style.default_settings().base_font_size
+        )
+
+
+class TestItemNumbers:
+    def test_the_build_view_numbers_each_placed_item(self, tmp_path, monkeypatch):
+        app = _make_app(tmp_path, monkeypatch, report=_ONE_ITEM())
+
+        assert any("1.1.1" in markdown.value for markdown in app.markdown)
+
+    def test_the_preview_numbers_each_item(self, tmp_path, monkeypatch):
+        app = _set_view(_make_app(tmp_path, monkeypatch, report=_ONE_ITEM()), "Preview")
+
+        assert any("1.1.1" in markdown.value for markdown in app.markdown)
+
+
+class TestTheLogo:
+    def test_a_report_without_a_logo_says_so(self, tmp_path, monkeypatch):
+        app = _make_app(tmp_path, monkeypatch, report=_ONE_ITEM())
+
+        assert any("No logo yet" in caption.value for caption in app.caption)
+        assert not _has_button(app, "db_logo_remove")
+
+    def test_a_stored_logo_brings_its_controls_with_it(self, tmp_path, monkeypatch):
+        report = _ONE_ITEM()
+        set_logo(report, LOGO_PNG, "company.png")
+        app = _make_app(tmp_path, monkeypatch, report=report)
+
+        assert app.segmented_control(key="db_logo_position").value == "left"
+        assert app.slider(key="db_logo_height").value == report.logo_height
+
+    def test_removing_the_logo_leaves_the_report_without_one(self, tmp_path, monkeypatch):
+        report = _ONE_ITEM()
+        set_logo(report, LOGO_PNG, "company.png")
+        app = _make_app(tmp_path, monkeypatch, report=report)
+
+        app.button(key="db_logo_remove").click().run()
+
+        assert not app.session_state[dashboard_session.DB_REPORT_KEY].has_logo()
+
+    def test_the_position_and_height_controls_write_back_to_the_report(self, tmp_path, monkeypatch):
+        report = _ONE_ITEM()
+        set_logo(report, LOGO_PNG, "company.png")
+        app = _make_app(tmp_path, monkeypatch, report=report)
+
+        app.segmented_control(key="db_logo_position").set_value("above").run()
+        app.slider(key="db_logo_height").set_value(120).run()
+
+        stored = app.session_state[dashboard_session.DB_REPORT_KEY]
+        assert stored.logo_position == "above"
+        assert stored.logo_height == 120

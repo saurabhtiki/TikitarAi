@@ -32,15 +32,19 @@ sends the user to Chat with data, Task Builder to its own Report-Items view.
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+import pandas as pd
 import streamlit as st
 
+from dashboard import custom_style
 from dashboard import session as dashboard_session
+from dashboard import theme_db
 from dashboard.css_presets import (
+    CUSTOM_PRESET,
     DEFAULT_PRESET,
     PRESET_DESCRIPTIONS,
-    PRESETS,
+    PRESET_OPTIONS,
     preset_css,
     rule_count,
     validate_css,
@@ -49,24 +53,34 @@ from dashboard.exceptions import ReportExportError
 from dashboard.excel_export import build_report_workbook
 from dashboard.html_export import build_html
 from dashboard.model import (
+    LOGO_FILE_TYPES,
+    LOGO_POSITIONS,
+    MAX_LOGO_HEIGHT,
     MAX_ROW_COLUMNS,
+    MIN_LOGO_HEIGHT,
     PinnedItem,
     Report,
     add_section,
     add_subsection,
     assign_item,
+    clear_logo,
     find_item,
     move,
+    numbered_items,
     numbered_sections,
     numbered_subsections,
     remove_item,
     remove_section,
     remove_subsection,
+    set_logo,
+    set_logo_height,
+    set_logo_position,
     subsection_choices,
     unassign_item,
     walk,
     wraps_to_new_row,
 )
+from dashboard.theme_db import ThemeStorageError
 
 logger = logging.getLogger(__name__)
 
@@ -383,12 +397,14 @@ def _render_subsection_body(report: Report, section, subsection, number: str, in
         st.caption(":grey[Empty — place a pinned item here from the Unplaced list.]")
         return
 
-    for item_index, item in enumerate(subsection.items):
+    # Numbered here too, from the same `numbered_items`, so the number beside an item while
+    # it is being arranged is the number it will carry in the download.
+    for item_index, (item_number, item) in enumerate(numbered_items(subsection.items, number)):
         with st.container(border=True, key=f"db_item_{item.item_id}"):
-            _render_item_body(report, subsection, item, item_index)
+            _render_item_body(report, subsection, item, item_index, item_number)
 
 
-def _render_item_body(report: Report, subsection, item: PinnedItem, index: int) -> None:
+def _render_item_body(report: Report, subsection, item: PinnedItem, index: int, number: str) -> None:
     """One placed item: its heading, its comment, and where it goes next.
 
     The output itself is not drawn here — a tree of a dozen full-size Plotly charts is
@@ -396,7 +412,7 @@ def _render_item_body(report: Report, subsection, item: PinnedItem, index: int) 
     **Look** button opens it full size, and Preview shows the whole report properly.
     """
     with st.container(horizontal=True, vertical_alignment="bottom", key=f"db_item_bar_{item.item_id}"):
-        st.markdown(_item_icon(item))
+        st.markdown(f"{_item_icon(item)} **{number}**")
         item.heading = st.text_input(
             "Heading",
             value=item.heading or item.question,
@@ -495,6 +511,131 @@ def _render_column_toggle(subsection, item: PinnedItem, index: int) -> None:
 
 
 # --------------------------------------------------------------------------------------
+# The header logo
+# --------------------------------------------------------------------------------------
+
+
+# Which upload has already been stored on the report. `st.file_uploader` hands back the same
+# file on every rerun until it is cleared, so without this the bytes would be re-read and
+# re-validated on every slider drag and every button press on the page.
+LOGO_APPLIED_KEY = "db_logo_applied_id"
+
+# How wide the on-page thumbnail is drawn. The export uses `report.logo_height`; this is
+# just big enough to see what was uploaded.
+LOGO_THUMBNAIL_WIDTH = 160
+
+
+def _absorb_logo_upload(report: Report, upload) -> None:
+    """Stores a newly uploaded picture on the report, once.
+
+    Reading the file is I/O and the picture may be anything the user picked, so a failure
+    here is shown and swallowed: an unreadable upload costs the logo, never the report.
+    """
+    if upload is None:
+        st.session_state.pop(LOGO_APPLIED_KEY, None)
+        return
+
+    if st.session_state.get(LOGO_APPLIED_KEY) == upload.file_id:
+        return
+
+    try:
+        data = upload.getvalue()
+    except OSError as error:
+        logger.exception("Could not read the uploaded logo '%s'.", upload.name)
+        st.error(f"That picture couldn't be read ({error}).", icon=":material/error:")
+        return
+
+    problems = set_logo(report, data, upload.name)
+    # Recorded either way, so a refused picture says why once instead of on every rerun.
+    st.session_state[LOGO_APPLIED_KEY] = upload.file_id
+
+    if problems:
+        st.error("That picture wasn't used as the logo:", icon=":material/error:")
+        for problem in problems:
+            st.markdown(f"- {problem}")
+        return
+
+    st.rerun(scope="app")
+
+
+def _render_logo_thumbnail(report: Report) -> None:
+    """The stored logo, shown small.
+
+    Drawing it means decoding it, and the bytes are a file the user picked — `set_logo`
+    checks the extension and the size, not that the contents are really a picture. A file
+    named `.png` that isn't one must cost the thumbnail and say so, not take the page and
+    the arrangement on it down.
+    """
+    try:
+        st.image(report.logo, width=LOGO_THUMBNAIL_WIDTH)
+    except Exception:
+        logger.exception("Could not display the stored report logo.")
+        st.warning(
+            "That file couldn't be read as a picture, so it won't show in the report "
+            "either. Remove it and upload a PNG or JPG.",
+            icon=":material/broken_image:",
+        )
+
+
+def _render_logo_controls(report: Report) -> None:
+    """Upload a logo, then say how big it is and where it sits.
+
+    Under the title box rather than in the Style panel, because a logo is part of the report
+    header the way the title is — it is saved with the Task and it shows in every style,
+    where a preset is a look chosen at download time.
+    """
+    with st.expander("Logo", icon=":material/image:", expanded=report.has_logo()):
+        upload = st.file_uploader(
+            "Logo picture",
+            type=list(LOGO_FILE_TYPES),
+            key="db_logo_upload",
+            help="A small picture printed beside the report title. It is embedded in the download, so the file still shows it offline.",
+        )
+        _absorb_logo_upload(report, upload)
+
+        if not report.has_logo():
+            st.caption(":grey[No logo yet. The report prints its title on its own.]")
+            return
+
+        _render_logo_thumbnail(report)
+
+        with st.container(horizontal=True, vertical_alignment="bottom", key="db_logo_controls"):
+            set_logo_position(
+                report,
+                st.segmented_control(
+                    "Position",
+                    options=list(LOGO_POSITIONS),
+                    default=report.logo_position,
+                    required=True,
+                    key="db_logo_position",
+                    format_func=str.capitalize,
+                    help="Where the logo sits relative to the title.",
+                ),
+            )
+            set_logo_height(
+                report,
+                st.slider(
+                    "Height",
+                    min_value=MIN_LOGO_HEIGHT,
+                    max_value=MAX_LOGO_HEIGHT,
+                    value=report.logo_height,
+                    key="db_logo_height",
+                    format="%dpx",
+                    help="How tall the logo prints in the report. The width follows automatically.",
+                ),
+            )
+            if st.button(
+                "Remove",
+                key="db_logo_remove",
+                icon=":material/delete:",
+                help="Print the report without a logo.",
+            ):
+                clear_logo(report)
+                st.session_state.pop(LOGO_APPLIED_KEY, None)
+                st.rerun(scope="app")
+
+
+# --------------------------------------------------------------------------------------
 # Preview
 # --------------------------------------------------------------------------------------
 
@@ -525,24 +666,28 @@ def _render_preview(report: Report, empty_message: str = EMPTY_PREVIEW) -> None:
         "app's own theme. To see the chosen style, use the preview under **Download**.]"
     )
 
+    if report.has_logo():
+        _render_logo_thumbnail(report)
+
     for section in sections:
         st.subheader(f"{section.number}. {section.name}", divider="grey")
         for subsection in section.subsections:
             st.markdown(f"##### {subsection.number} {subsection.name}")
-            # Grouped through the model's own `rows()`, the same call the HTML export
-            # makes, so a row that reads as four columns here is four columns there.
-            for row in subsection.rows():
+            # Grouped and numbered through the model's own `numbered_rows()`, the same call
+            # the HTML export makes, so a row that reads as four columns here is four
+            # columns there and "2.1.3" names the same item in both.
+            for row in subsection.numbered_rows():
                 if len(row) == 1:
-                    _render_preview_item(row[0])
+                    _render_preview_item(*row[0])
                     continue
-                for column, item in zip(st.columns(len(row), gap="medium"), row):
+                for column, (number, item) in zip(st.columns(len(row), gap="medium"), row):
                     with column:
-                        _render_preview_item(item)
+                        _render_preview_item(number, item)
 
 
-def _render_preview_item(item: PinnedItem) -> None:
-    """One item as the report reads it — heading, output, comment."""
-    st.markdown(f"**{item.display_heading()}**")
+def _render_preview_item(number: str, item: PinnedItem) -> None:
+    """One item as the report reads it — number, heading, output, comment."""
+    st.markdown(f"**{number} {item.display_heading()}**")
     _render_item_output(item, f"db_preview_{item.item_id}")
     if item.comment.strip():
         st.markdown(f":grey[_{item.comment.strip()}_]")
@@ -553,13 +698,26 @@ def _render_preview_item(item: PinnedItem) -> None:
 # --------------------------------------------------------------------------------------
 
 
+def style_css(preset: str) -> str:
+    """The stylesheet the export should use, given the chosen preset.
+
+    One place decides it, because three now ask: the Download view, the Custom editor's live
+    preview, and the CSS editor that opens pre-filled with it. **Custom** is generated from
+    the user's own settings rather than looked up, which is the only thing that separates it
+    from the three built-in presets.
+    """
+    if preset == CUSTOM_PRESET:
+        return custom_style.build_css(dashboard_session.custom_style())
+    return preset_css(preset)
+
+
 def _render_download(report: Report, empty_message: str = EMPTY_DOWNLOAD) -> None:
     st.markdown("##### Style")
 
     stored_preset = dashboard_session.selected_preset(DEFAULT_PRESET)
     preset = st.segmented_control(
         "Style",
-        options=list(PRESETS),
+        options=PRESET_OPTIONS,
         default=stored_preset,
         required=True,
         key="db_preset_picker",
@@ -573,7 +731,12 @@ def _render_download(report: Report, empty_message: str = EMPTY_DOWNLOAD) -> Non
     preset = preset or stored_preset
     st.caption(PRESET_DESCRIPTIONS.get(preset, ""))
 
-    css = dashboard_session.accepted_css() or preset_css(preset)
+    if preset == CUSTOM_PRESET:
+        _render_customize_button()
+        if _style_panel_open():
+            _render_style_editor(report)
+
+    css = dashboard_session.accepted_css() or style_css(preset)
     if dashboard_session.accepted_css():
         st.caption(f":green[Using your edited stylesheet — {rule_count(css)} rule(s).]")
 
@@ -758,6 +921,466 @@ def _preview_item_dialog(payload: dict) -> None:
         st.rerun(scope="app")
 
 
+# --------------------------------------------------------------------------------------
+# The Custom style editor
+# --------------------------------------------------------------------------------------
+
+
+# The settings being edited *in the editor*, kept apart from the ones in force. The page
+# reruns on every slider drag, and an editor that wrote straight through would restyle the
+# report behind it while the user was still deciding — and leave a half-made style in force
+# if they navigated away.
+STYLE_DRAFT_KEY = "db_style_draft"
+
+# Whether the style editor is showing. It is a panel on the page rather than a dialog: a
+# colour picker opens its own panel, and inside a dialog that panel could be seen but not
+# used, so no colour could be chosen.
+STYLE_PANEL_KEY = "db_style_panel"
+
+# Tall enough to show the header, an item and a table without scrolling, short enough to
+# sit beside the controls.
+STYLE_PREVIEW_HEIGHT = 460
+
+
+def _copy_settings(settings: custom_style.StyleSettings) -> custom_style.StyleSettings:
+    """A detached copy, made by round-tripping through the stored form.
+
+    Round-tripped rather than deep-copied so the copy is exactly what a saved theme would
+    reload as — if a value can't survive storage, the editor shows that straight away rather
+    than after the user has saved it and come back.
+    """
+    return custom_style.from_dict(custom_style.to_dict(settings))
+
+
+def _style_draft() -> custom_style.StyleSettings:
+    """The settings the editor is editing, seeded from the ones in force."""
+    draft = st.session_state.get(STYLE_DRAFT_KEY)
+    if not isinstance(draft, custom_style.StyleSettings):
+        draft = _copy_settings(dashboard_session.custom_style())
+        st.session_state[STYLE_DRAFT_KEY] = draft
+    return draft
+
+
+def _set_style_draft(draft: custom_style.StyleSettings) -> None:
+    st.session_state[STYLE_DRAFT_KEY] = draft
+
+
+def _clear_style_widgets() -> None:
+    """Forgets every widget the editor owns, so the next draw starts from the draft.
+
+    Streamlit keeps a widget's value under its key, and that stored value beats the `value=`
+    passed to it. Without this, loading a saved theme would redraw the sliders at the
+    *previous* theme's numbers.
+    """
+    for key in [key for key in st.session_state if str(key).startswith("db_style_")]:
+        # Everything the panel draws shares this prefix — and so do the draft and the
+        # open/closed flag, which must survive: the draft is what the redrawn widgets take
+        # their values from, and clearing the flag would shut the panel mid-edit.
+        if key not in (STYLE_DRAFT_KEY, STYLE_PANEL_KEY):
+            st.session_state.pop(key, None)
+
+
+def _style_panel_open() -> bool:
+    return bool(st.session_state.get(STYLE_PANEL_KEY))
+
+
+def _render_customize_button() -> None:
+    """Shows or hides the style editor, seeding the draft when it opens."""
+    open_now = _style_panel_open()
+    if st.button(
+        "Hide the style editor" if open_now else "Customize style",
+        key="db_style_open",
+        icon=":material/palette:",
+        help="Set the fonts, sizes, colours and borders the downloaded report uses.",
+    ):
+        if open_now:
+            st.session_state[STYLE_PANEL_KEY] = False
+        else:
+            _set_style_draft(_copy_settings(dashboard_session.custom_style()))
+            _clear_style_widgets()
+            st.session_state[STYLE_PANEL_KEY] = True
+        st.rerun(scope="app")
+
+
+def _render_page_controls(draft: custom_style.StyleSettings) -> custom_style.StyleSettings:
+    """The five settings that apply to the whole page."""
+    st.markdown("**Page**")
+
+    fonts = list(custom_style.FONT_STACKS)
+    font = st.selectbox(
+        "Font",
+        options=fonts,
+        index=fonts.index(draft.font) if draft.font in fonts else 0,
+        key="db_style_font",
+        help="Only fonts already on the reader's machine — the report has to open offline.",
+    )
+    base_font_size = st.slider(
+        "Base text size",
+        min_value=custom_style.BASE_FONT_RANGE[0],
+        max_value=custom_style.BASE_FONT_RANGE[1],
+        value=draft.base_font_size,
+        key="db_style_base_size",
+        format="%dpx",
+        help="Everything else is sized from this, so it moves the whole report at once.",
+    )
+    content_width = st.slider(
+        "Page width",
+        min_value=custom_style.CONTENT_WIDTH_RANGE[0],
+        max_value=custom_style.CONTENT_WIDTH_RANGE[1],
+        value=draft.content_width,
+        step=20,
+        key="db_style_width",
+        format="%dpx",
+        help="How wide the printed area is. Wider fits more table columns; narrower reads better.",
+    )
+    # Columns rather than a horizontal container: a colour picker opens a panel that a
+    # flex row clips, which leaves the swatch showing but the colour impossible to choose.
+    behind_column, page_column = st.columns(2, vertical_alignment="bottom")
+    with behind_column:
+        page_background = st.color_picker(
+            "Behind the page",
+            value=draft.page_background,
+            key="db_style_page_bg",
+            help="The colour around the report area.",
+        )
+    with page_column:
+        content_background = st.color_picker(
+            "The page itself",
+            value=draft.content_background,
+            key="db_style_content_bg",
+            help="The colour the report is printed on.",
+        )
+
+    return replace(
+        draft,
+        font=font,
+        base_font_size=base_font_size,
+        content_width=content_width,
+        page_background=page_background,
+        content_background=content_background,
+    )
+
+
+def _render_element_controls(draft: custom_style.StyleSettings) -> custom_style.StyleSettings:
+    """One element at a time, chosen from a dropdown.
+
+    One at a time rather than six panels stacked, because every element takes the same four
+    or seven controls: showing them all at once is a wall of near-identical sliders, and the
+    live preview beside them is what says which element is being changed.
+    """
+    st.markdown("**Element**")
+
+    specs = {spec.label: spec for spec in custom_style.ELEMENT_SPECS}
+    label = st.selectbox(
+        "What to change",
+        options=list(specs),
+        key="db_style_element",
+        help="Pick a part of the report, then set how it looks.",
+    )
+    spec = specs[label]
+    element = draft.element(spec.key)
+    st.caption(f":grey[{spec.hint}]")
+
+    font_size = st.slider(
+        "Text size",
+        min_value=custom_style.ELEMENT_FONT_RANGE[0],
+        max_value=custom_style.ELEMENT_FONT_RANGE[1],
+        value=float(element.font_size),
+        step=0.05,
+        key=f"db_style_{spec.key}_size",
+        format="%.2fx",
+        help="A multiple of the base text size, so it stays in proportion if you change that.",
+    )
+
+    # See `_render_page_controls`: colour pickers need a column, not a flex row.
+    text_column, fill_column, background_column = st.columns(
+        [3, 2, 3], vertical_alignment="bottom"
+    )
+    with text_column:
+        text_colour = st.color_picker(
+            "Text colour",
+            value=element.text_colour,
+            key=f"db_style_{spec.key}_text",
+            help="The colour of the words themselves.",
+        )
+    with fill_column:
+        use_background = st.checkbox(
+            "Fill",
+            value=bool(element.background_colour),
+            key=f"db_style_{spec.key}_use_bg",
+            help="Paint a colour behind this element. Off leaves the page showing through.",
+        )
+    with background_column:
+        background_colour = st.color_picker(
+            spec.background_label,
+            value=element.background_colour or "#eef1f5",
+            key=f"db_style_{spec.key}_bg",
+            disabled=not use_background,
+            help="The colour behind this element. Padding is added for you, so the text is never cramped.",
+        )
+
+    border_width = element.border_width
+    border_colour = element.border_colour
+    border_radius = element.border_radius
+    if spec.bordered:
+        width_column, colour_column = st.columns([3, 2], vertical_alignment="bottom")
+        with width_column:
+            border_width = st.slider(
+                "Border",
+                min_value=custom_style.BORDER_WIDTH_RANGE[0],
+                max_value=custom_style.BORDER_WIDTH_RANGE[1],
+                value=int(element.border_width),
+                key=f"db_style_{spec.key}_border_width",
+                format="%dpx",
+                help="0 means no border.",
+            )
+        with colour_column:
+            border_colour = st.color_picker(
+                "Border colour",
+                value=element.border_colour,
+                key=f"db_style_{spec.key}_border_colour",
+                disabled=border_width == 0,
+                help="The colour of the border line.",
+            )
+        border_radius = st.slider(
+            "Rounded corners",
+            min_value=custom_style.BORDER_RADIUS_RANGE[0],
+            max_value=custom_style.BORDER_RADIUS_RANGE[1],
+            value=int(element.border_radius),
+            key=f"db_style_{spec.key}_radius",
+            format="%dpx",
+            help="Only applies where the border goes all the way round.",
+        )
+
+    return draft.with_element(
+        spec.key,
+        font_size=font_size,
+        text_colour=text_colour,
+        background_colour=background_colour if use_background else custom_style.NO_BACKGROUND,
+        border_width=border_width,
+        border_colour=border_colour,
+        border_radius=border_radius,
+    )
+
+
+def _sample_report(report: Report) -> Report:
+    """A one-item stand-in report, for the editor's live preview.
+
+    Built rather than borrowed: the real report may be empty, may be a hundred items long,
+    and rasterizing its charts on every slider drag would make the editor unusable. The
+    title and the logo *are* borrowed, because those are the parts of the header the style
+    has to sit around.
+    """
+    sample = Report(
+        title=(report.title or "").strip() or "Report title",
+        logo=report.logo,
+        logo_mime=report.logo_mime,
+        logo_height=report.logo_height,
+        logo_position=report.logo_position,
+    )
+    section = add_section(sample, "Section heading")
+    subsection = section.subsections[0]
+    subsection.name = "Subsection heading"
+    subsection.items = [
+        PinnedItem(
+            heading="Item heading",
+            comment="The note under an item is Paragraph text.",
+            frame=pd.DataFrame({"Region": ["North", "South", "East"], "Sales": [1200, 940, 1580]}),
+        )
+    ]
+    return sample
+
+
+def _render_style_preview(draft: custom_style.StyleSettings, report: Report) -> None:
+    """The sample report rendered with the draft stylesheet, and what it warns about.
+
+    The generated CSS is offered underneath rather than instead of the picture: most people
+    cannot read a stylesheet, and the ones who can want to copy it into the editor and
+    finish it by hand.
+    """
+    st.markdown("**Preview**")
+
+    css = custom_style.build_css(draft)
+    try:
+        html = build_html(_sample_report(report), css)
+    except ReportExportError as error:
+        logger.exception("Could not render the custom style preview.")
+        st.error(str(error), icon=":material/error:")
+        return
+
+    st.iframe(html, height=STYLE_PREVIEW_HEIGHT)
+
+    for warning in custom_style.contrast_warnings(draft):
+        st.warning(warning, icon=":material/contrast:")
+
+    with st.expander("The stylesheet this makes", icon=":material/code:"):
+        st.code(css, language="css")
+
+
+def _saved_themes(user_id: int) -> list[dict]:
+    """The account's saved themes, or an empty list if they can't be read.
+
+    An empty list rather than a raise: the shelf is a convenience beside the controls, and a
+    database that is briefly unavailable must not take the whole editor with it.
+    """
+    try:
+        return theme_db.list_themes(user_id)
+    except ThemeStorageError as error:
+        logger.exception("Could not list saved report themes.")
+        st.error(str(error), icon=":material/error:")
+        return []
+
+
+def _render_theme_shelf(draft: custom_style.StyleSettings) -> None:
+    """Save this style under a name, or load or delete one saved earlier.
+
+    Hidden entirely when there is no signed-in account to own the themes — every row is
+    scoped to a `user_id`, and a shelf that cannot be written to is a control that does
+    nothing.
+    """
+    user_id = st.session_state.get("user_id")
+    if not user_id:
+        return
+
+    with st.expander("Saved themes", icon=":material/bookmark:"):
+        with st.container(horizontal=True, vertical_alignment="bottom", key="db_style_save_row"):
+            name = st.text_input(
+                "Theme name",
+                key="db_style_theme_name",
+                placeholder="e.g. Company blue",
+                help="Save these settings under a name and reuse them on the next report.",
+            )
+            if st.button(
+                "Save",
+                key="db_style_theme_save",
+                icon=":material/save:",
+                help="Save the settings as they are now. A theme with this name is replaced.",
+            ):
+                try:
+                    theme_db.save_theme(user_id, name, draft)
+                except ThemeStorageError as error:
+                    st.error(str(error), icon=":material/error:")
+                else:
+                    st.success(f"Saved '{name.strip()}'.", icon=":material/check_circle:")
+
+        themes = _saved_themes(user_id)
+        if not themes:
+            st.caption(":grey[No saved themes yet.]")
+            return
+
+        theme_ids = {theme["name"]: theme["theme_id"] for theme in themes}
+        chosen = st.selectbox(
+            "Saved theme",
+            options=list(theme_ids),
+            key="db_style_theme_pick",
+            help="Pick a theme, then load it into the controls or delete it.",
+        )
+
+        with st.container(horizontal=True, key="db_style_theme_actions"):
+            if st.button(
+                "Load",
+                key="db_style_theme_load",
+                icon=":material/download:",
+                help="Put this theme into the controls. Nothing changes in the report until you press Apply.",
+            ):
+                try:
+                    loaded = theme_db.load_theme(theme_ids[chosen], user_id)
+                except ThemeStorageError as error:
+                    st.error(str(error), icon=":material/error:")
+                else:
+                    _set_style_draft(loaded)
+                    # The sliders still hold the previous theme's values under their keys,
+                    # and a stored widget value beats the `value=` passed to it — so they
+                    # are dropped and redrawn from the loaded draft.
+                    _clear_style_widgets()
+                    st.rerun(scope="app")
+
+            if st.button(
+                "Delete",
+                key="db_style_theme_delete",
+                icon=":material/delete:",
+                help="Remove this saved theme. The style you are editing is not affected.",
+            ):
+                try:
+                    theme_db.delete_theme(theme_ids[chosen], user_id)
+                except ThemeStorageError as error:
+                    st.error(str(error), icon=":material/error:")
+                else:
+                    st.rerun(scope="app")
+
+
+def _apply_style(draft: custom_style.StyleSettings) -> None:
+    """Puts the draft into force and closes the editor.
+
+    The CSS editor's text box is dropped on the way out: it is keyed on the preset name, so
+    its stored value would go on showing the stylesheet the *previous* settings generated,
+    under a box labelled Custom.
+    """
+    dashboard_session.set_custom_style(draft)
+    # This also clears any hand-edited stylesheet, which is what makes the new settings
+    # visible at all — an accepted edit outranks the preset.
+    dashboard_session.set_selected_preset(CUSTOM_PRESET)
+    st.session_state.pop(f"db_css_editor_{CUSTOM_PRESET}", None)
+    st.session_state[STYLE_PANEL_KEY] = False
+    st.rerun(scope="app")
+
+
+def _render_style_editor(report: Report) -> None:
+    """Requirement 6.4's stylesheet, set with pickers instead of CSS.
+
+    Controls on the left, the sample report on the right, and nothing reaches the report
+    until **Apply**. Drawn on the page inside a bordered box rather than in a dialog: the
+    colour pickers each open a panel of their own, and a dialog is the one place that panel
+    cannot be reached.
+    """
+    draft = _style_draft()
+
+    with st.container(border=True, key="db_style_panel_box"):
+        st.markdown("##### Custom style")
+
+        controls_column, preview_column = st.columns([3, 4], gap="medium")
+
+        with controls_column:
+            draft = _render_page_controls(draft)
+            st.divider()
+            draft = _render_element_controls(draft)
+
+        # Stored before the preview renders, so what is previewed is what Apply would save.
+        _set_style_draft(draft)
+
+        with preview_column:
+            _render_style_preview(draft, report)
+
+        _render_theme_shelf(draft)
+
+        with st.container(horizontal=True, vertical_alignment="center", key="db_style_actions"):
+            if st.button(
+                "Apply",
+                key="db_style_apply",
+                icon=":material/check:",
+                type="primary",
+                help="Use these settings for the downloaded report.",
+            ):
+                _apply_style(draft)
+            if st.button(
+                "Start from the default",
+                key="db_style_reset",
+                icon=":material/restart_alt:",
+                help="Put every setting back to its starting value. Nothing is applied until you press Apply.",
+            ):
+                _set_style_draft(custom_style.default_settings())
+                _clear_style_widgets()
+                st.rerun(scope="app")
+            if st.button(
+                "Close",
+                key="db_style_close",
+                icon=":material/close:",
+                help="Close the editor without applying these settings.",
+            ):
+                st.session_state[STYLE_PANEL_KEY] = False
+                st.rerun(scope="app")
+
+
 DIALOGS = {"preview": _preview_item_dialog}
 
 
@@ -829,6 +1452,7 @@ def render_report_workspace(report: Report, *, empty_pool: EmptyPool | None = No
         placeholder="e.g. Q3 sales review",
         help="Printed at the top of the report and used as the downloaded file's name.",
     )
+    _render_logo_controls(report)
 
     view = st.segmented_control(
         "View",

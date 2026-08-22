@@ -22,6 +22,7 @@ import logging
 import streamlit as st
 
 from analyst.session import ChatMessage
+from dashboard.custom_style import StyleSettings, default_settings
 from dashboard.model import PinnedItem, Report, find_item, find_item_by_source, remove_item
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ DB_DIALOG_KEY = "db_open_dialog"
 DB_CSS_KEY = "db_accepted_css"
 DB_PRESET_KEY = "db_css_preset"
 DB_VIEW_KEY = "db_view"
+DB_STYLE_KEY = "db_custom_style"
 
 # Which report everything below works on. There is more than one now — the session
 # Dashboard, and a Task's own report (requirement 7.3 step 5) — and the producers that pin
@@ -236,6 +238,29 @@ def set_selected_preset(name: str) -> None:
     set_accepted_css(None)
 
 
+def custom_style() -> StyleSettings:
+    """The Custom style's settings, created at their defaults on first access.
+
+    Held here rather than on the `Report` because it is a *style*, and the presets already
+    live in session state beside it — the two pickers have to behave the same way or the
+    Style panel would remember one choice and forget the other.
+    """
+    settings = st.session_state.get(DB_STYLE_KEY)
+    if not isinstance(settings, StyleSettings):
+        settings = default_settings()
+        st.session_state[DB_STYLE_KEY] = settings
+    return settings
+
+
+def set_custom_style(settings: StyleSettings) -> None:
+    """Replaces the Custom style wholesale — applying the dialog, or loading a saved theme.
+
+    Replaced rather than mutated, so a dialog that is dismissed half-way leaves the style in
+    force exactly as it was.
+    """
+    st.session_state[DB_STYLE_KEY] = settings
+
+
 # --------------------------------------------------------------------------------------
 # Dialogs
 # --------------------------------------------------------------------------------------
@@ -273,5 +298,12 @@ def reset_dashboard() -> None:
     """
     # The *active* report, not `DB_REPORT_KEY` outright: Start over in Task Builder must
     # clear the Task's report and leave the session Dashboard alone, and vice versa.
-    for key in (active_report_key(), DB_DIALOG_KEY, DB_CSS_KEY, DB_PRESET_KEY, DB_VIEW_KEY):
+    for key in (
+        active_report_key(),
+        DB_DIALOG_KEY,
+        DB_CSS_KEY,
+        DB_PRESET_KEY,
+        DB_STYLE_KEY,
+        DB_VIEW_KEY,
+    ):
         st.session_state.pop(key, None)

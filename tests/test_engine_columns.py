@@ -378,3 +378,61 @@ class TestDescribeStatements:
             ['ALTER TABLE "s" ADD COLUMN "tax" DOUBLE', 'UPDATE "s" SET "basic" = (0)']
         )
         assert lines == ['ALTER TABLE "s" ADD COLUMN "tax" DOUBLE', 'UPDATE "s" SET "basic" = (0)']
+
+
+class TestSpacedColumnNames:
+    """Real spreadsheet headers — `Sales Amount (Actual)` — are only legal SQL in quotes,
+    and neither the model nor a user typing a formula reliably adds them."""
+
+    @pytest.fixture
+    def spaced(self):
+        created = ds.open_connection()
+        ds.register_table(
+            created,
+            "sheet1",
+            pd.DataFrame(
+                {
+                    "Sales Amount (Actual)": [100.0, 200.0],
+                    "Cost Amount (Actual)": [40.0, 60.0],
+                    "Amount (Actual)": [1.0, 2.0],
+                    "region": ["North", "South"],
+                }
+            ),
+        )
+        yield created
+        created.close()
+
+    def test_an_unquoted_expression_is_repaired_rather_than_refused(self, spaced):
+        statements = engine_columns.add_calculated_column(
+            spaced, "sheet1", "total", "Sales Amount (Actual) + Cost Amount (Actual)"
+        )
+        assert '"Sales Amount (Actual)" + "Cost Amount (Actual)"' in statements[1]
+        assert ds.preview(spaced, "sheet1")["total"].tolist() == [140.0, 260.0]
+
+    def test_the_longest_matching_name_wins(self, spaced):
+        """`Amount (Actual)` is a column too, so a shorter name must not be quoted inside a
+        longer one and leave `Sales "Amount (Actual)"` behind."""
+        assert (
+            engine_columns.expression_type(spaced, "sheet1", "Sales Amount (Actual) * 2") == "DOUBLE"
+        )
+
+    def test_names_already_quoted_are_left_alone(self, spaced):
+        statements = engine_columns.add_calculated_column(
+            spaced, "sheet1", "doubled", '"Sales Amount (Actual)" * 2'
+        )
+        assert '""' not in statements[1]
+
+    def test_a_text_literal_that_reads_like_a_column_name_is_not_touched(self, spaced):
+        statements = engine_columns.update_column_values(
+            spaced, "sheet1", "region", "'Sales Amount (Actual)'", "Cost Amount (Actual) > 50"
+        )
+        assert "('Sales Amount (Actual)')" in statements[0]
+        assert 'WHERE ("Cost Amount (Actual)" > 50)' in statements[0]
+        assert ds.preview(spaced, "sheet1")["region"].tolist() == ["North", "Sales Amount (Actual)"]
+
+    def test_the_row_count_probe_reads_a_spaced_column(self, spaced):
+        assert engine_columns.affected_row_count(spaced, "sheet1", "Sales Amount (Actual) > 150") == 1
+
+    def test_ordinary_expressions_are_unchanged(self, connection):
+        statements = engine_columns.add_calculated_column(connection, "salaries", "tax", "basic * 0.10")
+        assert statements[1].endswith("= (basic * 0.10)")

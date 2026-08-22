@@ -16,6 +16,7 @@ from checks.db import init_check_sets_table
 from checks.exceptions import ChecksStorageError
 from cleaner.db import init_cleaning_templates_table
 from cleaner.exceptions import TemplateStorageError
+from dashboard.theme_db import ThemeStorageError, init_report_themes_table
 from llm.db import init_llm_table
 from llm.exceptions import LLMDatabaseError
 from meetings.db import init_meetings_tables
@@ -48,6 +49,7 @@ def bootstrap_database() -> bool:
         init_meetings_tables()
         init_tasks_table()
         init_cleaning_templates_table()
+        init_report_themes_table()
     except (
         AuthDatabaseError,
         LLMDatabaseError,
@@ -56,6 +58,7 @@ def bootstrap_database() -> bool:
         MeetingStorageError,
         TaskStorageError,
         TemplateStorageError,
+        ThemeStorageError,
     ):
         logger.exception("Failed to bootstrap the application database.")
         raise
@@ -70,6 +73,7 @@ except (
     ChecksStorageError,
     MeetingStorageError,
     TemplateStorageError,
+    ThemeStorageError,
 ):
     st.error("The application couldn't start because the database is unavailable.")
     st.stop()

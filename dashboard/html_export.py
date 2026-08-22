@@ -71,8 +71,11 @@ def frame_to_html(frame: pd.DataFrame) -> str:
     return _HEADER_ALIGN_PATTERN.sub("<tr>", frame.to_html(index=False, escape=True, border=0, na_rep=""))
 
 
-def _render_item(item) -> dict:
+def _render_item(number: str, item) -> dict:
     """One pinned item flattened into what the template needs.
+
+    `number` is its "2.1.3" — derived from list position by `model.numbered_items`, the same
+    way section and subsection numbers are, so it renumbers itself when the item moves.
 
     `chart_failed` distinguishes "this item never had a chart" from "this item had one and
     it couldn't be rasterized" — the second earns a line of explanation next to the table
@@ -80,6 +83,7 @@ def _render_item(item) -> dict:
     """
     png = item_png(item)
     return {
+        "number": number,
         "heading": item.display_heading(),
         "comment": (item.comment or "").strip(),
         "image": base64.b64encode(png).decode("ascii") if png else "",
@@ -108,7 +112,8 @@ def build_html(report: Report, css: str) -> str:
                     # here rather than in the template, so the flag that decides layout is
                     # read by `group_into_rows` in one place.
                     "entries": [
-                        [_render_item(item) for item in row] for row in subsection.rows()
+                        [_render_item(number, item) for number, item in row]
+                        for row in subsection.numbered_rows()
                     ],
                 }
                 for subsection in section.subsections
@@ -122,6 +127,13 @@ def build_html(report: Report, css: str) -> str:
         return template.render(
             title=(report.title or "").strip() or UNTITLED_REPORT,
             css=css,
+            # Empty when there is no logo, which is what makes the template fall back to the
+            # markup it always wrote. The bytes are this app's own — uploaded, size-checked
+            # and mime-typed by `model.set_logo` — so the `data:` URI carries nothing the
+            # user typed.
+            logo=report.logo_data_uri(),
+            logo_position=report.logo_position,
+            logo_height=report.logo_height,
             generated_at=f"Generated {datetime.now():%d %b %Y, %H:%M}",
             sections=sections,
         )

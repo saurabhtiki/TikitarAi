@@ -2,21 +2,32 @@ import pandas as pd
 import pytest
 
 from dashboard.model import (
+    DEFAULT_LOGO_HEIGHT,
+    DEFAULT_LOGO_POSITION,
     DEFAULT_SUBSECTION_NAME,
+    MAX_LOGO_BYTES,
+    MAX_LOGO_HEIGHT,
     MAX_ROW_COLUMNS,
+    MIN_LOGO_HEIGHT,
     UNTITLED_ITEM,
     PinnedItem,
     Report,
     add_section,
     add_subsection,
     assign_item,
+    clear_logo,
     group_into_rows,
+    logo_problems,
     move,
+    numbered_items,
     numbered_sections,
     numbered_subsections,
     remove_item,
     remove_section,
     remove_subsection,
+    set_logo,
+    set_logo_height,
+    set_logo_position,
     subsection_choices,
     unassign_item,
     walk,
@@ -303,3 +314,110 @@ def test_walk_hands_renderers_the_same_rows(report):
     items.append(PinnedItem(item_id="pool-4", heading="Beside it", column_with_previous=True))
     rendered = walk(report)[0].subsections[0]
     assert [len(row) for row in rendered.rows()] == [2]
+
+
+# --------------------------------------------------------------------------------------
+# Item numbering
+# --------------------------------------------------------------------------------------
+
+
+def test_items_are_numbered_section_subsection_point():
+    items = _items(False, False, False)
+    assert [number for number, _ in numbered_items(items, "2.1")] == ["2.1.1", "2.1.2", "2.1.3"]
+
+
+def test_item_numbers_follow_a_reorder_rather_than_being_stored():
+    items = _items(False, False, False)
+    last = items[-1]
+    move(items, 2, 0)
+
+    assert numbered_items(items, "1.1")[0][1] is last
+
+
+def test_numbered_rows_hand_out_numbers_in_reading_order_across_a_row(report):
+    items = report.sections[0].subsections[0].items
+    items.append(PinnedItem(item_id="pool-4", heading="Beside it", column_with_previous=True))
+    rendered = walk(report)[0].subsections[0]
+
+    assert [[number for number, _ in row] for row in rendered.numbered_rows()] == [["1.1.1", "1.1.2"]]
+
+
+def test_numbered_rows_group_exactly_the_way_rows_does(report):
+    items = report.sections[0].subsections[0].items
+    items.append(PinnedItem(item_id="pool-4", heading="Beside it", column_with_previous=True))
+    items.append(PinnedItem(item_id="pool-5", heading="Below"))
+    rendered = walk(report)[0].subsections[0]
+
+    assert [len(row) for row in rendered.numbered_rows()] == [len(row) for row in rendered.rows()]
+
+
+# --------------------------------------------------------------------------------------
+# The header logo
+# --------------------------------------------------------------------------------------
+
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\npretend-this-is-a-picture"
+
+
+def test_a_new_report_has_no_logo():
+    report = Report()
+    assert not report.has_logo()
+    assert report.logo_data_uri() == ""
+
+
+def test_an_accepted_logo_becomes_a_data_uri_with_its_own_mime_type():
+    report = Report()
+    assert set_logo(report, PNG_BYTES, "company.PNG") == []
+
+    assert report.logo_mime == "image/png"
+    assert report.logo_data_uri().startswith("data:image/png;base64,")
+
+
+def test_a_jpg_is_stored_as_jpeg():
+    report = Report()
+    set_logo(report, PNG_BYTES, "company.jpg")
+    assert report.logo_mime == "image/jpeg"
+
+
+def test_a_file_type_the_export_cannot_carry_is_refused():
+    report = Report()
+    problems = set_logo(report, PNG_BYTES, "company.svg")
+
+    assert problems
+    assert not report.has_logo()
+
+
+def test_an_oversized_logo_is_refused_and_the_previous_one_stays():
+    report = Report()
+    set_logo(report, PNG_BYTES, "first.png")
+
+    problems = set_logo(report, b"x" * (MAX_LOGO_BYTES + 1), "huge.png")
+
+    assert problems
+    assert report.logo == PNG_BYTES
+
+
+def test_an_empty_file_is_refused():
+    assert logo_problems(b"", "company.png")
+
+
+def test_clearing_the_logo_leaves_the_report_without_one():
+    report = Report()
+    set_logo(report, PNG_BYTES, "company.png")
+    clear_logo(report)
+
+    assert not report.has_logo()
+    assert report.logo_data_uri() == ""
+
+
+def test_the_logo_height_is_clamped_to_what_the_slider_offers():
+    report = Report()
+    assert set_logo_height(report, 9_999) == MAX_LOGO_HEIGHT
+    assert set_logo_height(report, 1) == MIN_LOGO_HEIGHT
+    assert set_logo_height(report, "not a number") == DEFAULT_LOGO_HEIGHT
+
+
+def test_an_unknown_logo_position_falls_back_to_the_default():
+    report = Report()
+    assert set_logo_position(report, "diagonally") == DEFAULT_LOGO_POSITION
+    assert set_logo_position(report, "above") == "above"

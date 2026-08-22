@@ -19,7 +19,7 @@ Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- update this line each time a phase is completed -->
-All 10 stages of requirements.md done; plus phase 11 — summaries can rename their output columns, and Group & total / Pivot pick functions per column
+All 10 stages of requirements.md done; plus phase 12 — reports carry a logo, number items as 2.1.1, and offer a Custom style set from a dialog with saveable themes
 
 # Library docs (Agno, Streamlit)
 
