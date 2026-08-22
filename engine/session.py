@@ -38,6 +38,7 @@ DE_PENDING_STEPS_KEY = "de_pending_step_state"
 DE_AUTOCOLLAPSED_KEY = "de_autocollapsed_steps"
 DE_REBUILD_KEY = "de_rebuild_count"
 DE_START_OVER_KEY = "de_start_over_pending"
+DE_CLEAR_FILES_KEY = "de_clear_files_pending"
 DE_DISMISSED_KEY = "de_dismissed_tables"
 DE_LOAD_OUTCOMES_KEY = "de_load_outcomes"
 
@@ -701,6 +702,62 @@ def schema_context() -> str:
 # --------------------------------------------------------------------------------------
 
 
+def clear_tables() -> int:
+    """Drops every loaded table, whatever loaded it, and empties the uploader with them.
+
+    The middle ground between Remove — one table — and Start over, which discards the whole
+    session including the report and the chat written against it. Here the data goes and
+    nothing else does, which is what a user who arrived to find last week's files still
+    loaded actually wants.
+
+    Must run **before** the uploader widget is created, because it writes that widget's own
+    key; `queue_clear_files` is how a button pressed after it exists gets that.
+
+    Returns:
+        How many tables were dropped.
+    """
+    existing = get_tables()
+    dropped = len(existing)
+
+    _drop_removed(existing, {})
+    st.session_state[DE_TABLES_KEY] = {}
+    # The files go with the tables, so there is nothing left for `sync_tables` to load
+    # straight back in — and so nothing to mark dismissed to stop it, unlike `remove_table`.
+    st.session_state.pop(DE_UPLOADER_KEY, None)
+    st.session_state.pop(DE_DISMISSED_KEY, None)
+    set_candidates([])
+    clear_load_outcomes()
+    try:
+        refresh_dictionary()
+    except DataEngineError:
+        logger.exception("Could not rebuild the column dictionary after clearing the files.")
+
+    if dropped:
+        logger.info("Cleared %d loaded table(s); the rest of the session is untouched.", dropped)
+    return dropped
+
+
+def queue_clear_files() -> None:
+    """Marks every loaded table to be dropped on the next run.
+
+    Deferred for `queue_start_over`'s two reasons: clearing the tables mid-run would be
+    undone within the same run by `sync_tables` re-reading the still-populated uploader,
+    and the uploader's own key can't be written after the widget exists.
+    """
+    st.session_state[DE_CLEAR_FILES_KEY] = True
+
+
+def consume_clear_files() -> int:
+    """Applies a queued clear. Call before the uploader renders.
+
+    Returns:
+        How many tables were dropped, so the page can say so.
+    """
+    if not st.session_state.pop(DE_CLEAR_FILES_KEY, False):
+        return 0
+    return clear_tables()
+
+
 def queue_start_over() -> None:
     """Marks the session to be cleared on the next run.
 
@@ -741,6 +798,7 @@ def reset_engine() -> None:
         DE_AUTOCOLLAPSED_KEY,
         DE_DISMISSED_KEY,
         DE_LOAD_OUTCOMES_KEY,
+        DE_CLEAR_FILES_KEY,
     ):
         st.session_state.pop(key, None)
 

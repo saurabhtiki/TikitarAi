@@ -674,6 +674,34 @@ def _render_summary(result) -> None:
                     st.caption(f":orange[{note}]")
 
 
+def _render_clear_files(loaded_tables: list[engine_session.EngineTable]) -> None:
+    """Empties Step 1 without touching the run around it.
+
+    A session keeps its tables until something drops them, so a second visit — a new task, a
+    new month — opens with the previous upload still sitting in Step 1. Removing them one by
+    one works and Start over works, but the first is tedious and the second throws away the
+    task and its report as well. This is the plain "these are last time's files, get rid of
+    them" button that neither of those is.
+    """
+    if not loaded_tables:
+        return
+
+    if st.button(
+        "Clear all files",
+        key="rt_clear_files_button",
+        icon=":material/mop:",
+        help="Drop every table listed above and empty the upload box, ready for this run's "
+        "files. Your saved tasks and this run's report are not affected.",
+    ):
+        # Queued, not done here: the uploader was created earlier this run and Streamlit
+        # forbids writing a widget's own key once it exists. See `queue_clear_files`.
+        engine_session.queue_clear_files()
+        # What the chat type made of the files goes with the files, exactly as it does on
+        # Start over — otherwise the next upload is measured against the last one's verdict.
+        chat_types_session.forget_upload()
+        st.rerun(scope="app")
+
+
 def _render_start_over() -> None:
     """Discards this session's data and everything written against it.
 
@@ -774,6 +802,7 @@ if profile is not None:
                 )
                 if upload_step.open:
                     setup_view.render_upload_report(loaded_tables)
+                    _render_clear_files(loaded_tables)
 
         if set(engine_session.get_tables()) != tables_before:
             # The panels below read the table set as it stood at the top of this run, which the

@@ -368,6 +368,52 @@ class TestRunning:
         assert control.options == ["Preview", "Download"]
 
 
+class TestClearFiles:
+    """A session holds its tables until something drops them, so Step 1 can open with the
+    previous visit's files already in it. This is the button that empties it."""
+
+    def test_it_drops_every_table_and_empties_the_uploader(self, tmp_path, monkeypatch):
+        app, _task_id = _loaded(tmp_path, monkeypatch)
+        assert len(app.session_state[engine_session.DE_TABLES_KEY]) == 1
+
+        app.button(key="rt_clear_files_button").click().run()
+
+        assert not app.exception
+        assert not app.session_state[engine_session.DE_TABLES_KEY]
+        # The uploader too, or `sync_tables` would load the very same files straight back in.
+        assert not app.file_uploader(key=engine_session.DE_UPLOADER_KEY).value
+        assert "Upload a CSV or Excel file to get started." in _texts(app)
+
+    def test_the_task_and_its_report_survive(self, tmp_path, monkeypatch):
+        """The difference between this and Start over, and the whole reason it exists."""
+        app, _task_id = _loaded(tmp_path, monkeypatch)
+        app.checkbox(key="rt_rewrite_comments").set_value(False).run()
+        app.button(key="rt_run").click().run()
+        assert app.session_state["rt_report"]
+
+        app.button(key="rt_clear_files_button").click().run()
+
+        assert not app.exception
+        assert app.session_state["rt_report"]
+        assert app.session_state["rt_task"] is not None
+
+    def test_a_fresh_file_loads_again_afterwards(self, tmp_path, monkeypatch):
+        """Clearing must not leave the file marked dismissed — the next upload has to land."""
+        app, _task_id = _loaded(tmp_path, monkeypatch)
+        app.button(key="rt_clear_files_button").click().run()
+
+        _upload(app, [("salary.csv", SALARY_CSV, "text/csv")])
+
+        assert len(app.session_state[engine_session.DE_TABLES_KEY]) == 1
+        assert any("matched" in message.value for message in app.success)
+
+    def test_it_is_not_offered_when_nothing_is_loaded(self, tmp_path, monkeypatch):
+        app, task_id = _app(tmp_path, monkeypatch)
+        _open(app, task_id)
+
+        assert not [button for button in app.button if button.key == "rt_clear_files_button"]
+
+
 class TestStartOver:
     def test_it_clears_the_run_but_not_the_saved_task(self, tmp_path, monkeypatch):
         app, task_id = _loaded(tmp_path, monkeypatch)

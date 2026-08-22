@@ -115,6 +115,7 @@ def mount_upload(
     # Consumed before the uploader exists: Streamlit won't allow a widget's own
     # session_state key to be written once that widget has been created this run.
     session.consume_start_over()
+    cleared = session.consume_clear_files()
 
     # Also before the uploader exists, and for a related reason: this reads whether the
     # widget's value survived the last run, which stops being answerable the moment the
@@ -132,6 +133,11 @@ def mount_upload(
         max_upload_size=session.MAX_UPLOAD_SIZE_MB,
         help="Every cell is read as text first, so leading zeros in IDs and account numbers survive.",
     )
+
+    if cleared:
+        # Said on the run that clears, next to the box that is now empty, so the step reads
+        # the same way it does at the very start of a session.
+        st.caption(f":grey[Cleared {cleared} table(s). Upload the files for this run.]")
 
     if detached:
         # Said once, on the run that detaches, rather than standing permanently: the box
