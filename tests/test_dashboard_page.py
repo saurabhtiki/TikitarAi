@@ -23,6 +23,10 @@ from dashboard import custom_style
 from dashboard import session as dashboard_session
 from dashboard.css_presets import CUSTOM_PRESET, DEFAULT_PRESET
 from dashboard.model import (
+    KIND_EMBED,
+    KIND_IMAGE,
+    KIND_TEXT,
+    MANUAL_KINDS,
     MAX_ROW_COLUMNS,
     PinnedItem,
     Report,
@@ -30,6 +34,8 @@ from dashboard.model import (
     add_subsection,
     assign_item,
     group_into_rows,
+    new_block,
+    set_item_image,
     set_logo,
 )
 from dashboard.theme_db import init_report_themes_table, list_themes
@@ -80,6 +86,25 @@ def _report(app) -> Report:
 
 def _has_button(app, key) -> bool:
     return any(button.key == key for button in app.button)
+
+
+def _has_widget(app, element_type, key) -> bool:
+    """Whether one particular widget was drawn. `AppTest.get` returns every element of a
+    type, so the key is filtered here rather than looked up."""
+    return any(widget.key == key for widget in app.get(element_type))
+
+
+def _uploader(app, base):
+    """The file uploader keyed on `base`, whatever revision it is currently mounted at.
+
+    An uploader's key carries a `__r<n>` suffix that Remove bumps to remount it empty (see
+    `report_view._uploader_key`), so the tests match the stable half rather than pinning a
+    revision number that is meant to change.
+    """
+    return next(
+        (widget for widget in app.get("file_uploader") if str(widget.key).startswith(f"{base}__r")),
+        None,
+    )
 
 
 def _button(app, key):
@@ -242,6 +267,131 @@ class TestPlacing:
 
         assert not _has_button(app, "db_pin_loaded")
         assert any("No tables are loaded" in str(info.value) for info in app.info)
+
+
+class TestBlocksTheUserWrites:
+    """The three blocks nothing produced — added here, filled in on the item itself.
+
+    The split matters and is what these tests pin down: the **button** is in the pool
+    column, the **content** is edited on the placed item, next to the heading and comment
+    that belong with it. A second uploader in the pool card would be a second place to look
+    for the same picture.
+    """
+
+    def test_each_button_pools_a_block_of_its_own_kind(self, tmp_path, monkeypatch):
+        for kind in MANUAL_KINDS:
+            app = _make_app(tmp_path, monkeypatch, report=Report(title="Q3"))
+            app.button(key=f"db_add_block_{kind}").click().run()
+
+            pool = _report(app).pool
+            assert len(pool) == 1
+            assert pool[0].kind == kind
+
+    def test_a_new_block_is_named_so_it_is_findable_in_the_pool(self, tmp_path, monkeypatch):
+        app = _make_app(tmp_path, monkeypatch, report=Report(title="Q3"))
+        app.button(key=f"db_add_block_{KIND_IMAGE}").click().run()
+
+        assert _report(app).pool[0].display_heading().strip()
+
+    def test_a_block_can_be_discarded_like_anything_else_the_user_pinned(self, tmp_path, monkeypatch):
+        """Nothing produced it and nothing will refresh it, which is exactly what makes it
+        the user's to throw away — unlike a criteria's item."""
+        block = new_block(KIND_TEXT)
+        block.item_id = "a"
+        app = _make_app(tmp_path, monkeypatch, report=_pooled_report(block))
+
+        app.button(key="db_pool_discard_a").click().run()
+        assert _report(app).pool == []
+
+    def test_a_picture_block_gets_an_uploader_and_a_pinned_answer_does_not(self, tmp_path, monkeypatch):
+        block = new_block(KIND_IMAGE)
+        block.item_id = "a"
+        with_block = _make_app(tmp_path, monkeypatch, report=_placed_report(block))
+        assert _uploader(with_block, "db_item_image_a") is not None
+
+        answer = _make_app(
+            tmp_path, monkeypatch, report=_placed_report(PinnedItem(item_id="a", frame=FRAME))
+        )
+        assert _uploader(answer, "db_item_image_a") is None
+
+    def test_an_html_block_gets_a_box_and_stores_what_is_pasted(self, tmp_path, monkeypatch):
+        block = new_block(KIND_EMBED)
+        block.item_id = "a"
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(block))
+
+        app.text_area(key="db_item_embed_a").set_value(
+            '<table><tr><td style="background:#eee">North</td></tr></table>'
+        ).run()
+
+        assert "background:#eee" in _report(app).sections[0].subsections[0].items[0].embed_html
+
+    def test_pasted_html_is_cleaned_on_the_way_in_not_only_on_the_way_out(self, tmp_path, monkeypatch):
+        """So what is stored on the item is what both exports render — nothing is sanitized
+        twice for two different answers."""
+        block = new_block(KIND_EMBED)
+        block.item_id = "a"
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(block))
+
+        app.text_area(key="db_item_embed_a").set_value(
+            '<script>alert(1)</script><td onclick="x()">Fine</td>'
+        ).run()
+
+        stored = _report(app).sections[0].subsections[0].items[0].embed_html
+        assert "<script>alert(1)</script>" in stored  # phase 19: scripts are kept, sandboxed
+        assert "onclick" not in stored
+        assert "Fine" in stored
+
+    def test_a_text_block_gets_no_uploader_and_no_html_box(self, tmp_path, monkeypatch):
+        """Its content *is* the comment box below it. A second empty box above would only
+        be a second place to look for the same words."""
+        block = new_block(KIND_TEXT)
+        block.item_id = "a"
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(block))
+
+        assert _uploader(app, "db_item_image_a") is None
+        assert not _has_widget(app, "text_area", "db_item_embed_a")
+
+    def test_a_stored_picture_can_be_removed_without_losing_the_block(self, tmp_path, monkeypatch):
+        block = new_block(KIND_IMAGE)
+        block.item_id = "a"
+        set_item_image(block, LOGO_PNG, "pivot.png")
+        block.comment = "Revenue by region."
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(block))
+
+        app.button(key="db_item_image_remove_a").click().run()
+
+        item = _report(app).sections[0].subsections[0].items[0]
+        assert not item.has_image()
+        assert item.comment == "Revenue by region."
+
+    def test_removing_a_just_uploaded_picture_sticks(self, tmp_path, monkeypatch):
+        """The case the test above cannot reach, and the one users hit first.
+
+        A `st.file_uploader` keeps handing back the file it holds until the widget itself is
+        replaced. Remove used to clear the item and forget the applied-id, so the very next
+        rerun re-absorbed the same file and the picture came straight back — a button that
+        looked broken. It now remounts the uploader empty instead.
+        """
+        block = new_block(KIND_IMAGE)
+        block.item_id = "a"
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(block))
+        _uploader(app, "db_item_image_a").set_value([("pivot.png", LOGO_PNG, "image/png")]).run()
+        assert _report(app).sections[0].subsections[0].items[0].has_image()
+
+        app.button(key="db_item_image_remove_a").click().run()
+
+        assert not _report(app).sections[0].subsections[0].items[0].has_image()
+
+    def test_removing_a_just_uploaded_logo_sticks(self, tmp_path, monkeypatch):
+        """The same defect the Remove button beside the header logo had."""
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(PinnedItem(item_id="a", frame=FRAME)))
+        _uploader(app, "db_logo_upload").set_value([("logo.png", LOGO_PNG, "image/png")]).run()
+        assert _report(app).has_logo()
+
+        app.button(key="db_logo_remove").click().run()
+
+        assert not _report(app).has_logo()
+
 
     def test_an_items_heading_is_editable_and_defaults_to_the_question(self, tmp_path, monkeypatch):
         report = _placed_report(PinnedItem(item_id="a", question="Sales by region", frame=FRAME))

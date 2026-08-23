@@ -26,11 +26,15 @@ import logging
 
 from dashboard.exceptions import ReportSkeletonError
 from dashboard.model import (
+    DEFAULT_EMBED_HEIGHT,
+    KIND_RESULT,
+    MAX_ITEM_IMAGE_BYTES,
     MAX_LOGO_BYTES,
     PinnedItem,
     Report,
     Section,
     Subsection,
+    set_embed_height,
     set_logo_height,
     set_logo_position,
 )
@@ -58,6 +62,15 @@ def _item_to_dict(item: PinnedItem) -> dict:
         "outputs": sorted(item.outputs),
         "source_id": item.source_id,
         "column_with_previous": bool(item.column_with_previous),
+        "kind": item.kind,
+        # The second picture a skeleton carries, and no more an exception to the "no data"
+        # rule than the logo is: nothing produced it and no run can put it back, so a Task
+        # that dropped it would come back next month missing the Excel chart the user
+        # pasted in. `model.set_item_image` caps it before it is ever stored.
+        "image": base64.b64encode(item.image).decode("ascii") if item.has_image() else "",
+        "image_mime": item.image_mime,
+        "embed_html": item.embed_html,
+        "embed_height": item.embed_height,
     }
 
 
@@ -72,12 +85,49 @@ def _item_from_dict(raw: dict) -> PinnedItem:
         outputs=set(raw.get("outputs") or []),
         source_id=raw.get("source_id") or None,
         column_with_previous=bool(raw.get("column_with_previous")),
+        # Absent from anything saved before blocks existed, which reads back as
+        # `KIND_RESULT` — exactly what those items are.
+        kind=str(raw.get("kind") or KIND_RESULT),
+        embed_html=str(raw.get("embed_html") or ""),
     )
+    # Through the setter, not straight onto the field: the number came out of a file,
+    # and it is interpolated into the export's markup. A missing one is the default.
+    set_embed_height(item, raw.get("embed_height", DEFAULT_EMBED_HEIGHT))
+    _restore_item_image(item, raw)
     # Assigned after construction rather than passed in, so a skeleton written by an older
     # version with no id still gets the fresh one the dataclass generated.
     if raw.get("item_id"):
         item.item_id = str(raw["item_id"])
     return item
+
+
+def _restore_item_image(item: PinnedItem, raw: dict) -> None:
+    """Puts a stored block picture back, or leaves the block without one.
+
+    Forgiving in exactly the way `_restore_logo` is, and for the same reason: a picture
+    that can no longer be read costs the picture, never the report it was one item of.
+    """
+    encoded = raw.get("image")
+    mime = str(raw.get("image_mime") or "")
+    if not encoded or not mime:
+        return
+
+    try:
+        data = base64.b64decode(str(encoded), validate=True)
+    except (binascii.Error, ValueError):
+        logger.warning("A saved block's picture couldn't be decoded; the block loads without it.")
+        return
+
+    if not data or len(data) > MAX_ITEM_IMAGE_BYTES:
+        logger.warning(
+            "A saved block's picture is %s bytes, outside the %s byte limit; the block loads without it.",
+            len(data),
+            MAX_ITEM_IMAGE_BYTES,
+        )
+        return
+
+    item.image = data
+    item.image_mime = mime
 
 
 def to_dict(report: Report) -> dict:

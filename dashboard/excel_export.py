@@ -6,9 +6,14 @@ rather than a judgement call. A leading Contents sheet lists the report title an
 section and subsection against the sheet it landed on, because a workbook's tab strip
 loses the numbering as soon as there are more than a handful of them.
 
-Within a sheet, each item is laid out the way the report reads: heading, then the chart,
-then the table, then the comment. The tables carry **every row** — requirement 7.3 caps
-what is shown on screen, never what is exported.
+Within a sheet, each item is laid out the way the report reads: heading, then the chart
+or the picture, then the table, then whatever a pasted HTML block could be read as, then
+the comment. A workbook cannot hold markup, so a pasted block is written as the cells of
+its first table — which is what the person who pasted an Excel pivot in wanted back — and
+as a short note when there is no table in it to read.
+
+The tables carry **every row** — requirement 7.3 caps what is shown on screen, never what
+is exported.
 
 Excel's limits, the column-width calculation and the frozen-header treatment all come from
 `cleaner.export`, which already had them for the Data Cleaner's workbook. Nothing about
@@ -17,12 +22,16 @@ Excel's limits, the column-width calculation and the frozen-header treatment all
 
 import io
 import logging
+import struct
 
 import pandas as pd
+from PIL import Image
+from xlsxwriter.exceptions import XlsxWriterException
 
 from cleaner.export import MAX_EXCEL_ROWS, check_limits, column_width
 from cleaner.exceptions import ExportError
 from cleaner.naming import sanitize_sheet_names
+from dashboard.embed_html import embed_rows
 from dashboard.exceptions import ReportExportError
 from dashboard.images import PNG_HEIGHT, PNG_SCALE, item_png
 from dashboard.model import UNTITLED_REPORT, Report, walk
@@ -92,6 +101,12 @@ def _contents_frame(report: Report, sheet_names: dict[str, str]) -> pd.DataFrame
                 }
             )
     return pd.DataFrame.from_records(records, columns=["Section", "Subsection", "Sheet", "Items"])
+
+
+# The bounds `_text_width` clamps a pasted cell to, matching `cleaner.export.column_width`
+# so a pasted table and a real one sharing a sheet are sized on the same scale.
+_MIN_EMBED_WIDTH = 8
+_MAX_EMBED_WIDTH = 60
 
 
 def _widen(widths: dict[int, int], frame: pd.DataFrame) -> None:
@@ -193,6 +208,135 @@ def _write_comment(worksheet, row: int, runs: list[TextRun], formats: dict) -> N
     worksheet.write_rich_string(row, 0, *arguments, formats["comment"])
 
 
+def _write_picture(worksheet, cursor: int, item, formats: dict) -> int:
+    """Places a block's picture and returns the row to carry on from.
+
+    The bytes are whatever file the user picked — `model.set_item_image` checks the
+    extension and the size, not that the contents really are a picture — so a file that
+    xlsxwriter cannot read costs the picture and leaves a line saying so, rather than
+    taking the whole download with it.
+    """
+    if not item.has_image():
+        return cursor
+
+    data, mime = _excel_ready_picture(item)
+    if data is None:
+        worksheet.write(
+            cursor,
+            0,
+            f"This picture is a {mime.split('/')[-1].upper()} file, which Excel can't hold. "
+            "It is in the HTML report; re-upload it as a PNG or JPG to have it here too.",
+            formats["note"],
+        )
+        return cursor + 2
+
+    try:
+        worksheet.insert_image(
+            cursor,
+            0,
+            f"{item.item_id}-picture.png",
+            {"image_data": io.BytesIO(data)},
+        )
+    # `struct.error` and xlsxwriter's own image errors are both in here because the bytes
+    # are a file the user picked: `set_item_image` checks the extension and the size, never
+    # the contents, so what reaches xlsxwriter's header parser may be anything at all.
+    except (ValueError, TypeError, OSError, struct.error, XlsxWriterException):
+        logger.exception("Could not place item %s's picture in the workbook.", item.item_id)
+        worksheet.write(cursor, 0, "This picture couldn't be included.", formats["note"])
+        return cursor + 2
+
+    return cursor + _rows_for_picture(data)
+
+
+# What xlsxwriter's `insert_image` can actually embed. WEBP is deliberately absent: the app
+# accepts it for a block picture (an offline HTML page shows one perfectly well), so it has
+# to be dealt with here rather than by narrowing what may be uploaded.
+_EXCEL_PICTURE_MIMES = frozenset({"image/png", "image/jpeg", "image/gif", "image/bmp"})
+
+
+def _excel_ready_picture(item) -> tuple[bytes | None, str]:
+    """This block's picture in a format the workbook can hold, converting if it must.
+
+    A WEBP reaches here because `model.PICTURE_FILE_TYPES` allows one and the HTML export
+    embeds it happily. xlsxwriter cannot, and before this it was dropped with a note that
+    said only "couldn't be included" — so the picture was simply missing from every Excel
+    download and nothing said why.
+
+    Converting is far better than refusing: the user gets their picture, and only a file
+    Pillow cannot read at all falls through to the message. `(None, mime)` means say so.
+    """
+    if item.image_mime in _EXCEL_PICTURE_MIMES:
+        return item.image, item.image_mime
+
+    try:
+        with Image.open(io.BytesIO(item.image)) as picture:
+            converted = io.BytesIO()
+            picture.convert("RGBA").save(converted, format="PNG")
+    except (OSError, ValueError, TypeError):
+        logger.exception("Could not convert item %s's %s picture for Excel.", item.item_id, item.image_mime)
+        return None, item.image_mime
+
+    logger.info("Converted item %s's %s picture to PNG for the workbook.", item.item_id, item.image_mime)
+    return converted.getvalue(), "image/png"
+
+
+def _rows_for_picture(data: bytes) -> int:
+    """How many rows to skip past a placed picture.
+
+    Measured rather than assumed, unlike the chart above it: a chart is rendered by this
+    app at a size it already knows, while this is whatever the user uploaded, and a tall
+    screenshot given the chart's allowance would have the next table written underneath
+    it. A picture whose header cannot be read falls back to the chart's allowance, which
+    is a layout blemish rather than a lost download.
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as picture:
+            height = picture.height
+    except (OSError, ValueError):
+        logger.info("Could not measure a block picture; using the chart's row allowance.")
+        return _IMAGE_ROWS
+    return int(height / _PIXELS_PER_ROW) + 1
+
+
+def _write_embed(worksheet, sheet_name: str, cursor: int, item, formats: dict, widths: dict[int, int]) -> int:
+    """Writes a pasted HTML block as cells, and returns the row to carry on from.
+
+    Only the first table in it, for the reason `embed_html.embed_rows` gives. Markup with
+    no table in it — a paragraph, a heading, a chunk of some page — leaves a note instead:
+    a workbook has nowhere sensible to put it, and the HTML report is showing it in full.
+    """
+    rows = embed_rows(item.embed_html)
+    if not rows:
+        worksheet.write(
+            cursor,
+            0,
+            "This block's pasted HTML has no table in it, so only the HTML report shows it.",
+            formats["note"],
+        )
+        return cursor + 2
+
+    _check_sheet_height(sheet_name, cursor + len(rows) + 1)
+    for offset, row in enumerate(rows):
+        for column, value in enumerate(row):
+            # `write_string`, never `write`: these came out of someone else's web page as
+            # text and must land as text. `write` would read a leading `=` as a formula —
+            # so a pasted cell saying `=SUM(A1:A9)` became a live, broken calculation — and
+            # would turn anything containing `://` into a hyperlink.
+            worksheet.write_string(cursor + offset, column, value)
+            widths[column] = max(widths.get(column, 0), _text_width(value))
+    return cursor + len(rows) + 1
+
+
+def _text_width(value: str) -> int:
+    """The column width one pasted cell needs, on `column_width`'s scale.
+
+    A pasted block is a list of strings rather than a frame, so it cannot go through
+    `_widen` — but it shares a sheet with tables that did, and a block written without
+    widening left its columns at Excel's default and clipped every value in them.
+    """
+    return min(max(len(str(value)) + 2, _MIN_EMBED_WIDTH), _MAX_EMBED_WIDTH)
+
+
 def _write_subsection(writer: pd.ExcelWriter, sheet_name: str, subsection, formats: dict) -> None:
     """Lays one subsection's items down a single worksheet, in report order."""
     workbook = writer.book
@@ -225,6 +369,8 @@ def _write_subsection(writer: pd.ExcelWriter, sheet_name: str, subsection, forma
             worksheet.write(cursor, 0, "This chart couldn't be included as a picture.", formats["note"])
             cursor += 2
 
+        cursor = _write_picture(worksheet, cursor, item, formats)
+
         if item.has_table():
             frame = item.frame
             check_limits(sheet_name, frame)
@@ -232,6 +378,9 @@ def _write_subsection(writer: pd.ExcelWriter, sheet_name: str, subsection, forma
             frame.to_excel(writer, sheet_name=sheet_name, index=False, na_rep="", startrow=cursor)
             _widen(widths, frame)
             cursor += len(frame) + 2
+
+        if item.has_embed():
+            cursor = _write_embed(worksheet, sheet_name, cursor, item, formats, widths)
 
         # Through the same sanitizer the HTML export uses, so the workbook and the page
         # are showing the same comment — one as formatted runs, the other as markup.

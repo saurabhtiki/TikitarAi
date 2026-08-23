@@ -5,14 +5,21 @@ base64 `data:` images, and tables are real `<table>` elements — so the downloa
 same on a machine that has never heard of this app, which is the whole point of the
 requirement.
 
-Escaping is Jinja2's, on by default. Exactly three values reach the page unescaped and all
+Escaping is Jinja2's, on by default. Exactly four values reach the page unescaped and all
 are accounted for: the stylesheet, which `css_presets.validate_css` screens (and which is
 why that screening exists); the table markup, which pandas generates itself with
 `escape=True` so every cell and column name inside it is already escaped; and the comment,
 which carries the toolbar's formatting and so goes through `rich_text.sanitize_comment` —
 an allow-list of the handful of tags that toolbar can produce, with every attribute
-dropped. Every other string — the title, the headings — is user text and is escaped by the
-template.
+dropped. The pasted-HTML block is the fourth, and is different in kind: it is not written
+into the page at all but into an `<iframe sandbox="allow-scripts allow-same-origin"
+srcdoc="...">`, escaped into that one attribute. It cannot navigate, submit or open a
+plugin, and its stylesheet cannot touch the report around it — the frame is the boundary,
+which is why `embed_html.sanitize_embed` no longer rewrites the markup for looks. Since
+phase 19 it *can* run script and reach this app's own origin, deliberately, so a live embed
+(Power BI and the like) can draw itself — see `embed_html`'s module docstring for why that
+grant is scoped to internal reports. Every other string — the title, the headings — is user
+text and is escaped by the template.
 
 Tables are cut to `pinned_tables.PREVIEW_ROWS`, with a line underneath saying how many rows
 there were. A report is something a person reads, and a browser handed a hundred thousand
@@ -35,6 +42,7 @@ from pathlib import Path
 import pandas as pd
 from jinja2 import Environment, FileSystemLoader, TemplateError, select_autoescape
 
+from dashboard.embed_html import embed_document, sanitize_embed
 from dashboard.exceptions import ReportExportError
 from dashboard.images import item_png
 from dashboard.model import UNTITLED_REPORT, Report, walk
@@ -114,6 +122,17 @@ def _render_item(number: str, item) -> dict:
         "chart_failed": item.has_chart() and png is None,
         "table": frame_to_html(item.frame) if item.has_table() else "",
         "table_note": _table_note(item.frame) if item.has_table() else "",
+        # A picture the user put on a block, as its own `data:` URI — kept apart from
+        # `image` above, which is a rasterized chart, because one item may carry both.
+        "picture": item.image_data_uri(),
+        # Sanitized rather than escaped, and re-sanitized here rather than trusted from
+        # the item: the same belt-and-braces the comment gets, since this is the value the
+        # template renders with `| safe`.
+        # The whole little document the frame shows, escaped into a `srcdoc` attribute by
+        # the template. Re-sanitized here rather than trusted from the item, the same
+        # belt-and-braces the comment gets.
+        "embed": embed_document(sanitize_embed(item.embed_html)),
+        "embed_height": item.embed_height,
     }
 
 

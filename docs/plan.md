@@ -1,98 +1,93 @@
-# Phase 16 — Pin loaded tables, and a Load button on uploads
+# Phase 20 — Updating a report's pictures, notes and pasted HTML on a re-run
 
-Two small things, decided in discussion:
+The last of the five features worked out in plan mode, and the one that was deliberately
+left until the blocks it edits existed (phases 17–19 built them).
 
-1. The report's **Import from Excel** panel stops asking for a file. It offers the tables
-   **already loaded** on Chat with Data / Task Builder, and pins the ones you tick.
-2. Uploading files no longer acts on its own. You upload, pick sheets, then press
-   **Load** — the same behaviour on both pages.
+## What the user does today
 
-## Decisions already taken
+**Task Builder** is where a report is authored: sections, report items, and — since phase 17
+— blocks the user writes by hand (a text note, an uploaded picture, pasted HTML). That is
+saved as a Task, the reusable recipe.
 
-- **No more workbook parsing.** The loaded tables are already the data — cleaned, typed
-  and the same numbers you've been chatting with. Re-reading the original `.xlsx` would
-  give a second, slightly different copy of the same thing.
-- **Charts and pivot tables are dropped from the import.** Excel doesn't store a picture
-  of a chart, so we could only redraw it, and a redrawn chart doesn't match the workbook.
-  A pivot flattened into a table doesn't look like a pivot either. You'll bring both in by
-  hand in the next phase, as an image or as Excel's *Save as Web Page* HTML.
-- **A sheet is just a sheet.** With pivots no longer detected, nothing gets skipped and
-  nothing gets pinned twice.
-- **Rows: 500 on screen, all of them in Excel.**
-  - The report page and the HTML export show the first 500 rows and say so —
-    *"Showing 500 of 12,480 rows."*
-  - The Excel download gets every row. That's the file you'd actually work in.
-  - The old 5,000-row read cap goes, replaced by a much higher safety ceiling so a
-    250,000-row table can't quietly fill the session.
-- **Re-pinning still keeps your words.** `pin_imported` is unchanged: pin the same table
-  again after a reload and the numbers refresh under the title and comment you wrote.
+**Automate → Reports** is where it is run: pick the saved report, upload this month's files,
+press **Run task**. The run rebuilds the report from the Task's skeleton and fills the
+report items with fresh numbers.
 
-## Where things live
+The gap: the numbers refresh, the hand-written parts cannot. A picture pasted out of last
+month's Excel, a note written about last month, a Power BI embed pointing at last month's
+page — all come back exactly as saved, with no way to change them without going back to
+Task Builder and re-authoring the whole thing.
 
-| Thing | Where |
-|---|---|
-| The loaded tables | `engine/session.py` → `get_tables()`, `preview(table_name, limit)` |
-| Pinning without overwriting titles | `dashboard/session.py` → `pin_imported` (already built) |
-| The import panel | `app_pages/report_view.py` → `_render_excel_import` |
-| The uploader both pages share | `app_pages/setup_view.py` → `mount_upload` |
+## What this phase adds
 
-## Steps
+A third view on the run screen, between the two that are already there:
 
-### A. Pin from what's loaded
+**Preview · Update · Download**
 
-1. **`dashboard/excel_objects.py` → gutted and renamed `dashboard/pinned_tables.py`.**
-   Everything that read a workbook goes: charts, pivots, cell trimming, chart redrawing.
-   What stays is the source-key convention (`is_imported`, `_source_key`) plus a small
-   `ROW_CEILING`. The `excel:` prefix becomes `loaded:`.
-   *Old reports keep working:* `is_imported` accepts both prefixes.
-2. **`app_pages/report_view.py`** — `_render_excel_import` becomes `_render_pin_loaded`:
-   - no uploader, no "what to pin" multiselect;
-   - a checkbox list of the loaded tables, showing name and row count;
-   - a **Pin N tables** button;
-   - a plain message when nothing is loaded, with the existing "Go to Setup" style link.
-3. Reading a table's rows uses `engine.session.preview(name, limit=ROW_CEILING)`, so the
-   pinned frame holds the whole table (capped only by the safety ceiling, which says so
-   when it bites).
+**Update** lists every placed item in report order and gives each one the controls for the
+parts a run cannot produce:
 
-### B. Row limits
+- **any item** — its comment, in the same bold/italic/underline/list editor Task Builder uses
+- **a picture block** — upload a new picture, look at it, remove it
+- **an HTML block** — the paste box and its frame height
 
-4. **Display cap of 500** wherever a pinned table is shown — the report page and
-   `dashboard/html_export.py` / `report.html.j2` — with the *"Showing 500 of N rows"*
-   note carried into the HTML.
-5. **`dashboard/excel_export.py`** — unchanged, writes the full frame. Add a test that
-   proves a 600-row table exports 600 rows while the HTML shows 500.
+Edits land on this run's report immediately, so Preview and both downloads show them without
+another press.
 
-### C. The Load button
+Under the list, one button: **Save these into the task**. It writes the current comments,
+pictures and pasted HTML back into the saved report, so next month's run opens with them
+already right. Not automatic — a run's edits are often just for this month's copy, and
+silently rewriting the saved recipe would be the wrong default.
 
-6. **`app_pages/setup_view.py::mount_upload`** — a confirm step in front of
-   `session.sync_tables`:
-   - remember the set of `file_id`s already confirmed, in session state;
-   - files in the uploader but not in that set are *pending*: their sheet pickers still
-     draw, so sheets are chosen before loading;
-   - a **Load N files** button adds them to the confirmed set;
-   - `sync_tables` is still called on **every** run — with the confirmed files only. This
-     is the load-bearing part: the uploader must stay mounted or Streamlit drops it and
-     every loaded table with it.
-   - Removing a file from the uploader still removes its table, with no button needed.
-7. Both pages get this for free — Chat with Data and Task Builder both call
-   `mount_upload`.
+## Decisions
 
-## Tests
+- **Update, not Build.** `render_report_output` has always refused to offer the Build view,
+  because a run rebuilds the arrangement wholesale from the Task and filing items into
+  sections here would be undone by the next press of Run. That reasoning does *not* apply to
+  a block's own content: a manual block's picture and HTML come straight out of the skeleton
+  and nothing in a run produces them, so they are exactly the fields it is safe to edit here.
+  The Update view therefore edits content and never structure.
 
-- `tests/test_dashboard_pinned_tables.py` — source keys, old `excel:` ids still read as
-  imported, the ceiling.
-- Page test: the panel lists loaded tables, pins the ticked ones, and says something
-  useful when nothing is loaded.
-- Row limits: HTML shows 500 with the note, Excel writes all 600.
-- Upload gate: pending files aren't loaded until the button is pressed; removing a file
-  still drops its table; a rerun with no button press doesn't lose anything.
-- Delete `tests/test_dashboard_excel_objects.py` (the workbook reader is gone).
+- **Comments are editable here but rewritten by the next run.** A run redrafts each report
+  item's comment for this month's numbers unless the *Rewrite the comments* box is cleared.
+  So an edit made here is this month's wording, and saving it into the task only sticks for a
+  user who runs with rewriting off — which is precisely the hand-written report that wants
+  it. Said in the button's tooltip rather than assumed.
 
-## Verification by hand
+- **Matched by `item_id`, not by position.** The run's report is a deep copy of the Task's
+  skeleton, so every item carries the same id at both ends. Copying by id means a save is
+  exact even if a later Task Builder edit reordered things, and an item that no longer exists
+  in the saved report is skipped rather than guessed at.
 
-- Upload 4–5 files on Chat with Data — nothing happens until **Load**, and picking sheets
-  in between doesn't half-load anything.
-- Open the report Build view — the loaded tables are listed; tick two, pin them.
-- Retitle and comment one, reload the file, pin again — numbers change, words don't.
-- Export a long table: the HTML shows 500 rows and says how many there are; the Excel
-  download has all of them.
+- **Only the by-hand fields travel.** `copy_authored_content` moves `comment`, `image`,
+  `image_mime`, `embed_html` and `embed_height` — and nothing else. It cannot carry a frame
+  or a figure into the skeleton even by accident, which is the rule `skeleton.to_dict`
+  enforces structurally and this must not undermine.
+
+- **The save button is the caller's.** `report_view` has no business importing `runner` or
+  `tasks` — `run_task.py` imports *it*. So the view takes an optional `on_save` callable and
+  the Run page supplies the one that writes to SQLite, the same arrangement `EmptyPool`
+  already uses for its button.
+
+- **Nothing new is persisted.** `skeleton.py` already stores `comment`, `image`,
+  `image_mime`, `embed_html` and `embed_height` (phases 17–19). This phase writes into fields
+  that already round-trip, so a report saved before it loads and exports unchanged.
+
+## Files changed
+
+- `dashboard/model.py` — `AUTHORED_FIELDS` and `copy_authored_content(source, target)`,
+  pure, no Streamlit.
+- `app_pages/report_view.py` — `"Update"` in `OUTPUT_VIEWS`; `_render_update_view`,
+  `_render_update_item` and `_render_save_authored`; `render_report_output` gains `on_save`.
+- `app_pages/run_task.py` — `_save_authored_into_task`, wired in as `on_save`.
+
+## Verification
+
+- Run a saved report, change a picture block's picture and one item's comment, and check
+  Preview and the HTML download both show the new ones.
+- Press **Save these into the task**, run the report again, and check the new picture is
+  what comes back.
+- Leave a block untouched and check it keeps exactly what it had.
+- Run a task that has never been saved and check the save button explains itself rather than
+  failing.
+- Open a report saved before this phase and check it still runs, previews and downloads.

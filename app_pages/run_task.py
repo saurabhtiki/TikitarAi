@@ -59,6 +59,7 @@ from auth.service import is_authenticated
 from chat_types import matching
 from chat_types import session as chat_types_session
 from checks import session as checks_session
+from dashboard import model as dashboard_model
 from dashboard import session as dashboard_session
 from engine import session as engine_session
 from report_items import session as report_items_session
@@ -296,8 +297,9 @@ def _render_picker(user_id: int) -> None:
 
     shown = min(st.session_state.get(_SHOWN_KEY, _PAGE_SIZE), len(matches))
     st.caption(f"Showing {shown} of {len(matches)} tasks.")
+    datasets = _datasets_with_data()
     for row in matches[:shown]:
-        _render_task_row(user_id, row)
+        _render_task_row(user_id, row, datasets)
 
     if shown < len(matches):
         if st.button(
@@ -326,7 +328,25 @@ def _filter_tasks(saved: list[dict], query: str) -> list[dict]:
     ]
 
 
-def _render_task_row(user_id: int, row: dict) -> None:
+def _datasets_with_data() -> dict[int, dict]:
+    """Every report that has saved data, keyed by task id — in one query for the whole page.
+
+    The Chat button on each row needs to know whether that report has data yet. Asking per
+    row opened a SQLite connection (and re-ran `CREATE TABLE IF NOT EXISTS`) once per task,
+    so a page of 25 rows did 25 of them on every rerun. One read up front answers all of
+    them.
+
+    A failure costs the Chat buttons their enabled state, never the picker: an empty map
+    just leaves them disabled, which is what they look like for a report never run.
+    """
+    try:
+        return {int(row["task_id"]): row for row in reports_db.list_reports_with_data()}
+    except ReportDataError:
+        logger.exception("Could not list which reports have saved data.")
+        return {}
+
+
+def _render_task_row(user_id: int, row: dict, datasets: dict[int, dict]) -> None:
     """One saved Task as a single line: what it is, and the two buttons that open it."""
     task_id = row["task_id"]
     name_column, saved_column, run_column, schema_column, chat_column = st.columns(
@@ -365,23 +385,20 @@ def _render_task_row(user_id: int, row: dict) -> None:
                 runner_session.open_dialog("schema", {"task": task})
                 st.rerun(scope="app")
     with chat_column:
-        _render_chat_button(task_id, row["name"])
+        _render_chat_button(task_id, row["name"], datasets.get(int(task_id)))
     st.divider()
 
 
-def _render_chat_button(task_id: int, name: str) -> None:
+def _render_chat_button(task_id: int, name: str, saved: dict | None) -> None:
     """The shortcut into this report's saved data (Phase 13).
 
     The same destination as the Chat with reports page, offered here because the person who
     has just refreshed a report is the one most likely to want a look at it. Disabled until
     there is data: a button that opens an empty chat teaches nothing except not to press it.
-    """
-    try:
-        saved = reports_db.dataset_info(task_id)
-    except ReportDataError:
-        logger.exception("Could not check whether report %s has saved data.", task_id)
-        saved = None
 
+    `saved` is this report's row from `_datasets_with_data`, read once for the whole page
+    rather than looked up here — see that function.
+    """
     if saved is None:
         st.button(
             "Chat",
@@ -719,6 +736,48 @@ def _render_summary(result) -> None:
                     st.caption(f":orange[{note}]")
 
 
+def _save_authored_into_task(user_id: int, task: Task, report) -> None:
+    """Carries this run's notes, pictures and pasted HTML back into the saved report.
+
+    What the Update view's button does. Only the by-hand fields travel —
+    `model.copy_authored_content` names them and cannot carry a frame or a figure, which is
+    what keeps `skeleton.to_dict`'s "a recipe holds no data" rule intact.
+
+    The open Task is written to rather than a fresh read of it: it is the copy this run
+    replayed, so its item ids are the ones the report carries, and updating it in place means
+    a second run in the same session starts from the saved wording too.
+    """
+    if task.task_id is None:
+        st.error(
+            "This report hasn't been saved yet, so there's nothing to write these into. "
+            "Save it in Task builder first.",
+            icon=":material/error:",
+        )
+        return
+
+    written = dashboard_model.copy_authored_content(report, task.report)
+    if not written:
+        st.warning(
+            "None of these items is in the saved report any more, so nothing was written. "
+            "The report was probably rebuilt in Task builder since this run.",
+            icon=":material/warning:",
+        )
+        return
+
+    try:
+        tasks_db.save_task(user_id, task)
+    except TaskStorageError as error:
+        logger.exception("Could not save report %s after updating its blocks.", task.task_id)
+        st.error(str(error), icon=":material/error:")
+        return
+
+    runner_session.queue_flash(
+        f"Saved the notes, pictures and pasted HTML of {written} item(s) into "
+        f"“{task.display_name()}”. The next run starts with them."
+    )
+    st.rerun(scope="app")
+
+
 def _render_clear_files(loaded_tables: list[engine_session.EngineTable]) -> None:
     """Empties Step 1 without touching the run around it.
 
@@ -871,7 +930,10 @@ if profile is not None:
             _render_summary(result)
             st.divider()
             st.markdown("##### The report")
-            report_view.render_report_output(dashboard_session.get_report())
+            report_view.render_report_output(
+                dashboard_session.get_report(),
+                on_save=lambda report: _save_authored_into_task(user_id, task, report),
+            )
 
         if loaded_tables:
             st.divider()

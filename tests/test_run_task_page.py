@@ -23,11 +23,11 @@ from checks.db import init_check_sets_table
 from checks.model import Check, CheckSet
 from chat_types.db import init_chat_types_table
 from chat_types.model import ChatType, ExpectedColumn, ExpectedTable
-from dashboard.model import PinnedItem, Report, Section, Subsection
+from dashboard.model import KIND_EMBED, PinnedItem, Report, Section, Subsection
 from engine import session as engine_session
 from llm.db import create_profile, init_llm_table
 from report_items.model import ReportItem, source_id_for
-from tasks.db import init_tasks_table, save_task
+from tasks.db import init_tasks_table, load_task, save_task
 from tasks.model import Task
 from tests.upload_gate_stub import load_uploaded_files
 
@@ -98,6 +98,19 @@ def _task(*, with_check=True, name=TASK_NAME) -> Task:
         checks=CheckSet(checks=[check] if with_check else []),
         report=report,
     )
+
+
+def _task_with_block(*, name=TASK_NAME) -> Task:
+    """The same Task with a pasted-HTML block placed after the report items.
+
+    A block, rather than an extra report item, because a block is the thing a run *cannot*
+    refresh — which is the whole subject of phase 20.
+    """
+    task = _task(name=name)
+    task.report.sections[0].subsections[0].items.append(
+        PinnedItem(kind=KIND_EMBED, heading="Pasted HTML", embed_html="<p>Last month</p>")
+    )
+    return task
 
 
 def _app(tmp_path, monkeypatch, role="normal_user", task: Task | None = None):
@@ -360,13 +373,96 @@ class TestRunning:
 
     def test_the_report_is_previewed_and_downloadable_without_a_build_view(self, tmp_path, monkeypatch):
         """A run's arrangement came from the Task, and the next press of Run replaces it —
-        so there is nothing here to file items into."""
+        so there is nothing here to file items into. Update edits content, never structure."""
         app, _task_id = _loaded(tmp_path, monkeypatch)
         app.checkbox(key="rt_rewrite_comments").set_value(False).run()
         app.button(key="rt_run").click().run()
 
         control = app.segmented_control(key="rt_output_view")
-        assert control.options == ["Preview", "Download"]
+        assert control.options == ["Preview", "Update", "Download"]
+
+
+class TestUpdatingTheReport:
+    """Phase 20 — the by-hand parts of a finished run, edited on the run screen.
+
+    A run refreshes the numbers and cannot refresh the note, the picture or the pasted HTML
+    beside them: those come out of the saved skeleton and nothing in a replay produces them.
+    So the run screen is where they are changed, and one button carries the change back into
+    the recipe for next month.
+    """
+
+    def _ran(self, tmp_path, monkeypatch, task=None):
+        app, task_id = _loaded(tmp_path, monkeypatch, task=task or _task_with_block())
+        app.checkbox(key="rt_rewrite_comments").set_value(False).run()
+        app.button(key="rt_run").click().run()
+        assert not app.exception
+        app.segmented_control(key="rt_output_view").set_value("Update").run()
+        assert not app.exception
+        return app, task_id
+
+    def test_every_placed_item_is_offered_for_editing(self, tmp_path, monkeypatch):
+        """One comment box per placed item — the report item, the criteria and the block.
+
+        Counted rather than looked up by heading: each editor sits inside its own expander,
+        and `AppTest` reports no elements for one.
+        """
+        app, _task_id = self._ran(tmp_path, monkeypatch)
+
+        placed = app.session_state["rt_report"].sections[0].subsections[0].items
+        boxes = [element for element in app.markdown if element.value == "**Comment**"]
+        assert len(boxes) == len(placed)
+
+    def test_a_pasted_block_keeps_its_own_editor_here(self, tmp_path, monkeypatch):
+        """The picture and HTML controls belong to the blocks that have them, not to every
+        item — a report item's rows are this run's and are not the user's to type."""
+        app, _task_id = self._ran(tmp_path, monkeypatch)
+
+        block = app.session_state["rt_report"].sections[0].subsections[0].items[-1]
+        assert app.text_area(key=f"db_item_embed_{block.item_id}") is not None
+
+    def test_an_edit_reaches_this_run_s_report_without_being_saved(self, tmp_path, monkeypatch):
+        app, _task_id = self._ran(tmp_path, monkeypatch)
+        block = app.session_state["rt_report"].sections[0].subsections[0].items[-1]
+
+        app.text_area(key=f"db_item_embed_{block.item_id}").set_value("<p>This month</p>").run()
+
+        assert not app.exception
+        edited = app.session_state["rt_report"].sections[0].subsections[0].items[-1]
+        assert "This month" in edited.embed_html
+
+    def test_saving_writes_it_into_the_task_and_the_next_run_starts_with_it(
+        self, tmp_path, monkeypatch
+    ):
+        app, task_id = self._ran(tmp_path, monkeypatch)
+        block = app.session_state["rt_report"].sections[0].subsections[0].items[-1]
+        app.text_area(key=f"db_item_embed_{block.item_id}").set_value("<p>This month</p>").run()
+
+        app.button(key="db_update_save").click().run()
+
+        assert not app.exception
+        assert "This month" in load_task(task_id, 1).report.sections[0].subsections[0].items[-1].embed_html
+        assert "Saved the notes, pictures and pasted HTML" in _texts(app)
+
+    def test_an_untouched_item_keeps_exactly_what_it_had(self, tmp_path, monkeypatch):
+        app, task_id = self._ran(tmp_path, monkeypatch)
+        block = app.session_state["rt_report"].sections[0].subsections[0].items[-1]
+        app.text_area(key=f"db_item_embed_{block.item_id}").set_value("<p>This month</p>").run()
+
+        app.button(key="db_update_save").click().run()
+
+        first = load_task(task_id, 1).report.sections[0].subsections[0].items[0]
+        assert first.comment == ""
+
+    def test_a_saved_report_never_carries_this_run_s_rows_back(self, tmp_path, monkeypatch):
+        """The rule `skeleton.to_dict` enforces structurally, and this must not undermine:
+        a recipe holds no data. Only the five by-hand fields travel."""
+        app, task_id = self._ran(tmp_path, monkeypatch)
+
+        app.button(key="db_update_save").click().run()
+
+        assert not app.exception
+        saved = load_task(task_id, 1).report
+        assert all(item.frame is None for item in saved.sections[0].subsections[0].items)
 
 
 class TestClearFiles:

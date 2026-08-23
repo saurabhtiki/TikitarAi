@@ -9,7 +9,10 @@ import pytest
 from dashboard import skeleton
 from dashboard.exceptions import ReportSkeletonError
 from dashboard.model import (
+    DEFAULT_EMBED_HEIGHT,
     DEFAULT_LOGO_POSITION,
+    KIND_EMBED,
+    MAX_EMBED_HEIGHT,
     MAX_LOGO_BYTES,
     MAX_LOGO_HEIGHT,
     PinnedItem,
@@ -118,6 +121,40 @@ class TestRoundTrip:
 
         assert item.column_with_previous is True
         assert item.outputs == {"dataframe", "chart"}
+
+    def test_a_pasted_block_keeps_its_markup_and_its_frame_height(self):
+        """Neither is data a run can put back — the user typed one and chose the other —
+        so both belong in the skeleton alongside the block's own picture."""
+        report = _report_with_one_item(
+            kind=KIND_EMBED,
+            heading="Pivot",
+            embed_html="<table><tr><td>A</td></tr></table>",
+            embed_height=900,
+        )
+
+        item = skeleton.from_json(skeleton.to_json(report)).sections[0].subsections[0].items[0]
+
+        assert item.embed_html == "<table><tr><td>A</td></tr></table>"
+        assert item.embed_height == 900
+
+    def test_a_frame_height_from_an_older_file_reads_as_the_default(self):
+        report = _report_with_one_item(kind=KIND_EMBED, heading="Pivot", embed_html="<p>A</p>")
+        raw = json.loads(skeleton.to_json(report))
+        del raw["sections"][0]["subsections"][0]["items"][0]["embed_height"]
+
+        item = skeleton.from_json(json.dumps(raw)).sections[0].subsections[0].items[0]
+
+        assert item.embed_height == DEFAULT_EMBED_HEIGHT
+
+    def test_a_nonsense_frame_height_is_clamped_rather_than_trusted(self):
+        """It came out of a file and it is written straight into the export's markup."""
+        report = _report_with_one_item(kind=KIND_EMBED, heading="Pivot", embed_html="<p>A</p>")
+        raw = json.loads(skeleton.to_json(report))
+        raw["sections"][0]["subsections"][0]["items"][0]["embed_height"] = 99999
+
+        item = skeleton.from_json(json.dumps(raw)).sections[0].subsections[0].items[0]
+
+        assert item.embed_height == MAX_EMBED_HEIGHT
 
     def test_the_pool_is_not_saved(self):
         report = _report_with_one_item(heading="Placed")

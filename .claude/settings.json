@@ -66,7 +66,8 @@
       "Bash(curl -s -o /dev/null -w \"root=%{http_code}\\\\n\" http://localhost:8577/)",
       "Bash(curl -s -o /dev/null -w \"invitee_link=%{http_code}\\\\n\" \"http://localhost:8577/?m=1&t=sometoken\")",
       "Bash(curl -s -o /dev/null -w \"invitee-link:%{http_code}\\\\n\" \"http://localhost:8599/?m=1&t=sometoken\")",
-      "Bash(curl -s http://localhost:8599/healthz)"
+      "Bash(curl -s http://localhost:8599/healthz)",
+      "Bash(python -m pytest tests/test_dashboard_embed_html.py tests/test_dashboard_html_export.py -q)"
     ]
   }
 }

@@ -40,6 +40,7 @@ import streamlit as st
 from analyst.routing import OUTPUT_DATAFRAME
 from app_pages.comment_editor import comment_editor, render_comment
 from dashboard import custom_style
+from dashboard import embed_html
 from dashboard import pinned_tables
 from dashboard import session as dashboard_session
 from dashboard import theme_db
@@ -56,16 +57,27 @@ from dashboard.exceptions import ReportExportError
 from dashboard.excel_export import build_report_workbook
 from dashboard.html_export import build_html
 from dashboard.model import (
-    LOGO_FILE_TYPES,
+    BLOCK_ICONS,
+    BLOCK_LABELS,
+    DEFAULT_EMBED_HEIGHT,
+    KIND_EMBED,
+    KIND_IMAGE,
+    KIND_TEXT,
+    MANUAL_KINDS,
+    MAX_ITEM_IMAGE_BYTES,
+    PICTURE_FILE_TYPES,
     LOGO_POSITIONS,
+    MAX_EMBED_HEIGHT,
     MAX_LOGO_HEIGHT,
     MAX_ROW_COLUMNS,
+    MIN_EMBED_HEIGHT,
     MIN_LOGO_HEIGHT,
     PinnedItem,
     Report,
     add_section,
     add_subsection,
     assign_item,
+    clear_item_image,
     clear_logo,
     find_item,
     move,
@@ -75,6 +87,8 @@ from dashboard.model import (
     remove_item,
     remove_section,
     remove_subsection,
+    set_embed_height,
+    set_item_image,
     set_logo,
     set_logo_height,
     set_logo_position,
@@ -108,7 +122,14 @@ _TEXT_ICON = ":material/notes:"
 
 
 def _item_icon(item: PinnedItem) -> str:
-    """The badge for a pinned item, named for the most specific thing it carries."""
+    """The badge for a pinned item, named for the most specific thing it carries.
+
+    A block the user made is asked first, and by its *kind* rather than by its contents: an
+    empty picture block is still a picture block, and showing it the plain-text badge until
+    something is uploaded would make the pool look like it lost the block.
+    """
+    if item.is_manual_block():
+        return BLOCK_ICONS[item.kind]
     if item.has_chart():
         return _CHART_ICON
     if item.has_table():
@@ -119,6 +140,12 @@ def _item_icon(item: PinnedItem) -> str:
 def _item_summary(item: PinnedItem) -> str:
     """A one-line description of what a pinned item holds."""
     parts = []
+    if item.is_manual_block():
+        parts.append(BLOCK_LABELS[item.kind].lower() + " block")
+    if item.has_image():
+        parts.append("picture")
+    if item.has_embed():
+        parts.append("pasted HTML")
     if item.has_chart():
         parts.append("chart")
     if item.has_table():
@@ -132,7 +159,11 @@ def _item_summary(item: PinnedItem) -> str:
 
 
 def _render_item_output(item: PinnedItem, key_prefix: str) -> None:
-    """The chart and table of a pinned item, in the order the export puts them."""
+    """Everything a pinned item shows, in the order the export puts it."""
+    if item.has_image():
+        _render_item_picture(item)
+    if item.has_embed():
+        _render_embed(item.embed_html, item.embed_height)
     if item.has_chart():
         st.plotly_chart(item.figure, key=f"{key_prefix}_chart", width="stretch")
     if item.has_table():
@@ -146,6 +177,58 @@ def _render_item_output(item: PinnedItem, key_prefix: str) -> None:
                 f":grey[Showing {len(shown):,} of {len(item.frame):,} rows. "
                 "The Excel download has all of them.]"
             )
+
+
+def _render_item_picture(item: PinnedItem) -> None:
+    """A block's picture, or a note saying it can't be shown.
+
+    Drawing it means decoding it, and `set_item_image` checks the file's extension and its
+    size, not that the contents are really a picture — the same gap `_render_logo_thumbnail`
+    covers, and covered the same way: a file named `.png` that isn't one costs the picture
+    and says so, rather than taking the report and the arrangement on it down.
+    """
+    try:
+        st.image(item.image, width="stretch")
+    except Exception:
+        logger.exception("Could not display the picture on item %s.", item.item_id)
+        st.warning(
+            "That file couldn't be read as a picture, so it won't show in the report "
+            "either. Replace it with a PNG or JPG.",
+            icon=":material/broken_image:",
+        )
+
+
+def _render_embed(html: str, height: int = DEFAULT_EMBED_HEIGHT) -> None:
+    """A pasted HTML block, in a frame of its own, exactly as the report shows it.
+
+    `st.iframe` rather than `st.html`: the latter is not iframed and sanitizes with
+    DOMPurify, which strips the very tag this needs. It is also the current API —
+    `st.components.v1.html` is deprecated as of the installed Streamlit 1.61.
+
+    Streamlit owns this iframe, so its `sandbox` is not ours to set the way the export's
+    is — but the frame it makes runs JavaScript with same-origin access to this app anyway,
+    which happens to match the export's own `allow-scripts allow-same-origin` sandbox since
+    phase 19. A live embed (Power BI and the like) is meant to run here exactly as it will
+    in the download; what `sanitize_embed` still strips is `on*` handlers, `javascript:`
+    URLs and anything that would load off the network in the clear.
+
+    `html` is expected to be **already sanitized** — `item.embed_html` always is, because the
+    editor cleans on the way in. This used to sanitize again defensively, which meant a full
+    `HTMLParser` pass over as much as 400 KB on every rerun, for every block on the page,
+    to arrive at the string it was handed. `sanitize_embed` is idempotent, so the second
+    pass could only ever return its own input.
+    """
+    document = embed_html.embed_document(html)
+    if not document:
+        return
+    try:
+        st.iframe(document, height=height)
+    except Exception:
+        logger.exception("Could not render a pasted HTML block.")
+        st.warning(
+            "That pasted HTML couldn't be shown here. It is still saved on the block.",
+            icon=":material/code_off:",
+        )
 
 
 def _reorder_controls(siblings: list, index: int, key_prefix: str, what: str) -> bool:
@@ -335,6 +418,57 @@ def _row_count_by_name(tables: list) -> dict[str, int]:
     return {table.table_name: table.row_count for table in tables}
 
 
+def _render_add_block() -> None:
+    """The three blocks the user writes rather than the app producing.
+
+    Beside "Pin a loaded table" because both answer the same question — *what else goes in
+    this report* — and neither is something to step past on every visit, so both are
+    collapsed.
+
+    A new block lands in the pool empty. Its picture or its HTML is filled in once it is
+    placed, in the item's own row of the tree, which is where an item's heading and comment
+    are already written — one place per item rather than two.
+    """
+    with st.expander("Add a block", icon=":material/add_box:"):
+        st.caption(
+            "Blocks you write yourself. A **picture** is where an Excel chart or pivot goes "
+            "— screenshot it and drop it in. **HTML** takes a pivot saved from Excel as a "
+            "web page, pasted in with its own colours."
+        )
+
+        helps = {
+            KIND_TEXT: "A heading and a note, with no data under it — a summary or a caveat.",
+            KIND_IMAGE: "A picture you upload, printed the width of its column.",
+            KIND_EMBED: "HTML you paste in, printed as it looks rather than as tags.",
+        }
+        with st.container(horizontal=True, key="db_add_block_row"):
+            for kind in MANUAL_KINDS:
+                if st.button(
+                    BLOCK_LABELS[kind],
+                    key=f"db_add_block_{kind}",
+                    icon=BLOCK_ICONS[kind],
+                    help=helps[kind],
+                ):
+                    # No rerun, for the reason `_render_pin_loaded` gives: the pool is drawn
+                    # after this in the same run, so the new block is already on screen.
+                    dashboard_session.pin_block(kind)
+                    st.success(
+                        f"Added a {BLOCK_LABELS[kind].lower()} block. Place it on the right, "
+                        "then fill it in.",
+                        icon=":material/check_circle:",
+                    )
+
+
+def _block_has_content(item: PinnedItem) -> bool:
+    """Whether a user-written block has anything in it yet.
+
+    The comment is sanitized rather than stripped for the reason `_item_summary` gives: an
+    editor left untouched writes `<p><br></p>`, which is not a comment however un-blank the
+    raw string looks.
+    """
+    return bool(item.has_image() or item.has_embed() or sanitize_comment(item.comment))
+
+
 def _render_pool(report: Report, empty_pool: EmptyPool | None = None) -> None:
     """Everything pinned but not yet placed (requirement 6.1 step 4)."""
     st.markdown(f"##### Unplaced ({len(report.pool)})")
@@ -370,6 +504,8 @@ def _render_pool(report: Report, empty_pool: EmptyPool | None = None) -> None:
         with st.container(border=True, key=f"db_pool_{item.item_id}"):
             st.markdown(f"{_item_icon(item)} **{item.display_heading()}**")
             st.caption(_item_summary(item))
+            if item.is_manual_block() and not _block_has_content(item):
+                st.caption(":grey[Empty so far. Place it, then fill it in on the right.]")
 
             target = None
             if choices:
@@ -554,19 +690,7 @@ def _render_item_body(report: Report, subsection, item: PinnedItem, index: int, 
             st.rerun(scope="app")
 
     st.caption(_item_summary(item))
-
-    item.comment = comment_editor(
-        label="Comment",
-        value=item.comment,
-        key=f"db_item_comment_{item.item_id}",
-        placeholder="A note printed under this item.",
-        help_text=(
-            "Printed under the chart and table in both exports. It starts as the answer's own "
-            "commentary from the chat — edit it freely, and use the toolbar for bold, italic, "
-            "underline and lists."
-        ),
-    )
-
+    _render_content_editors(item, result_help=BUILD_COMMENT_HELP)
     _render_column_toggle(subsection, item, index)
 
     with st.container(horizontal=True, key=f"db_item_actions_{item.item_id}"):
@@ -607,6 +731,226 @@ def _render_item_body(report: Report, subsection, item: PinnedItem, index: int, 
         ):
             unassign_item(report, item.item_id)
             st.rerun(scope="app")
+
+
+# Which upload has already been stored on which block. `st.file_uploader` hands back the
+# same file on every rerun until it is cleared, so without this a picture would be re-read
+# and re-validated on every button press anywhere on the page — the same guard
+# `LOGO_APPLIED_KEY` is, kept per item because there is one uploader per block.
+def _image_applied_key(item: PinnedItem) -> str:
+    return f"db_item_image_applied_{item.item_id}"
+
+
+def _uploader_key(base: str) -> str:
+    """This uploader's key at its current revision.
+
+    A `st.file_uploader` keeps handing back the file it holds until the widget itself is
+    replaced, and a widget's own key cannot be written once it exists. So Remove works the
+    way the comment editor's "Write comment" button works: bump a revision that forms part
+    of the key, and the next run mounts a *different*, empty uploader.
+
+    Without this, Remove cleared the picture off the item and the very next rerun handed the
+    same file straight back to `_absorb_*`, which put it back — so the button appeared to do
+    nothing at all.
+    """
+    return f"{base}__r{st.session_state.get(f'{base}__revision', 0)}"
+
+
+def _reset_uploader(base: str) -> None:
+    """Empties the uploader keyed on `base` by remounting it. See `_uploader_key`."""
+    st.session_state[f"{base}__revision"] = st.session_state.get(f"{base}__revision", 0) + 1
+
+
+# The unrevised half of each uploader's key. Named rather than spelled twice, because the
+# uploader and the Remove button beside it have to agree on it.
+ITEM_IMAGE_UPLOAD_KEY = "db_item_image"
+LOGO_UPLOAD_KEY = "db_logo_upload"
+
+
+def _absorb_item_image(item: PinnedItem, upload) -> None:
+    """Stores a newly uploaded picture on a block, once.
+
+    The twin of `_absorb_logo_upload`, and it fails the same way: reading the file is I/O
+    and the file is whatever the user picked, so a bad one costs the picture and says why,
+    never the report.
+    """
+    key = _image_applied_key(item)
+    if upload is None:
+        st.session_state.pop(key, None)
+        return
+
+    if st.session_state.get(key) == upload.file_id:
+        return
+
+    try:
+        data = upload.getvalue()
+    except OSError as error:
+        logger.exception("Could not read the picture uploaded for item %s.", item.item_id)
+        st.error(f"That picture couldn't be read ({error}).", icon=":material/error:")
+        return
+
+    problems = set_item_image(item, data, upload.name)
+    # Recorded either way, so a refused picture says why once rather than on every rerun.
+    st.session_state[key] = upload.file_id
+
+    if problems:
+        st.error("That picture wasn't used:", icon=":material/error:")
+        for problem in problems:
+            st.markdown(f"- {problem}")
+        return
+
+    st.rerun(scope="app")
+
+
+def _render_picture_editor(item: PinnedItem) -> None:
+    """Upload, look at, or remove the picture on a picture block."""
+    base_key = f"{ITEM_IMAGE_UPLOAD_KEY}_{item.item_id}"
+    upload = st.file_uploader(
+        "Picture",
+        type=list(PICTURE_FILE_TYPES),
+        key=_uploader_key(base_key),
+        help=(
+            f"Printed the width of this item's column, and embedded in the download so it "
+            f"still shows offline. Up to {MAX_ITEM_IMAGE_BYTES // 1024} KB."
+        ),
+    )
+    _absorb_item_image(item, upload)
+
+    if not item.has_image():
+        st.caption(":grey[No picture yet. Copy a chart or a pivot out of Excel, save it as a picture, and drop it here.]")
+        return
+
+    _render_item_picture(item)
+    if st.button(
+        "Remove picture",
+        key=f"db_item_image_remove_{item.item_id}",
+        icon=":material/delete:",
+        help="Print this block without a picture. The heading and comment stay.",
+    ):
+        clear_item_image(item)
+        # The uploader is remounted empty, not just forgotten: it still holds the file, and
+        # popping the applied-id alone let `_absorb_item_image` put it straight back.
+        _reset_uploader(base_key)
+        st.session_state.pop(_image_applied_key(item), None)
+        st.rerun(scope="app")
+
+
+def _render_embed_editor(item: PinnedItem) -> None:
+    """Paste HTML into a block, and see what the report will actually print.
+
+    Sanitized on the way *in* rather than only on the way out, so what is stored on the
+    item is what both exports render — the same arrangement `comment_editor` has, and the
+    reason nothing here is sanitized twice for different answers.
+    """
+    pasted = st.text_area(
+        "HTML to print",
+        value=item.embed_html,
+        key=f"db_item_embed_{item.item_id}",
+        height=160,
+        placeholder="Paste an Excel pivot saved as a web page, a Power BI embed, or any HTML.",
+        help=(
+            "Shown in the report as it looks, not as tags. It renders in a frame of its "
+            "own, so its stylesheet — and now its scripts — come with it, which is what "
+            "lets a live embed like Power BI draw itself. Only a plain, insecure "
+            "`http://` address is refused; https and anything already in the paste "
+            "(data URIs) still work."
+        ),
+    )
+    # Only when the paste actually changed. The text area hands back the user's raw markup
+    # on every rerun — a slider drag elsewhere on the page, a button press, anything — and
+    # sanitizing it each time put up to `MAX_EMBED_CHARS` through `HTMLParser` for a result
+    # already sitting on the item. The last input is remembered so the work happens once per
+    # edit rather than once per interaction.
+    seen_key = f"db_item_embed_seen_{item.item_id}"
+    if st.session_state.get(seen_key) != pasted:
+        item.embed_html = embed_html.sanitize_embed(pasted)
+        st.session_state[seen_key] = pasted
+
+    if not item.has_embed():
+        if pasted and pasted.strip():
+            # Saying "nothing pasted yet" here would be untrue and would send the user off
+            # to paste it again. Whatever arrived, none of it was markup the report may
+            # print — so say that, and say what does work.
+            st.warning(embed_html.explain_empty_paste(pasted), icon=":material/report:")
+        else:
+            st.caption(
+                ":grey[Nothing pasted yet. In Excel: **File → Save As → Web Page**. That "
+                "writes a folder ending `_files` next to it — open **sheet001.htm** from "
+                "inside the folder in a text editor and copy the lot.]"
+            )
+        return
+
+    set_embed_height(
+        item,
+        st.number_input(
+            "Frame height (px)",
+            min_value=MIN_EMBED_HEIGHT,
+            max_value=MAX_EMBED_HEIGHT,
+            value=item.embed_height,
+            step=50,
+            key=f"db_item_embed_height_{item.item_id}",
+            help=(
+                "How tall this block's frame is. A frame needs a fixed size, and only you "
+                "know how tall your page is — anything past this scrolls inside the block."
+            ),
+        ),
+    )
+
+    st.caption(":grey[This is what the report will show:]")
+    _render_embed(item.embed_html, item.embed_height)
+
+
+def _render_block_editor(item: PinnedItem) -> None:
+    """The one control a block needs, for the kind of block it is.
+
+    A text block gets nothing: its content *is* the comment box below, and a second empty
+    box above it would only be a second place to look for the same words.
+    """
+    if item.kind == KIND_IMAGE:
+        _render_picture_editor(item)
+    elif item.kind == KIND_EMBED:
+        _render_embed_editor(item)
+
+
+# What the comment box says on a block someone wrote. The same wherever it is edited: a
+# block's comment *is* its words, and nothing about that changes with the screen it is on.
+BLOCK_COMMENT_HELP = (
+    "The words of this block. Use the toolbar for bold, italic, underline and lists."
+)
+
+# What it says on an item the app produced, on each of the two screens that offer one. They
+# differ because the honest answer differs: in Task Builder the comment arrived from the
+# chat, and on a finished run it is about to be redrafted by the next one.
+BUILD_COMMENT_HELP = (
+    "Printed under the chart and table in both exports. It starts as the answer's own "
+    "commentary from the chat — edit it freely, and use the toolbar for bold, italic, "
+    "underline and lists."
+)
+
+UPDATE_COMMENT_HELP = (
+    "Printed under this item in both downloads. Running again with **Rewrite the comments** "
+    "ticked replaces it with a fresh draft — clear that box to keep what you write here."
+)
+
+
+def _render_content_editors(item: PinnedItem, *, result_help: str) -> None:
+    """The controls for the parts of an item a person writes, rather than a run produces.
+
+    Shared by the Build view and the Update view because they want exactly the same pair: a
+    picture uploader or an HTML box on a manual block, and a comment box on everything. Only
+    the help text on a produced item differs, so only that is the caller's — keeping the two
+    screens' controls, keys and ordering from drifting apart.
+    """
+    if item.is_manual_block():
+        _render_block_editor(item)
+
+    item.comment = comment_editor(
+        label="Comment",
+        value=item.comment,
+        key=f"db_item_comment_{item.item_id}",
+        placeholder="A note printed under this item.",
+        help_text=BLOCK_COMMENT_HELP if item.is_manual_block() else result_help,
+    )
 
 
 def _render_column_toggle(subsection, item: PinnedItem, index: int) -> None:
@@ -719,8 +1063,8 @@ def _render_logo_controls(report: Report) -> None:
     with st.expander("Logo", icon=":material/image:", expanded=report.has_logo()):
         upload = st.file_uploader(
             "Logo picture",
-            type=list(LOGO_FILE_TYPES),
-            key="db_logo_upload",
+            type=list(PICTURE_FILE_TYPES),
+            key=_uploader_key(LOGO_UPLOAD_KEY),
             help="A small picture printed beside the report title. It is embedded in the download, so the file still shows it offline.",
         )
         _absorb_logo_upload(report, upload)
@@ -763,6 +1107,9 @@ def _render_logo_controls(report: Report) -> None:
                 help="Print the report without a logo.",
             ):
                 clear_logo(report)
+                # Remounted empty for the reason `_uploader_key` gives — the same defect
+                # this button had as the one on a picture block.
+                _reset_uploader(LOGO_UPLOAD_KEY)
                 st.session_state.pop(LOGO_APPLIED_KEY, None)
                 st.rerun(scope="app")
 
@@ -822,6 +1169,94 @@ def _render_preview_item(number: str, item: PinnedItem) -> None:
     st.markdown(f"**{number} {item.display_heading()}**")
     _render_item_output(item, f"db_preview_{item.item_id}")
     render_comment(item.comment, key_hint=f"db_preview_{item.item_id}")
+
+
+# --------------------------------------------------------------------------------------
+# Update — the by-hand parts of a finished run
+# --------------------------------------------------------------------------------------
+
+
+EMPTY_UPDATE = (
+    "This run produced nothing to update. The summary above says which steps failed — fix "
+    "those and run it again."
+)
+
+
+def _render_update_view(report: Report, on_save: Callable[[Report], None] | None = None) -> None:
+    """Every placed item's note, picture and pasted HTML, editable for this run.
+
+    Content only, never structure — see the phase plan. A run rebuilds the arrangement
+    wholesale from the Task it replays, so filing items into sections here would be undone by
+    the next press of Run; a block's own picture and markup come straight out of the skeleton
+    and nothing in a run produces them, which is exactly what makes them safe to edit on this
+    screen.
+
+    Everything typed here lands on the report immediately, so Preview and both downloads show
+    it without another press. `on_save` is what carries it back into the saved recipe, and it
+    belongs to the caller: this module has no business importing `tasks`.
+    """
+    sections = walk(report)
+    if not sections:
+        st.info(EMPTY_UPDATE, icon=":material/edit_note:")
+        return
+
+    st.caption(
+        ":grey[Change the notes, pictures and pasted HTML that a run can't produce for "
+        "itself. The numbers above them are this run's and are not editable here.]"
+    )
+
+    for section in sections:
+        st.subheader(f"{section.number}. {section.name}", divider="grey")
+        for subsection in section.subsections:
+            st.markdown(f"##### {subsection.number} {subsection.name}")
+            for number, item in subsection.numbered():
+                _render_update_item(number, item)
+
+    if on_save is not None:
+        st.divider()
+        _render_save_authored(report, on_save)
+
+
+def _render_update_item(number: str, item: PinnedItem) -> None:
+    """One item's editable parts, behind an expander so a long report stays readable.
+
+    Collapsed by default and **constant**, like every `expanded=` in this app: Streamlit
+    re-applies the argument whenever its value changes, so anything dynamic would snap the
+    expander shut the moment a control inside it was touched.
+    """
+    with st.expander(
+        f"{number} {item.display_heading()}",
+        key=f"db_update_{item.item_id}",
+        icon=_item_icon(item),
+        expanded=False,
+    ):
+        st.caption(_item_summary(item))
+        _render_content_editors(item, result_help=UPDATE_COMMENT_HELP)
+
+
+def _render_save_authored(report: Report, on_save: Callable[[Report], None]) -> None:
+    """The one button that carries this run's edits back into the saved report.
+
+    Deliberately not automatic. A run's edits are usually about this month's copy, and
+    rewriting the saved recipe every time somebody fixed a typo in a downloaded report would
+    be the wrong default — so the report is only changed when this is pressed.
+    """
+    st.caption(
+        ":grey[The edits above already apply to this run's preview and downloads. Saving "
+        "them puts them in the report itself, so next month's run starts with them.]"
+    )
+    if st.button(
+        "Save these into the report",
+        key="db_update_save",
+        icon=":material/save:",
+        type="primary",
+        help=(
+            "Write the notes, pictures and pasted HTML above back into the saved report. "
+            "Comments only stay put on a run with **Rewrite the comments** cleared — with it "
+            "ticked, the next run drafts them again."
+        ),
+    ):
+        on_save(report)
 
 
 # --------------------------------------------------------------------------------------
@@ -1529,21 +1964,32 @@ def render_pending_dialog() -> None:
 # --------------------------------------------------------------------------------------
 
 
-OUTPUT_VIEWS = ["Preview", "Download"]
+OUTPUT_VIEWS = ["Preview", "Update", "Download"]
 
 
-def render_report_output(report: Report, *, key: str = "rt_output_view") -> None:
-    """The finished report, with no structure editor: preview it, then download it.
+def render_report_output(
+    report: Report,
+    *,
+    key: str = "rt_output_view",
+    on_save: Callable[[Report], None] | None = None,
+) -> None:
+    """The finished report, with no structure editor: read it, fix it, then download it.
 
     Requirement 8.2 steps 5–6. A run's arrangement came from the Task that was run, and every
     run rebuilds it wholesale from that skeleton — so offering the Build view here would
-    invite the user to file items into sections that the next press of Run replaces. The two
-    views that are left answer the two questions that remain: is the report right, and is the
-    stylesheet right.
+    invite the user to file items into sections that the next press of Run replaces. The
+    three views that are left answer the three questions that remain: is the report right,
+    are the by-hand parts right, and is the stylesheet right.
 
-    The same two renderers the workspace uses, so what previews here is what downloads there.
-    The toggle takes its own key — `db_view` holds one of three options, and a segmented
-    control whose stored value isn't in its option list is a value it cannot show.
+    **Update** is content-only for that same reason: a report item's rows and chart came from
+    this run and are not the user's to type, but its note, its picture and its pasted HTML
+    came out of the skeleton and nothing in a run can produce them. `on_save` is the button
+    that writes those back into the saved report — the caller's, because this module must not
+    import `tasks`, and the Run page is the one that knows which Task is open.
+
+    The same renderers the workspace uses, so what previews here is what downloads there.
+    The toggle takes its own key — `db_view` holds one of three different options, and a
+    segmented control whose stored value isn't in its option list is a value it cannot show.
     """
     view = st.segmented_control(
         "View",
@@ -1553,7 +1999,7 @@ def render_report_output(report: Report, *, key: str = "rt_output_view") -> None
         key=key,
         label_visibility="collapsed",
         persist_state="session",
-        help="Read the finished report, then download it as HTML or Excel.",
+        help="Read the finished report, update its notes and pictures, then download it.",
     )
 
     render_pending_dialog()
@@ -1564,6 +2010,8 @@ def render_report_output(report: Report, *, key: str = "rt_output_view") -> None
     )
     if view == "Download":
         _render_download(report, empty)
+    elif view == "Update":
+        _render_update_view(report, on_save)
     else:
         _render_preview(report, empty)
 
@@ -1606,6 +2054,7 @@ def render_report_workspace(report: Report, *, empty_pool: EmptyPool | None = No
         pool_column, tree_column = st.columns([2, 3], gap="medium")
         with pool_column:
             _render_pin_loaded()
+            _render_add_block()
             _render_pool(report, empty_pool)
         with tree_column:
             _render_tree(report)

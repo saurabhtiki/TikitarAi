@@ -19,6 +19,12 @@
 .comment p { margin: 0 0 6px; }
 .comment p:last-child { margin-bottom: 0; }
 .comment ul, .comment ol { margin: 0 0 6px; padding-left: 22px; }
+{# A pasted block brings its own look with it, and now brings its own document too:
+   it renders in an iframe, so all this says is how big the frame is. The height is the
+   user's answer on the block; the frame scrolls inside itself past that.
+   Written before the report stylesheet, like the rules above, so a preset still wins. #}
+.embed { display: block; width: 100%; max-width: 100%; border: 0; }
+.block-picture { max-width: 100%; height: auto; }
 {{ css | safe }}
 </style>
 </head>
@@ -71,11 +77,35 @@
           <p class="note">This chart couldn't be included as a picture. Its data is below.</p>
           {% endif %}
 
+          {# A picture the user put on this block — an Excel chart or pivot they
+             screenshotted. `picture` is a `data:` URI built by `model.image_data_uri`
+             from bytes this app stored and mime-typed, never from anything typed. #}
+          {% if item.picture %}
+          <img class="block-picture" src="{{ item.picture }}" alt="{{ item.heading }}">
+          {% endif %}
+
           {% if item.table %}
           <div class="table-wrap">{{ item.table | safe }}</div>
           {% endif %}
           {% if item.table_note %}
           <p class="note">{{ item.table_note }}</p>
+          {% endif %}
+
+          {# Escaped, unlike the three values above, and that is the whole design: the
+             pasted page goes into a `srcdoc` attribute as text, and the browser makes a
+             separate document of it inside this sandbox — no navigation, no forms, no
+             plugins. That frame is what lets `sanitize_embed` keep the paste's own
+             `<style>` verbatim, so a page arrives with its buttons, variables and hover
+             states intact instead of flattened.
+             `allow-scripts allow-same-origin` is what lets a live embed (Power BI and the
+             like) run at all — a paste is otherwise only ever markup, never a running page.
+             That combination also means a script in the paste can reach this app's own
+             origin, which is why it is only accepted here because these reports are
+             internal and whoever pastes into one could already edit it either way. #}
+          {% if item.embed %}
+          <iframe class="embed" sandbox="allow-scripts allow-same-origin" loading="lazy"
+                  title="{{ item.heading }}" style="height: {{ item.embed_height }}px;"
+                  srcdoc="{{ item.embed }}"></iframe>
           {% endif %}
 
           {# Unescaped, and safely so: `rich_text.sanitize_comment` has already reduced

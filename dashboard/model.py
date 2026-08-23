@@ -46,6 +46,44 @@ UNTITLED_REPORT = "Untitled report"
 # the cap is enforced in `group_into_rows` rather than left to the stylesheet.
 MAX_ROW_COLUMNS = 4
 
+# What an item *is*, which for everything the app produces is derivable — `has_chart()` and
+# `has_table()` read the payload rather than a stored label, and always have. A block the
+# user writes cannot work that way: an empty text block and an empty picture block hold
+# exactly the same nothing, and only the button they pressed says which editor to show. So
+# the kind is stored, and only for the three the user creates.
+KIND_RESULT = "result"
+KIND_TEXT = "text"
+KIND_IMAGE = "image"
+KIND_EMBED = "embed"
+
+MANUAL_KINDS = (KIND_TEXT, KIND_IMAGE, KIND_EMBED)
+
+# What each block is called on the button that makes it and on the card that shows it.
+BLOCK_LABELS = {
+    KIND_TEXT: "Text",
+    KIND_IMAGE: "Picture",
+    KIND_EMBED: "HTML",
+}
+
+BLOCK_ICONS = {
+    KIND_TEXT: ":material/notes:",
+    KIND_IMAGE: ":material/image:",
+    KIND_EMBED: ":material/code_blocks:",
+}
+
+# The heading a new block carries until the user writes one, so it is never nameless in
+# the pool.
+BLOCK_HEADINGS = {
+    KIND_TEXT: "Note",
+    KIND_IMAGE: "Picture",
+    KIND_EMBED: "Pasted HTML",
+}
+
+# An item's picture is printed the full width of its column rather than in a corner, so it
+# is allowed to be bigger than the logo. Still capped: it is embedded in every HTML
+# download and stored inside the saved Task, exactly like the logo.
+MAX_ITEM_IMAGE_BYTES = 2_000_000
+
 # Where the logo sits relative to the title. Three answers cover what a report header can
 # reasonably be; anything else is a stylesheet's job, not a picker's.
 LOGO_POSITIONS = ("left", "right", "above")
@@ -60,6 +98,14 @@ MAX_LOGO_BYTES = 512_000
 MIN_LOGO_HEIGHT = 24
 MAX_LOGO_HEIGHT = 160
 DEFAULT_LOGO_HEIGHT = 56
+
+# How tall a pasted-HTML block's frame is, in CSS pixels. A frame needs a size and only the
+# user knows how tall their page is, so this is a control on the block rather than a guess
+# here; content taller than the frame scrolls inside it. The default is roughly a pivot of
+# fifteen rows.
+MIN_EMBED_HEIGHT = 100
+MAX_EMBED_HEIGHT = 3000
+DEFAULT_EMBED_HEIGHT = 400
 
 
 def new_id() -> str:
@@ -91,6 +137,15 @@ class PinnedItem:
         source_id: what produced this item, for things that own their report item and
             re-save it — a criteria in `checks/` (requirement 6.5). None for anything
             pinned from the chat, where each pin is its own one-off snapshot.
+        kind: which of `MANUAL_KINDS` the user chose when they made this block, or
+            `KIND_RESULT` for everything the app produced. Stored rather than derived —
+            see the constants.
+        image: a picture the user uploaded onto this block, printed above the comment.
+            Distinct from `png`, which is a cache of a rasterized chart.
+        image_mime: what `image` is, so it can be written as a `data:` URI.
+        embed_html: markup the user pasted in, already reduced to what
+            `dashboard.embed_html` allows.
+        embed_height: how tall to draw that block's frame, in CSS pixels.
         column_with_previous: render this item beside the one above it rather than under
             it. The flag belongs to the item, not to a position, so moving an item carries
             its answer to "do I sit beside my neighbour" with it — and an item that lands
@@ -109,6 +164,11 @@ class PinnedItem:
     png: bytes | None = None
     source_id: str | None = None
     column_with_previous: bool = False
+    kind: str = KIND_RESULT
+    image: bytes | None = None
+    image_mime: str = ""
+    embed_html: str = ""
+    embed_height: int = DEFAULT_EMBED_HEIGHT
 
     def display_heading(self) -> str:
         """What to print above this item. Never empty."""
@@ -119,6 +179,32 @@ class PinnedItem:
 
     def has_table(self) -> bool:
         return self.frame is not None and not self.frame.empty
+
+    def has_image(self) -> bool:
+        """A picture the user put here — never the rasterized chart, which is `png`."""
+        return bool(self.image) and bool(self.image_mime)
+
+    def has_embed(self) -> bool:
+        return bool(self.embed_html.strip())
+
+    def is_manual_block(self) -> bool:
+        """Whether the user made this block rather than the app producing it.
+
+        What the report views ask before offering a picture uploader or an HTML box: those
+        controls belong on a block someone chose to write, not under every pinned answer.
+        """
+        return self.kind in MANUAL_KINDS
+
+    def image_data_uri(self) -> str:
+        """The picture as a `data:` URI, or "" when there is none.
+
+        The same arrangement `Report.logo_data_uri` has, for the same reason: the Preview
+        view and the HTML export both want this string, and encoding the bytes in two
+        places is two places to get the mime type wrong.
+        """
+        if not self.has_image():
+            return ""
+        return f"data:{self.image_mime};base64," + base64.b64encode(self.image).decode("ascii")
 
 
 @dataclass
@@ -179,10 +265,11 @@ class Report:
 # The header logo
 # --------------------------------------------------------------------------------------
 
-# What an `<img src="data:…">` in a self-contained page can actually show. SVG is left out
+# What an `<img src="data:…">` in a self-contained page can actually show. Shared by the
+# header logo and by a picture block, which face the same constraint. SVG is left out
 # on purpose: it is a document, not a picture, and one embedded in the export would be the
 # second string in the file that isn't escaped.
-LOGO_MIME_BY_SUFFIX = {
+PICTURE_MIME_BY_SUFFIX = {
     "png": "image/png",
     "jpg": "image/jpeg",
     "jpeg": "image/jpeg",
@@ -190,15 +277,20 @@ LOGO_MIME_BY_SUFFIX = {
     "webp": "image/webp",
 }
 
-LOGO_FILE_TYPES = ("png", "jpg", "jpeg", "gif", "webp")
+PICTURE_FILE_TYPES = ("png", "jpg", "jpeg", "gif", "webp")
 
 
-def logo_problems(data: bytes | None, filename: str) -> list[str]:
-    """Everything wrong with a would-be logo, in plain English. Empty means accept.
+def picture_problems(data: bytes | None, filename: str, *, limit: int, what: str) -> list[str]:
+    """Everything wrong with a would-be picture, in plain English. Empty means accept.
 
     Same shape as `css_presets.validate_css` and for the same reason: the page needs
     something to *show* the user, not an exception to catch. Nothing is stored on the report
     until this comes back empty.
+
+    One function for the header logo and for a picture block, because the two face the same
+    constraint — both are base64'd into every HTML download and into the saved Task — and
+    differ only in how big that makes it reasonable to be. `what` names the picture in the
+    message so the user is told which one was refused.
     """
     problems: list[str] = []
 
@@ -206,20 +298,25 @@ def logo_problems(data: bytes | None, filename: str) -> list[str]:
         return ["That file is empty, so there is nothing to show."]
 
     suffix = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    if suffix not in LOGO_MIME_BY_SUFFIX:
+    if suffix not in PICTURE_MIME_BY_SUFFIX:
         problems.append(
-            "The logo has to be a PNG, JPG, GIF or WEBP picture — those are what an "
-            "offline HTML file can carry."
+            f"The {what} has to be a PNG, JPG, GIF or WEBP file — those are what an offline "
+            "HTML page can carry."
         )
 
-    if len(data) > MAX_LOGO_BYTES:
+    if len(data) > limit:
         problems.append(
-            f"The logo is {len(data) / 1024:,.0f} KB, over the {MAX_LOGO_BYTES // 1024} KB "
-            "limit. It goes inside every download, so a small header-sized picture is all "
-            "that is needed."
+            f"The {what} is {len(data) / 1024:,.0f} KB, over the {limit // 1024} KB limit. "
+            "It goes inside every download, so a smaller picture is all that is needed."
         )
 
     return problems
+
+
+def logo_problems(data: bytes | None, filename: str) -> list[str]:
+    """`picture_problems` at the header logo's size. A logo sits in a corner of the page,
+    so it is held to a far smaller cap than a picture block printed full width."""
+    return picture_problems(data, filename, limit=MAX_LOGO_BYTES, what="logo")
 
 
 def set_logo(report: Report, data: bytes, filename: str) -> list[str]:
@@ -236,7 +333,7 @@ def set_logo(report: Report, data: bytes, filename: str) -> list[str]:
 
     suffix = filename.rsplit(".", 1)[-1].lower()
     report.logo = bytes(data)
-    report.logo_mime = LOGO_MIME_BY_SUFFIX[suffix]
+    report.logo_mime = PICTURE_MIME_BY_SUFFIX[suffix]
     return []
 
 
@@ -260,6 +357,22 @@ def set_logo_height(report: Report, height) -> int:
     return clamped
 
 
+def set_embed_height(item, height) -> int:
+    """Stores a pasted block's frame height, clamped to what the control offers.
+
+    Clamped here rather than trusted from the widget, for the same reason
+    `set_logo_height` is: the same value comes back out of a saved Task, where it was
+    written by whatever version of this app saved it — and it is interpolated straight
+    into the export's markup.
+    """
+    try:
+        clamped = max(MIN_EMBED_HEIGHT, min(int(height), MAX_EMBED_HEIGHT))
+    except (TypeError, ValueError):
+        clamped = DEFAULT_EMBED_HEIGHT
+    item.embed_height = clamped
+    return clamped
+
+
 def set_logo_position(report: Report, position: str) -> str:
     """Stores where the logo sits, falling back to the default for an unknown value.
 
@@ -268,6 +381,87 @@ def set_logo_position(report: Report, position: str) -> str:
     """
     report.logo_position = position if position in LOGO_POSITIONS else DEFAULT_LOGO_POSITION
     return report.logo_position
+
+
+# --------------------------------------------------------------------------------------
+# Blocks the user writes
+# --------------------------------------------------------------------------------------
+
+
+def new_block(kind: str) -> PinnedItem:
+    """An empty block of one of `MANUAL_KINDS`, ready for the pool.
+
+    It carries a placeholder heading rather than none, so it is findable in a pool of a
+    dozen items before the user has got round to naming it. An unrecognized kind becomes a
+    text block: the least presumptuous of the three, and the one that loses nothing if the
+    guess is wrong.
+    """
+    if kind not in MANUAL_KINDS:
+        logger.info("Asked for an unknown block kind %r; making a text block instead.", kind)
+        kind = KIND_TEXT
+    return PinnedItem(kind=kind, heading=BLOCK_HEADINGS[kind])
+
+
+def set_item_image(item: PinnedItem, data: bytes, filename: str) -> list[str]:
+    """Puts a picture on a block, or returns why it was refused.
+
+    Refusing leaves whatever picture was already there, on the same grounds `set_logo`
+    gives: a rejected change costs the change and never the item.
+    """
+    problems = picture_problems(data, filename, limit=MAX_ITEM_IMAGE_BYTES, what="picture")
+    if problems:
+        logger.info("Refused a picture for item %s: %s", item.item_id, "; ".join(problems))
+        return problems
+
+    suffix = filename.rsplit(".", 1)[-1].lower()
+    item.image = bytes(data)
+    item.image_mime = PICTURE_MIME_BY_SUFFIX[suffix]
+    return []
+
+
+def clear_item_image(item: PinnedItem) -> None:
+    item.image = None
+    item.image_mime = ""
+
+
+# The fields on an item that a person writes and no run can produce. A report item's rows
+# and chart come back fresh every run; its note, its picture and its pasted markup do not —
+# they sit in the saved skeleton exactly as they were typed. So these are the five fields
+# that are worth carrying from a finished run back into the recipe it came from, and
+# `frame`/`figure`/`png` are deliberately absent: `skeleton.to_dict` refuses to store them,
+# and a copier that could put one there would be a way round that rule.
+#
+# **Every name here must also be stored by `skeleton._item_to_dict`.** Copying a field the
+# skeleton drops would give the user a Save that reports success and loses the value on the
+# next load — the quietest way this could break. `TestAuthoredFields` in
+# `tests/test_dashboard_blocks.py` fails when a sixth field is added here and not there.
+AUTHORED_FIELDS = ("comment", "image", "image_mime", "embed_html", "embed_height")
+
+
+def copy_authored_content(source: Report, target: Report) -> int:
+    """Copies the by-hand fields of every item in `source` onto its twin in `target`.
+
+    Matched on `item_id`, never on position: a run's report is a deep copy of the Task's
+    skeleton, so the ids line up at both ends, and matching by id stays exact even if the
+    Task has since been reordered in Task Builder. An item with no twin is skipped rather
+    than appended — it was deleted from the saved report, and putting it back would undo
+    that silently.
+
+    Returns how many items were written to, so the page can say so.
+    """
+    twins = {item.item_id: item for _, _, item in iter_items(target)}
+    written = 0
+
+    for _, _, item in iter_items(source):
+        twin = twins.get(item.item_id)
+        if twin is None:
+            logger.info("Item %s has no twin in the target report; leaving it out.", item.item_id)
+            continue
+        for name in AUTHORED_FIELDS:
+            setattr(twin, name, getattr(item, name))
+        written += 1
+
+    return written
 
 
 # --------------------------------------------------------------------------------------

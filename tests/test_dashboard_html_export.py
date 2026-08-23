@@ -8,6 +8,8 @@ from dashboard import html_export, images
 from dashboard.css_presets import DEFAULT_PRESET, preset_css
 from dashboard.html_export import build_html, frame_to_html
 from dashboard.model import (
+    KIND_EMBED,
+    KIND_IMAGE,
     UNTITLED_REPORT,
     PinnedItem,
     Report,
@@ -89,6 +91,151 @@ def test_a_long_table_is_cut_and_says_how_many_rows_there_were():
     assert html.count("<tr>") == html_export.PREVIEW_ROWS + 1
     assert f"Showing the first {html_export.PREVIEW_ROWS:,} of {len(frame):,} rows" in html
     assert "Excel download has all of them" in html
+
+
+# --------------------------------------------------------------------------------------
+# Blocks the user writes
+# --------------------------------------------------------------------------------------
+
+
+BLOCK_PNG = b"\x89PNG\r\n\x1a\npretend-this-is-a-screenshot"
+
+
+def test_a_blocks_picture_is_embedded_so_the_file_still_works_offline():
+    item = PinnedItem(kind=KIND_IMAGE, heading="Pivot", image=BLOCK_PNG, image_mime="image/png")
+
+    html = build_html(_report_with(item), _css())
+
+    assert f'src="data:image/png;base64,{base64.b64encode(BLOCK_PNG).decode("ascii")}"' in html
+    assert "http" not in html.split("<style>")[0]
+
+
+def test_a_blocks_picture_is_not_confused_with_a_chart():
+    """One item can carry both — a pinned chart the user added a screenshot to — so they are
+    separate values in the template rather than one slot fought over."""
+    item = PinnedItem(kind=KIND_IMAGE, heading="Both", image=BLOCK_PNG, image_mime="image/png", figure=object())
+
+    html = build_html(_report_with(item), _css())
+
+    assert html.count("<img") == 2
+
+
+def test_pasted_html_reaches_the_page_looking_like_itself():
+    """The whole point of the block: an Excel pivot keeps the inline styles that *are* its
+    appearance. What changed in phase 18 is only *where* they live — inside the frame's
+    `srcdoc`, escaped as attribute text, rather than inlined in this document."""
+    item = PinnedItem(
+        kind=KIND_EMBED,
+        heading="Revenue pivot",
+        embed_html='<table><tr><td style="background:#D9E1F2">North</td></tr></table>',
+    )
+
+    html = build_html(_report_with(item), _css())
+
+    assert "background:#D9E1F2" in html
+    assert "North" in html
+    assert "&lt;table&gt;" in html  # carried as text, which is what makes the frame a frame
+
+
+def test_pasted_html_cannot_smuggle_anything_that_runs_or_loads():
+    """The second value in this template rendered unescaped, so this is the test that keeps
+    it safe. Phase 19 lets a paste's own `<script>` through on purpose — the frame's sandbox
+    is what makes that safe, not the sanitizer removing it — but a handler, an insecure
+    resource fetch and a `background-image` reaching the open internet are still stripped
+    regardless."""
+    item = PinnedItem(
+        kind=KIND_EMBED,
+        heading="Pasted",
+        embed_html=(
+            '<script>alert(1)</script><style>body{color:red}</style>'
+            '<td onclick="steal()" style="background-image:url(http://x/a.png)">Fine</td>'
+        ),
+    )
+
+    html = build_html(_report_with(item), _css())
+
+    assert "alert(1)" in html  # kept, and only ever runs inside the sandboxed frame
+    assert "onclick" not in html
+    assert "url(http" not in html
+    assert "Fine" in html
+
+
+def test_a_pasted_block_is_written_into_a_sandboxed_frame():
+    """The whole of phase 18: the paste is not part of this page, it is a document of its
+    own inside a sandboxed frame — it cannot navigate, submit a form or open a plugin.
+    Phase 19 widens that sandbox to `allow-scripts allow-same-origin` so a live embed can
+    run — see `embed_html`'s module docstring for the trade-off that grant accepts."""
+    item = PinnedItem(kind=KIND_EMBED, heading="Wide", embed_html="<table><tr><td>A</td></tr></table>")
+
+    html = build_html(_report_with(item), _css())
+
+    assert '<iframe class="embed" sandbox="allow-scripts allow-same-origin"' in html
+    assert "srcdoc=" in html
+
+
+def test_the_frame_is_as_tall_as_the_block_says():
+    item = PinnedItem(
+        kind=KIND_EMBED,
+        heading="Tall",
+        embed_html="<p>A</p>",
+        embed_height=750,
+    )
+
+    html = build_html(_report_with(item), _css())
+
+    assert "height: 750px" in html
+
+
+def test_the_pasted_document_is_escaped_into_the_attribute_not_written_as_markup():
+    """`srcdoc` carries a whole page as *text*. If its tags reached the report as tags the
+    frame would be pointless — the paste would be part of this document after all."""
+    item = PinnedItem(
+        kind=KIND_EMBED,
+        heading="Sheet",
+        embed_html="<style>.xl65 { background: #4472C4 }</style>"
+        '<table><tr><td class="xl65">A</td></tr></table>',
+    )
+
+    html = build_html(_report_with(item), _css())
+
+    assert "&lt;table" in html  # escaped into the attribute
+    assert "&lt;style&gt;.xl65 { background: #4472C4 }" in html
+    # and the report's own body never gains a second <table> from it
+    assert '<td class="xl65">' not in html
+
+
+def test_a_pasted_blocks_own_styles_travel_with_it_unscoped():
+    """Inside a frame there is nothing to protect, so the rules are the user's own — this
+    is what makes an Excel sheet arrive in colour and a styled page keep its buttons."""
+    item = PinnedItem(
+        kind=KIND_EMBED,
+        heading="Sheet",
+        embed_html="<style>:root { --brand: #4472C4 } .btn:hover { color: red }</style>"
+        '<a href="#" class="btn">Go</a>',
+    )
+
+    html = build_html(_report_with(item), _css())
+
+    assert ":root { --brand: #4472C4 }" in html
+    assert ".btn:hover { color: red }" in html
+    assert "class=&#34;btn&#34;" in html
+
+
+def test_the_report_stylesheet_still_wins_over_the_block_rules(frame):
+    """Same guarantee the comment rules carry: a preset or a hand-edited sheet is written
+    after these, so it can still restyle a picture or a pasted block."""
+    html = build_html(_report_with(PinnedItem(heading="Sales", frame=frame)), _css())
+
+    assert html.index(".block-picture") < html.index(_css())
+
+
+def test_a_report_with_no_blocks_writes_exactly_the_markup_it_always_did(frame):
+    """What keeps every preset and every hand-edited stylesheet styling an untouched report
+    the way it already did."""
+    body = build_html(_report_with(PinnedItem(heading="Sales", frame=frame)), _css()).split("<body>")[1]
+
+    assert "block-picture" not in body
+    assert "<iframe" not in body
 
 
 def test_headings_and_comments_are_escaped(frame):

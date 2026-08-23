@@ -15,7 +15,16 @@ from openpyxl import load_workbook
 from dashboard import images
 from dashboard.exceptions import ReportExportError
 from dashboard.excel_export import CONTENTS_SHEET_NAME, build_report_workbook, sheet_names_for
-from dashboard.model import PinnedItem, Report, add_section, add_subsection, assign_item
+from dashboard.model import (
+    KIND_EMBED,
+    KIND_IMAGE,
+    KIND_TEXT,
+    PinnedItem,
+    Report,
+    add_section,
+    add_subsection,
+    assign_item,
+)
 
 # A real 1×1 PNG rather than a few token bytes: xlsxwriter reads the header to size the
 # picture, so a fake would fail inside the writer for reasons that say nothing about this
@@ -205,6 +214,69 @@ def test_a_chart_that_could_not_be_drawn_leaves_a_note_instead(monkeypatch, fram
 
 
 # --------------------------------------------------------------------------------------
+# Blocks the user writes
+# --------------------------------------------------------------------------------------
+
+
+def _block_sheet(**item_fields):
+    """One block, alone in a report, as the worksheet it lands on."""
+    report = Report(title="Blocks")
+    section = add_section(report, "Extras")
+    item = PinnedItem(heading="Pasted", **item_fields)
+    report.pool.append(item)
+    assign_item(report, item.item_id, section.subsections[0].node_id)
+    return load_workbook(io.BytesIO(build_report_workbook(report)))["1.1 General"]
+
+
+def _text_of(sheet) -> str:
+    return "\n".join(str(cell.value) for row in sheet.iter_rows() for cell in row if cell.value is not None)
+
+
+def test_a_blocks_picture_is_placed_in_the_sheet():
+    sheet = _block_sheet(kind=KIND_IMAGE, image=FAKE_PNG, image_mime="image/png")
+
+    assert len(sheet._images) == 1
+
+
+def test_a_picture_that_is_not_really_one_leaves_a_note_instead_of_failing():
+    """`set_item_image` checks the extension and the size, not the contents — so the file
+    reaching xlsxwriter may be anything, and it must cost the picture and not the
+    download."""
+    sheet = _block_sheet(kind=KIND_IMAGE, image=b"this is not a picture", image_mime="image/png")
+
+    assert "picture couldn't be included" in _text_of(sheet)
+
+
+def test_pasted_html_is_written_as_real_cells():
+    """A workbook cannot hold markup, and someone who pasted an Excel pivot in wants the
+    grid back — sortable, totalable, in cells."""
+    sheet = _block_sheet(
+        kind=KIND_EMBED,
+        embed_html="<table><tr><td>Region</td><td>Revenue</td></tr><tr><td>North</td><td>1240</td></tr></table>",
+    )
+
+    values = [[cell.value for cell in row] for row in sheet.iter_rows()]
+    assert ["Region", "Revenue"] in [row[:2] for row in values]
+    assert ["North", "1240"] in [row[:2] for row in values]
+
+
+def test_pasted_html_with_no_table_in_it_says_so_rather_than_writing_tags():
+    sheet = _block_sheet(kind=KIND_EMBED, embed_html="<p>Just a paragraph.</p>")
+
+    text = _text_of(sheet)
+    assert "no table in it" in text
+    assert "<p>" not in text
+
+
+def test_a_block_still_carries_its_heading_and_comment():
+    sheet = _block_sheet(kind=KIND_TEXT, comment="<p>Revenue held up.</p>")
+
+    text = _text_of(sheet)
+    assert "1.1.1 Pasted" in text
+    assert "Revenue held up." in text
+
+
+# --------------------------------------------------------------------------------------
 # Refusals
 # --------------------------------------------------------------------------------------
 
@@ -225,3 +297,59 @@ def test_a_cell_over_excels_length_limit_is_refused_before_writing():
     frame = pd.DataFrame({"note": ["x" * 40_000]})
     with pytest.raises(ReportExportError, match="characters"):
         build_report_workbook(_one_item_report(frame))
+
+
+def test_a_pasted_cell_starting_with_equals_stays_text():
+    """`write` reads a leading `=` as a formula, so a pasted `=SUM(A1:A9)` became a live —
+    and wrong — calculation in the user's workbook. These cells came out of someone else's
+    web page as text and must land as text."""
+    sheet = _block_sheet(
+        kind=KIND_EMBED,
+        embed_html="<table><tr><td>=SUM(A1:A9)</td></tr></table>",
+    )
+
+    cell = next(cell for row in sheet.iter_rows() for cell in row if cell.value == "=SUM(A1:A9)")
+    assert cell.data_type == "s"
+
+
+def test_a_pasted_cell_holding_a_url_does_not_become_a_hyperlink():
+    sheet = _block_sheet(
+        kind=KIND_EMBED,
+        embed_html="<table><tr><td>http://example.com/a</td></tr></table>",
+    )
+
+    cell = next(cell for row in sheet.iter_rows() for cell in row if cell.value == "http://example.com/a")
+    assert cell.data_type == "s"
+    assert cell.hyperlink is None
+
+
+def test_a_pasted_table_widens_its_columns():
+    """It shares a sheet with real tables that were widened, and without this its own
+    columns stayed at Excel's default and clipped every value in them."""
+    sheet = _block_sheet(
+        kind=KIND_EMBED,
+        embed_html="<table><tr><td>A rather long pasted value indeed</td></tr></table>",
+    )
+
+    assert sheet.column_dimensions["A"].width > 8
+
+
+def test_a_webp_picture_is_converted_rather_than_dropped():
+    """The app accepts WEBP for a block picture and the HTML export embeds one happily, but
+    xlsxwriter cannot hold it — so it used to be silently absent from every Excel download
+    behind a note that said only "couldn't be included"."""
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 30), "red").save(buffer, format="WEBP")
+
+    sheet = _block_sheet(kind=KIND_IMAGE, image=buffer.getvalue(), image_mime="image/webp")
+
+    assert len(sheet._images) == 1
+
+
+def test_a_picture_no_converter_can_read_still_explains_itself():
+    sheet = _block_sheet(kind=KIND_IMAGE, image=b"not a picture at all", image_mime="image/webp")
+
+    assert not sheet._images
+    assert "WEBP" in _text_of(sheet)

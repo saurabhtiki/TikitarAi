@@ -23,7 +23,14 @@ import streamlit as st
 
 from analyst.session import ChatMessage
 from dashboard.custom_style import StyleSettings, default_settings
-from dashboard.model import PinnedItem, Report, find_item, find_item_by_source, remove_item
+from dashboard.model import (
+    PinnedItem,
+    Report,
+    find_item,
+    find_item_by_source,
+    new_block,
+    remove_item,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +238,20 @@ def pin_imported(
     )
     get_report().pool.append(item)
     logger.info("Pinned an imported item from source %s (item %s).", source_id, item.item_id)
+    return item
+
+
+def pin_block(kind: str) -> PinnedItem:
+    """Puts an empty block the user asked for into the pool.
+
+    No `source_id`: nothing produced it and nothing will refresh it, which is exactly what
+    makes it the user's to discard. It lands in the pool rather than in a subsection for
+    the same reason a pinned answer does — where it goes is a separate decision, taken on
+    the tree beside it.
+    """
+    item = new_block(kind)
+    get_report().pool.append(item)
+    logger.info("Added a %s block to the report (item %s).", item.kind, item.item_id)
     return item
 
 
