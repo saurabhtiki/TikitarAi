@@ -95,6 +95,40 @@ def _render_cleaner_handoff() -> None:
         st.caption("Or upload files below.")
 
 
+def _confirm_uploads(uploads: list) -> list:
+    """The uploads that may be loaded, plus the button that lets the waiting ones through.
+
+    Dropping four files in used to start four loads, one per rerun as each file arrived, so
+    the user watched the page work through half-loaded states before it settled. Now a new
+    file waits — with its sheet picker already on screen, so sheets are chosen *before*
+    anything is read — until **Load** is pressed.
+
+    Removing a file needs no button and gets none: it simply stops being in `uploads`, and
+    `sync_tables` drops its table the way it always did.
+
+    No `st.rerun` after the press: this is called above `sync_tables`, so the files are
+    loaded further down the very same run.
+    """
+    confirmed = session.confirmed_upload_ids()
+    waiting = [upload for upload in uploads if upload.file_id not in confirmed]
+    if not waiting:
+        return uploads
+
+    names = ", ".join(upload.name for upload in waiting)
+    st.caption(f":grey[Waiting to load: {names}. Choose sheets above if you need to, then press Load.]")
+    if st.button(
+        f"Load {len(waiting)} file(s)",
+        key="de_load_files",
+        icon=":material/play_arrow:",
+        type="primary",
+        help="Reads these files into tables you can query. Nothing is read until you press this.",
+    ):
+        session.confirm_uploads([upload.file_id for upload in waiting])
+        return uploads
+
+    return [upload for upload in uploads if upload.file_id in confirmed]
+
+
 def mount_upload(
     declared_types: dict | None = None,
     *,
@@ -148,8 +182,11 @@ def mount_upload(
             "beside a table to drop it.]"
         )
 
+    uploads = list(uploads or [])
+    session.forget_unconfirmed({upload.file_id for upload in uploads})
+
     sheet_selection: dict[str, list[str]] = {}
-    for upload in uploads or []:
+    for upload in uploads:
         from cleaner import loaders
 
         if loaders.is_csv(upload.name):
@@ -167,8 +204,10 @@ def mount_upload(
             help="Each selected sheet becomes its own table you can query.",
         )
 
+    ready = _confirm_uploads(uploads)
+
     return session.sync_tables(
-        uploads,
+        ready,
         sheet_selection,
         declared_types or {},
         table_names=table_names or {},

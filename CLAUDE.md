@@ -19,7 +19,7 @@ Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- update this line each time a phase is completed -->
-All 10 stages of requirements.md done; plus phase 13 — a run saves the report's current data, and anyone can chat with any report from the Chat with reports page
+All 10 stages of requirements.md done; phase 13 (a run saves the report's current data, chat with any report); phase 14 — report comments have a bold/italic/underline/list toolbar, carried into the HTML and Excel exports; phase 15 — one upload pins every dataset, pivot table and chart in an Excel workbook, and re-importing refreshes the numbers without touching the user's titles and comments; phase 16 — the report pins tables that are already loaded (no second upload), uploads wait for a Load button, and a report shows 500 rows while the Excel download keeps every one
 
 # Library docs (Agno, Streamlit)
 

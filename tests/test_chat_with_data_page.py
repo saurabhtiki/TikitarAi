@@ -28,6 +28,7 @@ from engine import columns as engine_columns
 from engine import session as engine_session
 from engine.relationships import Relationship
 from llm.db import create_profile, init_llm_table
+from tests.upload_gate_stub import load_uploaded_files
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PAGE_PATH = str(PROJECT_ROOT / "app_pages" / "chat_with_data.py")
@@ -74,8 +75,7 @@ def _upload(app, *files: tuple[str, bytes]):
     app.file_uploader(key=engine_session.DE_UPLOADER_KEY).set_value(
         [(name, payload, "text/csv") for name, payload in files]
     )
-    app.run()
-    return app
+    return load_uploaded_files(app)
 
 
 class TestAccess:
@@ -127,7 +127,7 @@ class TestUpload:
         app.file_uploader(key=engine_session.DE_UPLOADER_KEY).set_value(
             [("broken.xlsx", b"not a workbook", "application/octet-stream")]
         )
-        app.run()
+        load_uploaded_files(app)
         assert not app.exception
         assert app.error
 

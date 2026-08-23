@@ -34,6 +34,7 @@ import streamlit as st
 from analyst import charts, column_intent, commentary
 from analyst.exceptions import AnalystError
 from app_pages import chart_controls
+from app_pages.comment_editor import comment_editor, reset_comment_editor
 from app_pages.checks_view import SchemaOptions
 from dashboard import session as dashboard_session
 from engine import columns as engine_columns
@@ -529,10 +530,10 @@ def _write_comment(item: ReportItem, frame: pd.DataFrame, persona: str, user_id:
         return
 
     item.comment = written
-    # Assigned to the widget's own key, not just to the model: a text area that already exists
-    # ignores `value=` for the rest of the session, so this is what actually puts the new
-    # wording on screen.
-    st.session_state[f"ri_comment_{item.item_id}"] = written
+    # The model alone is not enough: the comment editor is a custom component and reads its
+    # `value` only when it mounts, so it is remounted here. That is what actually puts the
+    # new wording on screen.
+    reset_comment_editor(f"ri_comment_{item.item_id}")
 
 
 def _chart_figure(item: ReportItem, frame: pd.DataFrame):
@@ -620,13 +621,15 @@ def _render_results(item: ReportItem, frame: pd.DataFrame, persona: str, user_id
         with st.spinner("Writing the comment…"):
             _write_comment(item, frame, persona, user_id)
 
-    item.comment = st.text_area(
-        "Comment",
+    item.comment = comment_editor(
+        label="Comment",
         value=item.comment,
         key=f"ri_comment_{item.item_id}",
-        height=120,
         placeholder="Write the note yourself, or press the button above to have it drafted.",
-        help="Printed under this item in the report. Edit it freely.",
+        help_text=(
+            "Printed under this item in the report. Edit it freely — the toolbar gives bold, "
+            "italic, underline and lists."
+        ),
     )
 
     already_saved = item.is_saved()

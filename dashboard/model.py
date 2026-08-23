@@ -78,7 +78,10 @@ class PinnedItem:
         heading: what the report calls it. Defaults to the question, so a pinned item is
             already labelled before the user opens the Dashboard.
         comment: the written note under the output. It arrives as the chat's own commentary
-            on this answer and is the user's to edit from then on.
+            on this answer and is the user's to edit from then on. Held as a small piece of
+            HTML — the comment box has a bold/italic/underline/list toolbar — kept to an
+            allow-list by `dashboard.rich_text`. A comment written before that toolbar
+            existed is plain text with no tags in it, which that module handles as-is.
         sql: the statement behind it, shown when the item is opened.
         frame: a *copy* of the rows, or None.
         figure: the Plotly figure, or None.

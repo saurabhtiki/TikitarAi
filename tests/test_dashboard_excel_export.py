@@ -141,6 +141,32 @@ def test_a_sheet_carries_the_heading_the_comment_and_every_row(frame):
     assert "120" in text and "340" in text
 
 
+def test_a_formatted_comment_reaches_the_workbook_as_words_not_tags(frame):
+    """A merged cell cannot hold a list, so bullets arrive as markers on their own lines —
+    and none of the markup itself may show up as text."""
+    report = _one_item_report(
+        frame, comment="<p><b>Up</b> again</p><ul><li>North</li><li>South</li></ul>"
+    )
+    sheet = load_workbook(io.BytesIO(build_report_workbook(report)))["1.1 General"]
+    text = "\n".join(str(cell.value) for row in sheet.iter_rows() for cell in row if cell.value is not None)
+
+    assert "Up again" in text
+    assert "• North\n• South" in text
+    assert "<b>" not in text and "<li>" not in text
+
+
+def test_a_comment_that_is_bold_throughout_arrives_bold(frame):
+    """One style end to end is a single fragment, which a rich string cannot hold — the
+    comment is written plainly instead, and must not lose its formatting on the way."""
+    report = _one_item_report(frame, comment="<p><b>Everything bold</b></p>")
+    sheet = load_workbook(io.BytesIO(build_report_workbook(report)))["1.1 General"]
+    written = next(
+        cell for row in sheet.iter_rows() for cell in row if cell.value == "Everything bold"
+    )
+
+    assert written.font.bold
+
+
 def test_an_item_heading_carries_the_same_number_the_html_report_gives_it(frame):
     report = _one_item_report(frame)
     sheet = load_workbook(io.BytesIO(build_report_workbook(report)))["1.1 General"]
@@ -150,12 +176,15 @@ def test_an_item_heading_carries_the_same_number_the_html_report_gives_it(frame)
 
 
 def test_a_full_table_is_written_with_no_row_limit():
-    frame = pd.DataFrame({"n": range(500)})
+    """Deliberately longer than the cut the HTML report makes — requirements 6.4 and 7.5
+    both say "full data, no row limits" of the workbook, and it is the file a person
+    actually works in. See `test_dashboard_html_export.py` for the other half of this."""
+    frame = pd.DataFrame({"n": range(600)})
     report = _one_item_report(frame)
     sheet = load_workbook(io.BytesIO(build_report_workbook(report)))["1.1 General"]
 
     values = {cell.value for row in sheet.iter_rows() for cell in row}
-    assert 0 in values and 499 in values
+    assert 0 in values and 599 in values
 
 
 def test_a_chart_is_embedded_as_a_picture(frame):

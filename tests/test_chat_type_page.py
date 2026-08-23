@@ -26,6 +26,7 @@ from checks import db as checks_db
 from engine import session as engine_session
 from engine.relationships import Relationship
 from llm.db import init_llm_table
+from tests.upload_gate_stub import load_uploaded_files
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PAGE_PATH = str(PROJECT_ROOT / "app_pages" / "chat_with_data.py")
@@ -64,8 +65,7 @@ def _upload(app, *files):
     app.file_uploader(key=engine_session.DE_UPLOADER_KEY).set_value(
         [(name, content, "text/csv") for name, content in files]
     )
-    app.run()
-    return app
+    return load_uploaded_files(app)
 
 
 def _save_as(app, name):
@@ -451,7 +451,8 @@ class TestWhereTheReportIsShown:
         fresh.run()
         fresh.file_uploader(key=engine_session.DE_UPLOADER_KEY).set_value(
             [("salary.csv", SALARY_MISSING_COLUMN, "text/csv")]
-        ).run()
+        )
+        load_uploaded_files(fresh)
 
         assert fresh.session_state[engine_session.STEP_UPLOAD] is True
         assert any("**bonus** is missing in **salary**" in element.value for element in fresh.markdown)

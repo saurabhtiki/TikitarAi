@@ -41,6 +41,7 @@ DE_START_OVER_KEY = "de_start_over_pending"
 DE_CLEAR_FILES_KEY = "de_clear_files_pending"
 DE_DISMISSED_KEY = "de_dismissed_tables"
 DE_LOAD_OUTCOMES_KEY = "de_load_outcomes"
+DE_CONFIRMED_KEY = "de_confirmed_uploads"
 
 STEP_UPLOAD = "de_step_upload"
 STEP_LINKS = "de_step_links"
@@ -735,6 +736,35 @@ def clear_tables() -> int:
     if dropped:
         logger.info("Cleared %d loaded table(s); the rest of the session is untouched.", dropped)
     return dropped
+
+
+def confirmed_upload_ids() -> set[str]:
+    """The uploads the user has pressed **Load** on.
+
+    A file sitting in the uploader is not yet a table. Without this, dropping five files in
+    starts five separate loads — one per rerun as each file arrives — and the page churns
+    through half-loaded states in front of the user.
+
+    What this deliberately does *not* do is stop `sync_tables` from being called. The
+    uploader must be created and reconciled on every run or Streamlit drops its value and
+    every loaded table with it (see `detach_uploader_tables`); the gate is on which files
+    are handed over, never on whether the reconciliation happens.
+    """
+    return st.session_state.setdefault(DE_CONFIRMED_KEY, set())
+
+
+def confirm_uploads(file_ids: list[str]) -> None:
+    """Marks these uploads as ready to load."""
+    confirmed_upload_ids().update(file_ids)
+
+
+def forget_unconfirmed(file_ids: set[str]) -> None:
+    """Drops confirmations for files that are no longer in the uploader.
+
+    Removing a file needs no button — it is unambiguous — so its confirmation goes with it
+    rather than being kept for an id that can never return.
+    """
+    st.session_state[DE_CONFIRMED_KEY] = confirmed_upload_ids() & file_ids
 
 
 def queue_clear_files() -> None:

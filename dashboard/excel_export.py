@@ -26,6 +26,7 @@ from cleaner.naming import sanitize_sheet_names
 from dashboard.exceptions import ReportExportError
 from dashboard.images import PNG_HEIGHT, PNG_SCALE, item_png
 from dashboard.model import UNTITLED_REPORT, Report, walk
+from dashboard.rich_text import TextRun, to_runs, sanitize_comment
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,10 @@ _IMAGE_ROWS = int(PNG_HEIGHT * PNG_SCALE * IMAGE_SCALE / _PIXELS_PER_ROW) + 1
 # into a column of single words, narrow enough not to swamp a two-column table.
 _COMMENT_COLUMNS = 6
 _COMMENT_ROW_HEIGHT = 46
+
+# A merged cell does not grow itself, so a comment with bullets on separate lines has to
+# be given the height its lines need or Excel simply hides the ones past the first.
+_COMMENT_LINE_HEIGHT = 15
 
 _BLANK_ROWS_BETWEEN_ITEMS = 2
 
@@ -115,12 +120,77 @@ def _build_formats(workbook) -> dict:
     definition: creating an identical bold format on every sheet stores a separate one in
     the file for each.
     """
-    return {
+    formats = {
         "title": workbook.add_format({"bold": True, "font_size": 14}),
         "heading": workbook.add_format({"bold": True, "font_size": 11}),
         "comment": workbook.add_format({"text_wrap": True, "valign": "top", "italic": True}),
         "note": workbook.add_format({"italic": True, "font_color": "#767f88"}),
     }
+    # One format per combination of the three run styles a comment can carry. Built up
+    # front for the same reason as the rest: a rich string needs a real format object per
+    # fragment, and creating them per item would store a duplicate in the file each time.
+    # Italic is on throughout, because the plain comment block has always been italic —
+    # the toolbar's italic is expressed by the words being bold or underlined around it.
+    for bold in (False, True):
+        for underline in (False, True):
+            formats[_run_format_key(bold, underline)] = workbook.add_format(
+                {
+                    "italic": True,
+                    "bold": bold,
+                    "underline": 1 if underline else 0,
+                    # Only a rich string's *font* comes from its fragments; wrapping and
+                    # alignment come from the cell. These are here because a comment in one
+                    # single style is written as a plain string with this format as the
+                    # cell's own, and it has to wrap like every other comment.
+                    "text_wrap": True,
+                    "valign": "top",
+                }
+            )
+    return formats
+
+
+def _run_format_key(bold: bool, underline: bool) -> str:
+    return f"comment_run_{int(bold)}{int(underline)}"
+
+
+def _comment_arguments(runs: list[TextRun], formats: dict) -> list:
+    """One comment's runs as the alternating format/string arguments a rich string takes.
+
+    Runs that share the styling of the one before them are already merged by `to_runs`, so
+    every fragment here is a real change of formatting.
+    """
+    arguments: list = []
+    for run in runs:
+        if not run.text:
+            continue
+        arguments.append(formats[_run_format_key(run.bold, run.underline)])
+        arguments.append(run.text)
+    return arguments
+
+
+def _write_comment(worksheet, row: int, runs: list[TextRun], formats: dict) -> None:
+    """Writes the comment across the merged block, keeping its bold/italic/underline.
+
+    xlsxwriter cannot merge and write a rich string in one call, so the documented pairing
+    is used: merge the block empty with the comment format, then write the rich string
+    into its top-left cell with that same format passed along.
+
+    A comment in one single style — every comment written before the toolbar existed, and
+    also one that is bold from end to end — has a single fragment, which
+    `write_rich_string` rejects. It is written as a plain string instead, carrying that
+    one fragment's own format so "all bold" still arrives bold.
+    """
+    text = "".join(run.text for run in runs)
+    lines = text.count("\n") + 1
+    worksheet.set_row(row, max(_COMMENT_ROW_HEIGHT, lines * _COMMENT_LINE_HEIGHT))
+    worksheet.merge_range(row, 0, row, _COMMENT_COLUMNS - 1, "", formats["comment"])
+
+    arguments = _comment_arguments(runs, formats)
+    if len(arguments) <= 2:
+        single_format = arguments[0] if arguments else formats["comment"]
+        worksheet.write(row, 0, text, single_format)
+        return
+    worksheet.write_rich_string(row, 0, *arguments, formats["comment"])
 
 
 def _write_subsection(writer: pd.ExcelWriter, sheet_name: str, subsection, formats: dict) -> None:
@@ -163,10 +233,11 @@ def _write_subsection(writer: pd.ExcelWriter, sheet_name: str, subsection, forma
             _widen(widths, frame)
             cursor += len(frame) + 2
 
-        comment = (item.comment or "").strip()
-        if comment:
-            worksheet.set_row(cursor, _COMMENT_ROW_HEIGHT)
-            worksheet.merge_range(cursor, 0, cursor, _COMMENT_COLUMNS - 1, comment, formats["comment"])
+        # Through the same sanitizer the HTML export uses, so the workbook and the page
+        # are showing the same comment — one as formatted runs, the other as markup.
+        comment_runs = to_runs(sanitize_comment(item.comment))
+        if comment_runs:
+            _write_comment(worksheet, cursor, comment_runs, formats)
             cursor += 2
 
         cursor += _BLANK_ROWS_BETWEEN_ITEMS

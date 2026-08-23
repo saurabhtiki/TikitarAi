@@ -18,6 +18,7 @@ from streamlit.testing.v1 import AppTest
 
 from auth.db import init_db, seed_default_admin
 from app_pages import report_view
+from tests.comment_editor_stub import editor_key, stub_comment_editor
 from dashboard import custom_style
 from dashboard import session as dashboard_session
 from dashboard.css_presets import CUSTOM_PRESET, DEFAULT_PRESET
@@ -214,6 +215,34 @@ class TestPlacing:
         app.button(key="db_pool_discard_b").click().run()
         assert [item.item_id for item in _report(app).pool] == ["a"]
 
+    def test_an_item_pinned_from_a_loaded_table_can_still_be_discarded(self, tmp_path, monkeypatch):
+        """It carries a `source_id` too, but no page claims it — a loaded table is data, not a
+        screen that rewrites its own wording — so it is the user's to throw away."""
+        report = _pooled_report(PinnedItem(item_id="a", source_id="loaded:Sales"))
+        app = _make_app(tmp_path, monkeypatch, report=report)
+
+        app.button(key="db_pool_discard_a").click().run()
+        assert _report(app).pool == []
+
+    def test_an_item_pinned_before_the_rename_is_still_discardable(self, tmp_path, monkeypatch):
+        """Reports built while these items said `excel:` are still open in the wild, and an
+        item that stopped counting as imported would lose its Discard button."""
+        report = _pooled_report(
+            PinnedItem(item_id="a", source_id="excel:month.xlsx:Sales:table:sheet")
+        )
+        app = _make_app(tmp_path, monkeypatch, report=report)
+
+        app.button(key="db_pool_discard_a").click().run()
+        assert _report(app).pool == []
+
+    def test_the_pin_panel_says_so_when_nothing_is_loaded(self, tmp_path, monkeypatch):
+        """The pool's own empty message points at the pages that *make* items; this one is
+        about the other way in, and with no engine started there is nothing to pin."""
+        app = _make_app(tmp_path, monkeypatch, report=_pooled_report(PinnedItem(item_id="a")))
+
+        assert not _has_button(app, "db_pin_loaded")
+        assert any("No tables are loaded" in str(info.value) for info in app.info)
+
     def test_an_items_heading_is_editable_and_defaults_to_the_question(self, tmp_path, monkeypatch):
         report = _placed_report(PinnedItem(item_id="a", question="Sales by region", frame=FRAME))
         app = _make_app(tmp_path, monkeypatch, report=report)
@@ -225,19 +254,36 @@ class TestPlacing:
         assert _report(app).sections[0].subsections[0].items[0].heading == "Regional sales"
 
     def test_a_comment_is_editable(self, tmp_path, monkeypatch):
+        stub_comment_editor(monkeypatch)
         item = PinnedItem(item_id="a", question="Sales", frame=FRAME)
         app = _make_app(tmp_path, monkeypatch, report=_placed_report(item))
 
-        app.text_area(key="db_item_comment_a").set_value("Steady quarter.").run()
+        app.text_area(key=editor_key("db_item_comment_a")).set_value("Steady quarter.").run()
         assert _report(app).sections[0].subsections[0].items[0].comment == "Steady quarter."
+
+    def test_a_comment_keeps_the_formatting_the_toolbar_gave_it(self, tmp_path, monkeypatch):
+        """Bold, italic, underline and lists survive onto the item; anything else the box
+        could be fed does not."""
+        stub_comment_editor(monkeypatch)
+        item = PinnedItem(item_id="a", question="Sales", frame=FRAME)
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(item))
+
+        written = '<p><strong>Up</strong> <u>again</u><script>alert(1)</script></p>'
+        app.text_area(key=editor_key("db_item_comment_a")).set_value(written).run()
+
+        stored = _report(app).sections[0].subsections[0].items[0].comment
+        assert "<strong>Up</strong>" in stored
+        assert "<u>again</u>" in stored
+        assert "script" not in stored
 
     def test_a_comment_arrives_carrying_the_chats_own_answer(self, tmp_path, monkeypatch):
         """The comment is not generated here — the box opens holding what the chat already
         wrote about this answer, and the user edits it from there."""
+        stub_comment_editor(monkeypatch)
         item = PinnedItem(item_id="a", question="Sales", frame=FRAME, comment="The North leads.")
         app = _make_app(tmp_path, monkeypatch, report=_placed_report(item))
 
-        assert app.text_area(key="db_item_comment_a").value == "The North leads."
+        assert app.text_area(key=editor_key("db_item_comment_a")).value == "The North leads."
 
     def test_there_is_no_generate_button(self, tmp_path, monkeypatch):
         """Removed on the user's instruction. The page now makes no model calls at all,

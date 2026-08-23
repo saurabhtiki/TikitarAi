@@ -5,15 +5,20 @@ base64 `data:` images, and tables are real `<table>` elements — so the downloa
 same on a machine that has never heard of this app, which is the whole point of the
 requirement.
 
-Escaping is Jinja2's, on by default. Exactly two values reach the page unescaped and both
+Escaping is Jinja2's, on by default. Exactly three values reach the page unescaped and all
 are accounted for: the stylesheet, which `css_presets.validate_css` screens (and which is
-why that screening exists), and the table markup, which pandas generates itself with
-`escape=True` so every cell and column name inside it is already escaped. Every other
-string — the title, headings, comments — is user text and is escaped by the template.
+why that screening exists); the table markup, which pandas generates itself with
+`escape=True` so every cell and column name inside it is already escaped; and the comment,
+which carries the toolbar's formatting and so goes through `rich_text.sanitize_comment` —
+an allow-list of the handful of tags that toolbar can produce, with every attribute
+dropped. Every other string — the title, the headings — is user text and is escaped by the
+template.
 
-Tables carry **every row**. Requirement 7.3 is explicit that on-screen output may be
-capped but HTML and Excel exports always contain the full result, so there is no row limit
-here and no "showing first N" notice to write.
+Tables are cut to `pinned_tables.PREVIEW_ROWS`, with a line underneath saying how many rows
+there were. A report is something a person reads, and a browser handed a hundred thousand
+`<tr>` elements stops being readable long before it stops working. The **Excel** export is
+not cut — requirements 6.4 and 7.5 both say "full data, no row limits" of the workbook, and
+that is the file a person actually works in.
 
 Items are handed to the template already grouped into rows by `model.group_into_rows`. A
 row of one is written exactly as an item always was — no wrapper element — so a report
@@ -33,6 +38,8 @@ from jinja2 import Environment, FileSystemLoader, TemplateError, select_autoesca
 from dashboard.exceptions import ReportExportError
 from dashboard.images import item_png
 from dashboard.model import UNTITLED_REPORT, Report, walk
+from dashboard.pinned_tables import PREVIEW_ROWS
+from dashboard.rich_text import sanitize_comment
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +65,7 @@ def _environment() -> Environment:
 
 
 def frame_to_html(frame: pd.DataFrame) -> str:
-    """One result set as a `<table>`, every row included.
+    """One result set as a `<table>`. Cut to `PREVIEW_ROWS` — see `_table_note`.
 
     `escape=True` is what makes the `| safe` on this value in the template correct: pandas
     escapes cell values and column names itself, so nothing user-supplied survives as
@@ -68,7 +75,22 @@ def frame_to_html(frame: pd.DataFrame) -> str:
     onto the header row: an inline style beats a stylesheet, so leaving it there would let
     pandas override whichever preset the user chose.
     """
-    return _HEADER_ALIGN_PATTERN.sub("<tr>", frame.to_html(index=False, escape=True, border=0, na_rep=""))
+    shown = frame.head(PREVIEW_ROWS)
+    return _HEADER_ALIGN_PATTERN.sub("<tr>", shown.to_html(index=False, escape=True, border=0, na_rep=""))
+
+
+def _table_note(frame: pd.DataFrame) -> str:
+    """What is said under a table that has more rows than the report shows.
+
+    Empty for a table that fits, so a short table carries no apology for a cut that never
+    happened.
+    """
+    if len(frame) <= PREVIEW_ROWS:
+        return ""
+    return (
+        f"Showing the first {PREVIEW_ROWS:,} of {len(frame):,} rows. "
+        "The Excel download has all of them."
+    )
 
 
 def _render_item(number: str, item) -> dict:
@@ -85,10 +107,13 @@ def _render_item(number: str, item) -> dict:
     return {
         "number": number,
         "heading": item.display_heading(),
-        "comment": (item.comment or "").strip(),
+        # Sanitized rather than escaped: it is rendered with `| safe` so the toolbar's
+        # bold, italic, underline and lists survive into the page.
+        "comment": sanitize_comment(item.comment),
         "image": base64.b64encode(png).decode("ascii") if png else "",
         "chart_failed": item.has_chart() and png is None,
         "table": frame_to_html(item.frame) if item.has_table() else "",
+        "table_note": _table_note(item.frame) if item.has_table() else "",
     }
 
 

@@ -186,6 +186,54 @@ def pin_result(
     return item
 
 
+def pin_imported(
+    source_id: str,
+    *,
+    heading: str,
+    frame=None,
+    figure=None,
+    outputs: set[str] | None = None,
+) -> PinnedItem:
+    """Puts one thing read out of a workbook into the report, and refreshes it on re-import.
+
+    `pin_result`'s sibling for imported items, differing in the one way that matters here:
+    **the title and the comment are the user's, not the file's.** An imported item arrives
+    named after its sheet and with no comment, and the whole point of the import is that the
+    user then writes a real title and a real note under it. Next month's workbook is the same
+    report with new numbers, so importing it again replaces the data and leaves that writing
+    alone — `pin_result` overwrites both, which is right for a criteria that generates its
+    own wording and wrong for this.
+
+    The sheet's name is still used as the title while the user hasn't written one, so an item
+    is never nameless in the pool.
+    """
+    existing = find_item_by_source(get_report(), source_id)
+    copied = None if frame is None else frame.copy()
+
+    if existing is not None:
+        existing.frame = copied
+        existing.figure = figure
+        existing.outputs = set(outputs or set())
+        # A cache of the *previous* figure, for the reason `pin_result` gives.
+        existing.png = None
+        if not existing.heading.strip():
+            existing.heading = heading
+        logger.info("Refreshed imported item %s from source %s.", existing.item_id, source_id)
+        return existing
+
+    item = PinnedItem(
+        question=heading,
+        heading=heading,
+        frame=copied,
+        figure=figure,
+        outputs=set(outputs or set()),
+        source_id=source_id,
+    )
+    get_report().pool.append(item)
+    logger.info("Pinned an imported item from source %s (item %s).", source_id, item.item_id)
+    return item
+
+
 def unpin_source(source_id: str) -> bool:
     """Removes the item a producer owns, if it is still in the report.
 

@@ -20,6 +20,7 @@ from streamlit.testing.v1 import AppTest
 
 from app_pages import report_items_view
 from report_items.model import KIND_COLUMN, KIND_REPORT
+from tests.comment_editor_stub import editor_key, stub_comment_editor
 
 RESULT = pd.DataFrame(
     {
@@ -75,6 +76,9 @@ def _app(monkeypatch, persona: str = "", report_key: str | None = None) -> AppTe
     monkeypatch.setattr(
         report_items_view.llm_session, "active_profile", lambda user_id: {"nickname": "Local"}
     )
+    # The comment box is a custom component, which AppTest cannot type into. The stand-in is
+    # a text area under the editor's own key, so everything around it stays real.
+    stub_comment_editor(monkeypatch)
     app = AppTest.from_function(_scenario, args=(persona, report_key), default_timeout=60)
     app.run()
     assert not app.exception
@@ -331,7 +335,12 @@ class TestComments:
         app.button(key=f"ri_comment_write_{item_id}").click().run()
 
         assert _items(app)[0].comment == "HR is the larger department."
-        assert app.text_area(key=f"ri_comment_{item_id}").value == "HR is the larger department."
+        # Revision 1, not 0: the editor is a custom component and only reads its value when
+        # it mounts, so the draft reaches the screen by remounting it under a new key.
+        assert (
+            app.text_area(key=editor_key(f"ri_comment_{item_id}", 1)).value
+            == "HR is the larger department."
+        )
 
     def test_the_task_persona_reaches_the_comment_as_its_domain_rules(self, monkeypatch):
         """Requirement 7.2: one persona per Task, applied wherever wording is generated."""
@@ -349,7 +358,7 @@ class TestComments:
 
     def test_the_pinned_copy_carries_the_comment(self, monkeypatch):
         app, item_id = _generated(monkeypatch, _add(_app(monkeypatch)))
-        app.text_area(key=f"ri_comment_{item_id}").set_value("Written by hand.").run()
+        app.text_area(key=editor_key(f"ri_comment_{item_id}")).set_value("Written by hand.").run()
 
         app.button(key=f"ri_pin_{item_id}").click().run()
 

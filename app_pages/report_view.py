@@ -37,7 +37,10 @@ from dataclasses import dataclass, replace
 import pandas as pd
 import streamlit as st
 
+from analyst.routing import OUTPUT_DATAFRAME
+from app_pages.comment_editor import comment_editor, render_comment
 from dashboard import custom_style
+from dashboard import pinned_tables
 from dashboard import session as dashboard_session
 from dashboard import theme_db
 from dashboard.css_presets import (
@@ -80,7 +83,9 @@ from dashboard.model import (
     walk,
     wraps_to_new_row,
 )
+from dashboard.rich_text import sanitize_comment
 from dashboard.theme_db import ThemeStorageError
+from engine import session as engine_session
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +124,9 @@ def _item_summary(item: PinnedItem) -> str:
     if item.has_table():
         rows, columns = item.frame.shape
         parts.append(f"{rows:,} row(s) × {columns} column(s)")
-    if item.comment.strip():
+    # Sanitized rather than stripped: an empty editor writes `<p><br></p>`, which is not a
+    # comment however un-blank the raw string looks.
+    if sanitize_comment(item.comment):
         parts.append("comment")
     return " · ".join(parts) or "written answer"
 
@@ -129,7 +136,16 @@ def _render_item_output(item: PinnedItem, key_prefix: str) -> None:
     if item.has_chart():
         st.plotly_chart(item.figure, key=f"{key_prefix}_chart", width="stretch")
     if item.has_table():
-        st.dataframe(item.frame, key=f"{key_prefix}_frame", width="stretch", hide_index=True)
+        # The same cut the HTML report makes, and said the same way: a long table is
+        # unreadable on screen, and a person who sees 500 rows with no note has no way to
+        # know there were 12,000. The Excel download is not cut — see `excel_export`.
+        shown = item.frame.head(pinned_tables.PREVIEW_ROWS)
+        st.dataframe(shown, key=f"{key_prefix}_frame", width="stretch", hide_index=True)
+        if len(item.frame) > len(shown):
+            st.caption(
+                f":grey[Showing {len(shown):,} of {len(item.frame):,} rows. "
+                "The Excel download has all of them.]"
+            )
 
 
 def _reorder_controls(siblings: list, index: int, key_prefix: str, what: str) -> bool:
@@ -208,6 +224,117 @@ class EmptyPool:
     button_help: str = "Go to where items are made, then pin one to bring it back here."
 
 
+def _is_discardable(item: PinnedItem) -> bool:
+    """Whether the pool offers a Discard button for this item — see `_render_pool`."""
+    return item.source_id is None or pinned_tables.is_imported(item.source_id)
+
+
+def _loadable_tables() -> list:
+    """The tables loaded on Chat with data or Task Builder, in load order.
+
+    Never raises: the report workspace opens on pages where no engine has been started, and
+    a report with nothing to pin from is an ordinary state rather than an error.
+    """
+    try:
+        return list(engine_session.get_tables().values())
+    except (AttributeError, KeyError, RuntimeError):
+        logger.exception("Could not read the loaded tables for the report's pin panel.")
+        return []
+
+
+def _pin_loaded(tables: list) -> int:
+    """Pins each chosen table, and says how many landed. Never raises for one bad table."""
+    pinned = 0
+    for table in tables:
+        try:
+            frame = engine_session.preview(table.table_name, limit=pinned_tables.ROW_CEILING)
+        except (ValueError, TypeError, KeyError, RuntimeError):
+            logger.exception("Could not read '%s' to pin it.", table.table_name)
+            st.warning(
+                f"'{table.table_name}' couldn't be read. Everything else you ticked was pinned.",
+                icon=":material/warning:",
+            )
+            continue
+
+        if len(frame) < table.row_count:
+            st.warning(
+                f"{table.table_name}: {pinned_tables.truncation_note(len(frame), table.row_count)}",
+                icon=":material/info:",
+            )
+
+        try:
+            dashboard_session.pin_imported(
+                pinned_tables.source_key(table.table_name),
+                heading=table.table_name,
+                frame=frame,
+                outputs={OUTPUT_DATAFRAME},
+            )
+            pinned += 1
+        except (ValueError, TypeError, KeyError, AttributeError):
+            logger.exception("Could not pin the loaded table '%s'.", table.table_name)
+            st.warning(
+                f"'{table.table_name}' couldn't be pinned. Everything else you ticked was.",
+                icon=":material/warning:",
+            )
+    return pinned
+
+
+def _render_pin_loaded() -> None:
+    """Pins tables that are already loaded, so the user only writes titles and comments.
+
+    No uploader of its own: the tables loaded on Chat with data or Task Builder are already
+    the data — read, cleaned and typed once — and re-reading the file they came from would
+    put a second, subtly different copy of the same numbers in the report.
+
+    Collapsed by default: this is a way to *start* a report, not something to step past on
+    every visit to a report that is already built.
+    """
+    with st.expander("Pin a loaded table", icon=":material/table_view:"):
+        st.caption(
+            "Adds a table you have already loaded straight into the pool. Load the file again "
+            "next month and pin it again — the numbers refresh, your titles and comments stay."
+        )
+
+        tables = _loadable_tables()
+        if not tables:
+            st.info(
+                "No tables are loaded yet. Upload a file first, then come back here.",
+                icon=":material/upload_file:",
+            )
+            return
+
+        chosen_names = st.multiselect(
+            "Tables to pin",
+            options=[table.table_name for table in tables],
+            format_func=lambda name: f"{name} ({_row_count_by_name(tables).get(name, 0):,} rows)",
+            key="db_pin_loaded_tables",
+            help="Each one becomes a pinned item you can title, comment and place.",
+        )
+        chosen = [table for table in tables if table.table_name in chosen_names]
+
+        if st.button(
+            f"Pin {len(chosen)} table{'s' if len(chosen) != 1 else ''}",
+            key="db_pin_loaded",
+            icon=":material/push_pin:",
+            type="primary",
+            disabled=not chosen,
+            help="Adds them to the pool below, where you can title them and place them.",
+        ):
+            # No rerun: the pool is drawn after this in the same run, so the pinned items are
+            # already on screen — and rerunning would take this message away with it.
+            pinned = _pin_loaded(chosen)
+            if pinned:
+                st.success(
+                    f"Pinned {pinned} table{'s' if pinned != 1 else ''}.",
+                    icon=":material/check_circle:",
+                )
+
+
+def _row_count_by_name(tables: list) -> dict[str, int]:
+    """Row counts keyed by table name, for the picker's labels."""
+    return {table.table_name: table.row_count for table in tables}
+
+
 def _render_pool(report: Report, empty_pool: EmptyPool | None = None) -> None:
     """Everything pinned but not yet placed (requirement 6.1 step 4)."""
     st.markdown(f"##### Unplaced ({len(report.pool)})")
@@ -274,15 +401,18 @@ def _render_pool(report: Report, empty_pool: EmptyPool | None = None) -> None:
                     dashboard_session.open_dialog("preview", {"item_id": item.item_id})
                     st.rerun(scope="app")
 
-                # No Discard for an item a producer owns. `source_id` is set only by things
-                # that re-save their item — a criteria in `checks/` — and those keep their
-                # own Remove beside the Save that created it, where the rule it belongs to
-                # is on screen. Discarding it here would leave that page still showing
-                # "Saved to report" for something no longer in the report, and the next
-                # refine would silently pin a second copy. An unplaced item is not in the
-                # report anyway: the exports walk the section tree only, so leaving one in
+                # No Discard for an item a producer owns. A producer — a criteria in
+                # `checks/` — keeps its own Remove beside the Save that created it, where the
+                # rule it belongs to is on screen. Discarding it here would leave that page
+                # still showing "Saved to report" for something no longer in the report, and
+                # the next refine would silently pin a second copy. An unplaced item is not in
+                # the report anyway: the exports walk the section tree only, so leaving one in
                 # the pool costs nothing.
-                if item.source_id is None and st.button(
+                #
+                # An imported item is different. It also carries a `source_id`, but nothing
+                # else on any page claims it — the workbook it came from is a file, not a
+                # screen — so it is the user's to throw away like a pinned answer.
+                if _is_discardable(item) and st.button(
                     "Discard",
                     key=f"db_pool_discard_{item.item_id}",
                     icon=":material/delete:",
@@ -291,7 +421,7 @@ def _render_pool(report: Report, empty_pool: EmptyPool | None = None) -> None:
                     remove_item(report, item.item_id)
                     st.rerun(scope="app")
 
-            if item.source_id is not None:
+            if not _is_discardable(item):
                 st.caption(
                     ":grey[Leave it unplaced to keep it out of the report, or remove it from "
                     "the Checks tab that made it.]"
@@ -425,14 +555,16 @@ def _render_item_body(report: Report, subsection, item: PinnedItem, index: int, 
 
     st.caption(_item_summary(item))
 
-    item.comment = st.text_area(
-        "Comment",
+    item.comment = comment_editor(
+        label="Comment",
         value=item.comment,
         key=f"db_item_comment_{item.item_id}",
-        height=90,
-        label_visibility="collapsed",
         placeholder="A note printed under this item.",
-        help="Printed under the chart and table in both exports. It starts as the answer's own commentary from the chat — edit it freely.",
+        help_text=(
+            "Printed under the chart and table in both exports. It starts as the answer's own "
+            "commentary from the chat — edit it freely, and use the toolbar for bold, italic, "
+            "underline and lists."
+        ),
     )
 
     _render_column_toggle(subsection, item, index)
@@ -689,8 +821,7 @@ def _render_preview_item(number: str, item: PinnedItem) -> None:
     """One item as the report reads it — number, heading, output, comment."""
     st.markdown(f"**{number} {item.display_heading()}**")
     _render_item_output(item, f"db_preview_{item.item_id}")
-    if item.comment.strip():
-        st.markdown(f":grey[_{item.comment.strip()}_]")
+    render_comment(item.comment, key_hint=f"db_preview_{item.item_id}")
 
 
 # --------------------------------------------------------------------------------------
@@ -910,8 +1041,7 @@ def _preview_item_dialog(payload: dict) -> None:
         st.markdown(f"**{item.display_heading()}**")
         st.caption(f"Asked: {item.question}" if item.question else "")
         _render_item_output(item, f"db_dialog_{item.item_id}")
-        if item.comment.strip():
-            st.markdown(f":grey[_{item.comment.strip()}_]")
+        render_comment(item.comment, key_hint=f"db_dialog_{item.item_id}")
         if item.sql:
             with st.expander("SQL that ran", icon=":material/code:"):
                 st.code(item.sql, language="sql")
@@ -1475,6 +1605,7 @@ def render_report_workspace(report: Report, *, empty_pool: EmptyPool | None = No
     else:
         pool_column, tree_column = st.columns([2, 3], gap="medium")
         with pool_column:
+            _render_pin_loaded()
             _render_pool(report, empty_pool)
         with tree_column:
             _render_tree(report)

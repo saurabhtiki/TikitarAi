@@ -7,13 +7,18 @@
 {# The one deliberately unescaped value in this template. It is the reason
    `css_presets.validate_css` screens for `<script`, `<style` and `@import` — nothing
    else reaches the page unescaped. #}
-{# Comments are typed in a text box, so the line breaks in them are the user's own.
-   HTML collapses every newline into a space, which would run a three-line comment
-   together as one line — `pre-wrap` keeps the breaks and still wraps long lines.
+{# A comment written before the formatting toolbar existed is plain text, so the line
+   breaks in it are the user's own. HTML collapses every newline into a space, which
+   would run a three-line comment together as one line — `pre-wrap` keeps the breaks and
+   still wraps long lines. The paragraph and list rules keep a formatted comment from
+   inheriting the browser's large default margins inside the item box.
    Written *before* the report stylesheet so a preset or a hand-edited sheet can still
-   override it. #}
+   override any of it. #}
 <style>
 .comment { white-space: pre-wrap; }
+.comment p { margin: 0 0 6px; }
+.comment p:last-child { margin-bottom: 0; }
+.comment ul, .comment ol { margin: 0 0 6px; padding-left: 22px; }
 {{ css | safe }}
 </style>
 </head>
@@ -69,9 +74,16 @@
           {% if item.table %}
           <div class="table-wrap">{{ item.table | safe }}</div>
           {% endif %}
+          {% if item.table_note %}
+          <p class="note">{{ item.table_note }}</p>
+          {% endif %}
 
+          {# Unescaped, and safely so: `rich_text.sanitize_comment` has already reduced
+             it to an allow-list of formatting tags with no attributes on any of them.
+             A `<div>` rather than a `<p>` because a formatted comment can contain
+             paragraphs and lists, which a `<p>` may not legally hold. #}
           {% if item.comment %}
-          <p class="comment">{{ item.comment }}</p>
+          <div class="comment">{{ item.comment | safe }}</div>
           {% endif %}
         </div>
         {% endfor %}

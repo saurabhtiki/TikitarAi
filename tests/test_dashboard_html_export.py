@@ -71,10 +71,24 @@ def test_nothing_is_loaded_from_the_network(frame):
     assert "https://" not in html
 
 
-def test_a_table_carries_every_row():
+def test_a_table_that_fits_carries_every_row_and_says_nothing():
     frame = pd.DataFrame({"n": range(250)})
     html = build_html(_report_with(PinnedItem(heading="All rows", frame=frame)), _css())
+
     assert html.count("<tr>") == 251  # 250 data rows plus the header row
+    assert "Showing the first" not in html
+
+
+def test_a_long_table_is_cut_and_says_how_many_rows_there_were():
+    """A report is something a person reads. A browser handed a hundred thousand `<tr>`
+    elements stops being readable long before it stops working — but a cut with no note
+    would let someone read 500 rows as if they were the whole story."""
+    frame = pd.DataFrame({"n": range(html_export.PREVIEW_ROWS + 100)})
+    html = build_html(_report_with(PinnedItem(heading="Ledger", frame=frame)), _css())
+
+    assert html.count("<tr>") == html_export.PREVIEW_ROWS + 1
+    assert f"Showing the first {html_export.PREVIEW_ROWS:,} of {len(frame):,} rows" in html
+    assert "Excel download has all of them" in html
 
 
 def test_headings_and_comments_are_escaped(frame):
@@ -83,6 +97,35 @@ def test_headings_and_comments_are_escaped(frame):
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" in html
     assert "5 &lt; 6 &amp; 7 &gt; 2" in html
+
+
+def test_a_formatted_comment_is_printed_formatted(frame):
+    """The comment box has a toolbar now, so its bold, underline and bullets have to reach
+    the page as markup rather than as visible tags."""
+    item = PinnedItem(
+        heading="Sales",
+        frame=frame,
+        comment="<p><strong>Up</strong> <u>again</u></p><ul><li>North</li></ul>",
+    )
+    html = build_html(_report_with(item), _css())
+
+    assert "<div class=\"comment\"><p><strong>Up</strong> <u>again</u></p><ul><li>North</li></ul></div>" in html
+
+
+def test_a_comment_cannot_smuggle_anything_but_formatting_onto_the_page(frame):
+    """The comment is the one user string rendered unescaped, so this is the test that
+    keeps that safe."""
+    item = PinnedItem(
+        heading="Sales",
+        frame=frame,
+        comment='<p onclick="steal()">Fine</p><script>alert(1)</script><img src=x onerror=y>',
+    )
+    html = build_html(_report_with(item), _css())
+
+    assert "<script>" not in html
+    assert "onclick" not in html
+    assert "onerror" not in html
+    assert "<p>Fine</p>" in html
 
 
 def test_a_multi_line_comment_keeps_its_line_breaks(frame):

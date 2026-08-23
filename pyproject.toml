@@ -24,6 +24,7 @@ dependencies = [
     "pydantic>=2.13.4",
     "sqlalchemy>=2.0.51",
     "streamlit>=1.60.0",
+    "streamlit-quill",
     "xlsxwriter>=3.2.9",
 ]
 

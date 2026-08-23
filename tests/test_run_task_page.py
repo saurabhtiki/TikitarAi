@@ -29,6 +29,7 @@ from llm.db import create_profile, init_llm_table
 from report_items.model import ReportItem, source_id_for
 from tasks.db import init_tasks_table, save_task
 from tasks.model import Task
+from tests.upload_gate_stub import load_uploaded_files
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PAGE_PATH = str(PROJECT_ROOT / "app_pages" / "run_task.py")
@@ -127,7 +128,7 @@ def _open(app, task_id):
 
 def _upload(app, files):
     app.file_uploader(key=engine_session.DE_UPLOADER_KEY).set_value(files)
-    app.run()
+    load_uploaded_files(app)
     assert not app.exception
     return app
 
