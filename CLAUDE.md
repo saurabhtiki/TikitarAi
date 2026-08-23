@@ -19,7 +19,7 @@ Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- update this line each time a phase is completed -->
-All 10 stages of requirements.md done; plus phase 12 — reports carry a logo, number items as 2.1.1, and offer a Custom style set from a dialog with saveable themes
+All 10 stages of requirements.md done; plus phase 13 — a run saves the report's current data, and anyone can chat with any report from the Chat with reports page
 
 # Library docs (Agno, Streamlit)
 

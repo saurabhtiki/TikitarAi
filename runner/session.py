@@ -25,15 +25,19 @@ import logging
 
 import streamlit as st
 
+from auth.db import get_user_by_id
+from auth.exceptions import AuthDatabaseError
 from chat_types import matching
 from chat_types import session as chat_types_session
 from chat_types.model import ChatType
 from dashboard import session as dashboard_session
 from engine import session as engine_session
 from llm import session as llm_session
+from reports import session as reports_session
+from reports.exceptions import ReportDataError
 from runner import replay
 from runner.exceptions import TaskRunError
-from runner.model import KIND_SETUP, STATUS_OK, RunResult, StepResult
+from runner.model import KIND_SETUP, STATUS_FAILED, STATUS_OK, STATUS_SKIPPED, RunResult, StepResult
 from tasks.model import Task
 
 logger = logging.getLogger(__name__)
@@ -267,10 +271,69 @@ def execute_run(user_id: int, *, on_stage=None) -> RunResult:
     # every later rebuild, so setting it before would have applied every statement twice.
     engine_session.set_statements(running.calculated_columns)
 
+    if on_stage is not None:
+        on_stage("Saving this data so anyone can chat with the report later…")
+    result.steps.append(_save_current_data(user_id, task))
+
     dashboard_session.set_report(result.report)
     st.session_state[RT_RESULT_KEY] = result
     logger.info("Ran task '%s': %s", running.display_name(), result.headline())
     return result
+
+
+def _save_current_data(user_id: int, task: Task) -> StepResult:
+    """Stores the data this run used as the report's current data (Phase 13).
+
+    Written from the **saved** task rather than this run's deep copy, because `task_id` is
+    what names the file and a replay never changes it.
+
+    A failure here is a step of the run, never the end of it: the report on screen is
+    finished and correct, and "the chat couldn't be updated" must not throw it away. That
+    is the same judgement `execute_run` already makes about every other step.
+    """
+    if task.task_id is None:
+        return StepResult(
+            KIND_SETUP,
+            "Saved for chat",
+            STATUS_SKIPPED,
+            "This task hasn't been saved yet, so there's no report to attach the data to.",
+        )
+
+    try:
+        setup = reports_session.save_current_data(task.task_id, _refresher_name(user_id))
+    except ReportDataError as error:
+        logger.exception("Could not save report %s's current data after a run.", task.task_id)
+        return StepResult(
+            KIND_SETUP,
+            "Saved for chat",
+            STATUS_FAILED,
+            f"The report ran, but its data couldn't be saved for chatting ({error}).",
+        )
+
+    return StepResult(
+        KIND_SETUP,
+        "Saved for chat",
+        STATUS_OK,
+        f"{len(setup.tables)} table(s), {setup.total_rows():,} row(s) saved as this "
+        "report's current data.",
+    )
+
+
+def _refresher_name(user_id: int) -> str:
+    """Who to credit for this refresh, for the line the report chat shows above it.
+
+    Falls back to the account id: knowing *that* the data was refreshed by someone whose
+    name couldn't be read still beats a blank, and this must never fail a run.
+    """
+    try:
+        profile = get_user_by_id(user_id)
+    except AuthDatabaseError:
+        logger.warning("Could not read the name of user %s for a dataset refresh.", user_id)
+        return f"user {user_id}"
+
+    if profile is None:
+        return f"user {user_id}"
+    return str(profile.get("name") or profile.get("email") or f"user {user_id}")
 
 
 def last_result() -> RunResult | None:

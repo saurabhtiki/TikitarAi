@@ -22,6 +22,8 @@ from llm.exceptions import LLMDatabaseError
 from meetings.db import init_meetings_tables
 from meetings.exceptions import MeetingStorageError
 from meetings.session import invitee_route_params
+from reports.db import init_report_datasets_table
+from reports.exceptions import ReportDataError
 from tasks.db import init_tasks_table
 from tasks.exceptions import TaskStorageError
 
@@ -48,6 +50,8 @@ def bootstrap_database() -> bool:
         init_check_sets_table()
         init_meetings_tables()
         init_tasks_table()
+        # After `tasks`, whose `task_id` it references (Phase 13).
+        init_report_datasets_table()
         init_cleaning_templates_table()
         init_report_themes_table()
     except (
@@ -59,6 +63,7 @@ def bootstrap_database() -> bool:
         TaskStorageError,
         TemplateStorageError,
         ThemeStorageError,
+        ReportDataError,
     ):
         logger.exception("Failed to bootstrap the application database.")
         raise
@@ -74,6 +79,7 @@ except (
     MeetingStorageError,
     TemplateStorageError,
     ThemeStorageError,
+    ReportDataError,
 ):
     st.error("The application couldn't start because the database is unavailable.")
     st.stop()
@@ -111,7 +117,17 @@ else:
         # unlike building one. The section therefore exists for everyone, and Task builder
         # is added to it below only for the two roles that may build.
         "Automate": [
-            st.Page("app_pages/run_task.py", title="Run a task", icon="📊")
+            # "Reports" in the menu, `run_task.py` in the code: the interface calls a
+            # saved Task a Report, and renaming ~8,000 internal references to match
+            # would be a large edit that changes nothing a user can see.
+            st.Page("app_pages/run_task.py", title="Reports", icon="📊"),
+            # Beside it, because the two are one workflow: running a report saves its
+            # current data, and this is where that data is asked questions (Phase 13).
+            st.Page(
+                "app_pages/chat_with_reports.py",
+                title="Chat with reports",
+                icon=":material/forum:",
+            ),
         ],
         "Utilities": [
             st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon="🧹"),

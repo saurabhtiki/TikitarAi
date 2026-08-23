@@ -62,6 +62,9 @@ from checks import session as checks_session
 from dashboard import session as dashboard_session
 from engine import session as engine_session
 from report_items import session as report_items_session
+from reports import db as reports_db
+from reports import session as reports_session
+from reports.exceptions import ReportDataError
 from runner import session as runner_session
 from runner import templates
 from runner.exceptions import TaskRunError
@@ -326,8 +329,8 @@ def _filter_tasks(saved: list[dict], query: str) -> list[dict]:
 def _render_task_row(user_id: int, row: dict) -> None:
     """One saved Task as a single line: what it is, and the two buttons that open it."""
     task_id = row["task_id"]
-    name_column, saved_column, run_column, schema_column = st.columns(
-        [5, 2, 2, 2], vertical_alignment="center"
+    name_column, saved_column, run_column, schema_column, chat_column = st.columns(
+        [5, 2, 2, 2, 2], vertical_alignment="center"
     )
     with name_column:
         st.markdown(f"**{row['name']}**")
@@ -361,7 +364,49 @@ def _render_task_row(user_id: int, row: dict) -> None:
             if task is not None:
                 runner_session.open_dialog("schema", {"task": task})
                 st.rerun(scope="app")
+    with chat_column:
+        _render_chat_button(task_id, row["name"])
     st.divider()
+
+
+def _render_chat_button(task_id: int, name: str) -> None:
+    """The shortcut into this report's saved data (Phase 13).
+
+    The same destination as the Chat with reports page, offered here because the person who
+    has just refreshed a report is the one most likely to want a look at it. Disabled until
+    there is data: a button that opens an empty chat teaches nothing except not to press it.
+    """
+    try:
+        saved = reports_db.dataset_info(task_id)
+    except ReportDataError:
+        logger.exception("Could not check whether report %s has saved data.", task_id)
+        saved = None
+
+    if saved is None:
+        st.button(
+            "Chat",
+            key=f"rt_chat_{task_id}",
+            icon=":material/chat:",
+            width="stretch",
+            disabled=True,
+            help="Run this report once and its data will be here to chat with.",
+        )
+        return
+
+    if st.button(
+        "Chat",
+        key=f"rt_chat_{task_id}",
+        icon=":material/chat:",
+        width="stretch",
+        help=f"Ask questions about this report's data, refreshed {saved['refreshed_at']}.",
+    ):
+        try:
+            reports_session.open_report(task_id, name)
+        except ReportDataError as error:
+            logger.exception("Could not open report %s for chat.", task_id)
+            st.error(str(error), icon=":material/error:")
+            return
+        st.switch_page("app_pages/chat_with_reports.py")
 
 
 def _load_task(task_id: int, user_id: int) -> Task | None:
@@ -736,10 +781,11 @@ if profile is not None:
     render_sidebar(profile)
     user_id = st.session_state["user_id"]
 
-    st.subheader("▶️ Run a task")
+    st.subheader("▶️ Reports")
     st.write(
-        ":blue[**Pick a saved task, upload Current files, and get its report — nothing "
-        "to type, and no AI needed to produce the numbers while the saved SQL still runs.**]"
+        ":blue[**Pick a report, upload Current files, and get it — nothing to type, and no "
+        "AI needed to produce the numbers while the saved SQL still runs. Each run also "
+        "saves the data, so anyone can chat with it afterwards.**]"
     )
 
     # The whole reason `dashboard.session` has an active report key. Said at the top of the

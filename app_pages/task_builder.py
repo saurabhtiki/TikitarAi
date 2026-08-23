@@ -62,6 +62,8 @@ from checks import session as checks_session
 from dashboard import session as dashboard_session
 from engine import session as engine_session
 from report_items import session as report_items_session
+from reports import session as reports_session
+from reports.exceptions import ReportDataError
 from sidebar import render_sidebar
 from tasks import db as tasks_db
 from tasks import session as tasks_session
@@ -252,6 +254,15 @@ def _dialog_confirm_delete(payload: dict) -> None:
                 logger.exception("Could not delete task %s.", task_id)
                 st.error(str(error), icon=":material/error:")
                 return
+
+            # The recipe is gone, so its saved data has nothing left to describe it
+            # (Phase 13). Deliberately after the delete and deliberately not fatal: the
+            # task is already gone, and a file that outlives it is a tidiness problem,
+            # not something worth showing this dialog a failure for.
+            try:
+                reports_session.drop_saved_data(task_id)
+            except ReportDataError as error:
+                logger.warning("Deleted task %s but its saved data remains: %s", task_id, error)
             tasks_session.queue_flash(f"Deleted “{name}”.")
             tasks_session.close_dialog()
             st.rerun(scope="app")
