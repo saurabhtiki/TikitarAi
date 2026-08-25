@@ -35,6 +35,7 @@ from dashboard.model import (
     Section,
     Subsection,
     set_embed_height,
+    set_item_link,
     set_logo_height,
     set_logo_position,
 )
@@ -71,6 +72,8 @@ def _item_to_dict(item: PinnedItem) -> dict:
         "image_mime": item.image_mime,
         "embed_html": item.embed_html,
         "embed_height": item.embed_height,
+        "link_url": item.link_url,
+        "link_text": item.link_text,
     }
 
 
@@ -93,6 +96,10 @@ def _item_from_dict(raw: dict) -> PinnedItem:
     # Through the setter, not straight onto the field: the number came out of a file,
     # and it is interpolated into the export's markup. A missing one is the default.
     set_embed_height(item, raw.get("embed_height", DEFAULT_EMBED_HEIGHT))
+    # Through the setter too, and for a sharper reason than the height: this string ends up
+    # in an `href`. A file written by hand, or by a version of this app that screened it
+    # differently, is refused here rather than printed into the export.
+    set_item_link(item, raw.get("link_url") or "", raw.get("link_text") or "")
     _restore_item_image(item, raw)
     # Assigned after construction rather than passed in, so a skeleton written by an older
     # version with no id still gets the fresh one the dataclass generated.

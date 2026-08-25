@@ -25,6 +25,7 @@ from dashboard.css_presets import CUSTOM_PRESET, DEFAULT_PRESET
 from dashboard.model import (
     KIND_EMBED,
     KIND_IMAGE,
+    KIND_LINK,
     KIND_TEXT,
     MANUAL_KINDS,
     MAX_ROW_COLUMNS,
@@ -270,7 +271,7 @@ class TestPlacing:
 
 
 class TestBlocksTheUserWrites:
-    """The three blocks nothing produced — added here, filled in on the item itself.
+    """The four blocks nothing produced — added here, filled in on the item itself.
 
     The split matters and is what these tests pin down: the **button** is in the pool
     column, the **content** is edited on the placed item, next to the heading and comment
@@ -340,6 +341,40 @@ class TestBlocksTheUserWrites:
         assert "<script>alert(1)</script>" in stored  # phase 19: scripts are kept, sandboxed
         assert "onclick" not in stored
         assert "Fine" in stored
+
+    def test_a_link_block_stores_a_web_address_and_says_what_the_button_will_say(
+        self, tmp_path, monkeypatch
+    ):
+        block = new_block(KIND_LINK)
+        block.item_id = "a"
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(block))
+
+        app.text_input(key="db_item_link_url_a").set_value("https://example.com/bi").run()
+        app.text_input(key="db_item_link_text_a").set_value("Open the dashboard").run()
+
+        item = _report(app).sections[0].subsections[0].items[0]
+        assert item.link_url == "https://example.com/bi"
+        assert item.link_label() == "Open the dashboard"
+
+    def test_an_address_that_is_not_a_web_page_is_refused_on_screen(self, tmp_path, monkeypatch):
+        """The user has to be told, on the page, rather than finding a dead button in next
+        month's report."""
+        block = new_block(KIND_LINK)
+        block.item_id = "a"
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(block))
+
+        app.text_input(key="db_item_link_url_a").set_value("javascript:alert(1)").run()
+
+        assert not _report(app).sections[0].subsections[0].items[0].has_link()
+        assert any("http://" in error.value for error in app.error)
+
+    def test_a_link_block_gets_no_uploader_and_no_html_box(self, tmp_path, monkeypatch):
+        block = new_block(KIND_LINK)
+        block.item_id = "a"
+        app = _make_app(tmp_path, monkeypatch, report=_placed_report(block))
+
+        assert _uploader(app, "db_item_image_a") is None
+        assert not _has_widget(app, "text_area", "db_item_embed_a")
 
     def test_a_text_block_gets_no_uploader_and_no_html_box(self, tmp_path, monkeypatch):
         """Its content *is* the comment box below it. A second empty box above would only

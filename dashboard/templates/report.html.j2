@@ -25,6 +25,62 @@
    Written before the report stylesheet, like the rules above, so a preset still wins. #}
 .embed { display: block; width: 100%; max-width: 100%; border: 0; }
 .block-picture { max-width: 100%; height: auto; }
+
+{# ---- Folding (phase 22) -------------------------------------------------------------
+   Sections and subsections are `<details>` elements, so the folding is the browser's own
+   and works in a downloaded file with scripting turned off. Only the Expand all /
+   Collapse all pair needs script, and the report is perfectly usable without it.
+   The heading stays an `<h2>`/`<h3>` exactly where it was, just inside the `<summary>`,
+   so every preset and every hand-edited stylesheet keeps styling it the way it did. The
+   arrow is a span *inside* the heading rather than beside it, so a preset that bands the
+   whole heading (Corporate does) bands the arrow with it. #}
+.fold > summary { cursor: pointer; list-style: none; }
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::marker { content: ""; }
+.fold-mark { display: inline-block; width: 1em; font-size: 0.8em; transition: transform 0.15s ease; }
+.fold-mark::before { content: "\25B6"; opacity: 0.55; }
+.fold[open] > summary .fold-mark { transform: rotate(90deg); }
+.fold > summary:hover .fold-mark::before { opacity: 1; }
+.fold-controls { display: flex; gap: 8px; margin: 0 0 8px; }
+.fold-controls button {
+  font: inherit; font-size: 0.78rem; cursor: pointer; padding: 4px 10px;
+  border: 1px solid currentColor; border-radius: 4px; background: transparent;
+  color: inherit; opacity: 0.7;
+}
+.fold-controls button:hover { opacity: 1; }
+
+{# ---- Boxes and polish (phase 22) ----------------------------------------------------
+   Light enough to sit under any of the presets: a hairline in the current text colour at
+   low opacity, so it reads as a box on a white page and on a tinted one without either
+   preset having to know about it. #}
+.subsection { border: 1px solid rgba(0, 0, 0, 0.10); border-radius: 8px; padding: 4px 18px 18px; margin: 0 0 22px; }
+.item { border: 1px solid rgba(0, 0, 0, 0.07); border-radius: 6px; padding: 2px 16px 16px; background: rgba(0, 0, 0, 0.008); }
+.item:hover { border-color: rgba(0, 0, 0, 0.18); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.07); }
+{# A long table becomes a scroll box with its column names pinned to the top of it, rather
+   than a run of hundreds of rows whose header scrolled off the screen ten seconds ago.
+   `th` needs an opaque background or the rows show through it as they pass underneath. #}
+.table-wrap { max-height: 70vh; overflow: auto; }
+thead th { position: sticky; top: 0; z-index: 1; background: #ffffff; }
+tbody tr:nth-child(even) td { background: rgba(0, 0, 0, 0.022); }
+{# The button an External Link block prints. Sized in `em` so it follows whatever type
+   scale the preset set. #}
+.link-button {
+  display: inline-block; margin: 6px 0 2px; padding: 9px 18px; border-radius: 6px;
+  border: 1px solid currentColor; text-decoration: none; font-weight: 600;
+  font-size: 0.92em; line-height: 1.3;
+}
+.link-button:hover { text-decoration: underline; }
+.link-url { font-size: 0.78em; opacity: 0.6; margin: 4px 0 0; word-break: break-all; }
+{# Print is the one place none of this may apply: a folded section printed folded is a
+   blank page, and a capped table prints one screenful of a thousand rows. The script
+   below opens every fold before the print dialog; these rules undo the rest. #}
+@media print {
+  .fold-controls { display: none; }
+  .fold-mark { display: none; }
+  .table-wrap { max-height: none; overflow: visible; }
+  thead th { position: static; }
+  .item, .subsection { break-inside: avoid; box-shadow: none; }
+}
 {{ css | safe }}
 </style>
 </head>
@@ -52,11 +108,23 @@
   <p class="empty">This report has no placed items yet.</p>
   {% endif %}
 
+  {% if sections %}
+  <div class="fold-controls">
+    <button type="button" data-fold="open">Expand all</button>
+    <button type="button" data-fold="close">Collapse all</button>
+  </div>
+  {% endif %}
+
+  {# Every section and subsection is folded shut on open, so the report starts as its own
+     table of contents. `<details>` does the folding itself — no script — which is what
+     makes it survive a file opened straight off disk. #}
   {% for section in sections %}
-  <h2>{{ section.number }}. {{ section.name }}</h2>
+  <details class="fold section">
+    <summary><h2><span class="fold-mark" aria-hidden="true"></span>{{ section.number }}. {{ section.name }}</h2></summary>
 
     {% for subsection in section.subsections %}
-    <h3>{{ subsection.number }} {{ subsection.name }}</h3>
+    <details class="fold subsection">
+      <summary><h3><span class="fold-mark" aria-hidden="true"></span>{{ subsection.number }} {{ subsection.name }}</h3></summary>
 
       {# `entries`, not `items`: these subsections are dicts, and Jinja resolves
          `.items` on a dict to `dict.items` before it looks at the key. Each entry is a
@@ -82,6 +150,18 @@
              from bytes this app stored and mime-typed, never from anything typed. #}
           {% if item.picture %}
           <img class="block-picture" src="{{ item.picture }}" alt="{{ item.heading }}">
+          {% endif %}
+
+          {# An External Link block. `link_url` reached here through
+             `model.link_problems`, which accepts nothing but an `http://` or `https://`
+             address — so the one attribute this template writes from typed text cannot
+             be a `javascript:` line. `rel="noopener noreferrer"` because the new tab must
+             not be handed a reference back to this page. #}
+          {% if item.link_url %}
+          <p><a class="link-button" href="{{ item.link_url }}" target="_blank" rel="noopener noreferrer">{{ item.link_text }}</a></p>
+          {% if item.link_text != item.link_url %}
+          <p class="link-url">{{ item.link_url }}</p>
+          {% endif %}
           {% endif %}
 
           {% if item.table %}
@@ -123,8 +203,29 @@
       {% endif %}
       {% endfor %}
 
+    </details>
     {% endfor %}
+  </details>
   {% endfor %}
 </div>
+{# The only script in the report, and it does two things the folding cannot do for
+   itself: the Expand all / Collapse all pair, and opening every fold before the browser
+   prints — a section printed folded is a blank page. No user text reaches it. #}
+<script>
+(function () {
+  var folds = function () { return document.querySelectorAll("details.fold"); };
+
+  document.querySelectorAll(".fold-controls button").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var open = button.getAttribute("data-fold") === "open";
+      folds().forEach(function (fold) { fold.open = open; });
+    });
+  });
+
+  window.addEventListener("beforeprint", function () {
+    folds().forEach(function (fold) { fold.open = true; });
+  });
+})();
+</script>
 </body>
 </html>

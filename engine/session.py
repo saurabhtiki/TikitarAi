@@ -35,6 +35,7 @@ DE_STATEMENTS_KEY = "de_calculated_statements"
 DE_UPLOADER_KEY = "de_uploader"
 DE_DIALOG_KEY = "de_open_dialog"
 DE_PENDING_STEPS_KEY = "de_pending_step_state"
+DE_NOTICE_KEY = "de_pending_notices"
 DE_AUTOCOLLAPSED_KEY = "de_autocollapsed_steps"
 DE_REBUILD_KEY = "de_rebuild_count"
 DE_START_OVER_KEY = "de_start_over_pending"
@@ -205,8 +206,8 @@ def queue_step_state(step_key: str, expanded: bool) -> None:
     not: Streamlit re-applies that argument whenever its value changes, overriding the
     stored state. An `expanded=not loaded_tables` that flips to False the moment data
     arrives therefore force-collapses the step *and keeps it collapsed*, taking the
-    uploader inside it out of reach for good. So every expander on the page passes a
-    constant, and everything dynamic comes through here.
+    uploader inside it out of reach for good. So an expander's `expanded=` is only ever
+    its own stored state (`step_is_open`), and everything else comes through here.
     """
     st.session_state.setdefault(DE_PENDING_STEPS_KEY, {})[step_key] = bool(expanded)
 
@@ -228,6 +229,21 @@ def consume_step_state() -> None:
     """Applies any queued expander changes. Call before the expanders are created."""
     for step_key, expanded in st.session_state.pop(DE_PENDING_STEPS_KEY, {}).items():
         st.session_state[step_key] = expanded
+
+
+def queue_notice(message: str) -> None:
+    """Queues a message to show on the next run.
+
+    Anything written straight before `st.rerun` is thrown away with the rest of that
+    run's output, so a message about what the press just did never reaches the screen.
+    Queuing it here hands it to the run the user actually sees.
+    """
+    st.session_state.setdefault(DE_NOTICE_KEY, []).append(message)
+
+
+def consume_notices() -> list[str]:
+    """The queued messages, cleared. Call once per run, where they should be drawn."""
+    return st.session_state.pop(DE_NOTICE_KEY, [])
 
 
 def step_is_open(step_key: str, default: bool) -> bool:
@@ -825,6 +841,7 @@ def reset_engine() -> None:
         DE_STATEMENTS_KEY,
         DE_DIALOG_KEY,
         DE_PENDING_STEPS_KEY,
+        DE_NOTICE_KEY,
         DE_AUTOCOLLAPSED_KEY,
         DE_DISMISSED_KEY,
         DE_LOAD_OUTCOMES_KEY,

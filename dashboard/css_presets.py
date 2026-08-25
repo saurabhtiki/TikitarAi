@@ -97,6 +97,14 @@ h4 { font-size: 1rem; font-weight: 600; margin: 24px 40px 10px; color: #1a1a1a; 
 /* This preset's page inset lives on .item, and the shared rules zero an item's side
    margins inside a row, so the row has to carry the inset instead. */
 .item-row { margin: 0 40px; }
+/* Same reason again for the folded subsection box: it is the outermost thing on the page
+   now, so it carries the inset and the things inside it drop theirs — otherwise every
+   item would be indented twice. */
+.fold-controls { margin: 16px 40px 0; }
+.subsection { margin: 20px 40px; padding: 4px 20px 20px; }
+.subsection h3 { margin: 18px 0 0; }
+.subsection .item { margin: 0 0 26px; }
+.subsection .item-row { margin: 0; }
 .comment { margin: 14px 0 0; color: #40484f; font-size: 0.92rem; }
 table { font-size: 0.82rem; margin: 12px 0; border: 1px solid #cfd8e3; }
 th { text-align: left; font-weight: 600; padding: 8px 12px; background: #14375e; color: #ffffff; }

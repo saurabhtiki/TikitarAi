@@ -518,10 +518,11 @@ def _confirm_links() -> None:
     clean = [item for item in confirmed if item not in flagged]
 
     if flagged:
-        st.info(
+        # Queued, not drawn: this function ends in `st.rerun`, which throws away
+        # everything written during this run.
+        session.queue_notice(
             f"{len(flagged)} link(s) have rows that don't match and won't be enforced as a "
-            "database constraint — they'll still be used for queries.",
-            icon=":material/info:",
+            "database constraint — they'll still be used for queries."
         )
 
     try:
@@ -725,11 +726,17 @@ def render_setup_steps(user_id: int, loaded_tables: list[session.EngineTable]) -
     """Steps 2 and 3, each in its own expander. Step 1 is the caller's, since its header
     and body carry whatever the caller checked the upload against.
 
-    Every `expanded=` here is a **constant**. Streamlit re-applies that argument whenever
-    its value changes, overriding the stored open state — so a dynamic `expanded=` would
-    force a step shut the instant its condition flipped and keep it shut. Anything dynamic
-    goes through `session.queue_step_state` instead.
+    Every `expanded=` here is the step's **own stored state**, read back through
+    `session.step_is_open`. Streamlit re-applies that argument whenever its value changes,
+    overriding the stored open state — so an `expanded=` derived from anything *else*
+    (`not loaded_tables`, say) would force a step shut the instant its condition flipped
+    and keep it shut. Feeding the stored value back in cannot fight it, and is what makes
+    a state written straight into `st.session_state` take effect. Everything that wants to
+    open or collapse a step goes through `session.queue_step_state` instead.
     """
+    for message in session.consume_notices():
+        st.info(message, icon=":material/info:")
+
     if len(loaded_tables) >= 2:
         relationship_count = len(session.get_relationships())
         link_summary = f"{relationship_count} link(s) confirmed" if relationship_count else "not set up yet"
@@ -737,7 +744,7 @@ def render_setup_steps(user_id: int, loaded_tables: list[session.EngineTable]) -
             step_label(2, "How the tables link up", link_summary, bool(relationship_count)),
             key=session.STEP_LINKS,
             on_change="rerun",
-            expanded=True,
+            expanded=session.step_is_open(session.STEP_LINKS, True),
             icon=":material/hub:",
         ) as links_step:
             if links_step.open:
@@ -750,7 +757,7 @@ def render_setup_steps(user_id: int, loaded_tables: list[session.EngineTable]) -
             step_label(3, "What the columns mean", dictionary_summary, described > 0),
             key=session.STEP_DICTIONARY,
             on_change="rerun",
-            expanded=True,
+            expanded=session.step_is_open(session.STEP_DICTIONARY, True),
             icon=":material/menu_book:",
         ) as dictionary_step:
             if dictionary_step.open:

@@ -349,8 +349,11 @@ def build_css(settings: StyleSettings) -> str:
         " margin: 14px 0 0; }",
         f"table {{ font-size: {table.font_size:g}rem; margin: 12px 0;"
         f" overflow: hidden;{_border_rules(table)} }}",
+        # The page's own background rather than `transparent` when no header colour was
+        # chosen: the header row is sticky, so the rows scrolling under it would otherwise
+        # show straight through the column names.
         f"th {{ text-align: left; font-weight: 600; padding: 8px 12px;"
-        f" background: {table.background_colour or 'transparent'}; color: {header_text}; }}",
+        f" background: {table.background_colour or settings.content_background}; color: {header_text}; }}",
         f"td {{ padding: 7px 12px; color: {table.text_colour};"
         f" border-top: 1px solid {table.border_colour}; }}",
         f".note {{ color: {subheading.text_colour}; font-size: 0.82rem; }}",

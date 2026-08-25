@@ -1,93 +1,81 @@
-# Phase 20 — Updating a report's pictures, notes and pasted HTML on a re-run
+# Phase 22 — A link button, folding sections, and a tidier-looking report
 
-The last of the five features worked out in plan mode, and the one that was deliberately
-left until the blocks it edits existed (phases 17–19 built them).
+Four small changes. Three are about how the HTML report *looks*; one adds a new kind of
+block the user can place.
 
-## What the user does today
+## 1. External Link block
 
-**Task Builder** is where a report is authored: sections, report items, and — since phase 17
-— blocks the user writes by hand (a text note, an uploaded picture, pasted HTML). That is
-saved as a Task, the reusable recipe.
+Today "Add a block" offers three things: a **Note**, a **Picture**, and **Pasted HTML**.
+This adds a fourth: an **External Link**.
 
-**Automate → Reports** is where it is run: pick the saved report, upload this month's files,
-press **Run task**. The run rebuilds the report from the Task's skeleton and fills the
-report items with fresh numbers.
+The user types a web address and (optionally) the words to show on the button. In the
+report it comes out as a button. Clicking it opens that page in a **new tab**, so the
+report itself stays open.
 
-The gap: the numbers refresh, the hand-written parts cannot. A picture pasted out of last
-month's Excel, a note written about last month, a Power BI embed pointing at last month's
-page — all come back exactly as saved, with no way to change them without going back to
-Task Builder and re-authoring the whole thing.
+Example: a section called "Monthly Sales" ends with a button that says
+**Open live Power BI dashboard** → click → the Power BI page opens in a new tab.
 
-## What this phase adds
+Rules:
+- Only `http://` and `https://` addresses are accepted. Anything else (a file path, a
+  `javascript:` line) is refused with a plain message — "That doesn't look like a web
+  address. It should start with http:// or https://."
+- If the user gives no button words, the address itself is shown.
+- It works the same in Task Builder, in the Dashboard, and on the Update screen after a run.
 
-A third view on the run screen, between the two that are already there:
+## 2. Sections *and* subsections fold open and shut
 
-**Preview · Update · Download**
+Right now a long report is one long scroll. After this change the HTML report opens as a
+**list of titles**. Every section and every subsection has a small arrow next to it.
 
-**Update** lists every placed item in report order and gives each one the controls for the
-parts a run cannot produce:
+- Click a section title → it opens and shows its subsections.
+- Click a subsection title → it opens and shows the items inside it.
+- Click again → it shuts.
 
-- **any item** — its comment, in the same bold/italic/underline/list editor Task Builder uses
-- **a picture block** — upload a new picture, look at it, remove it
-- **an HTML block** — the paste box and its frame height
+Everything starts **shut**, so the first thing the reader sees is a short table of
+contents. Example: a 40-page report opens as eight lines; the reader clicks "3. Stock
+Ageing", then "3.2 Slow movers", and only that one table appears.
 
-Edits land on this run's report immediately, so Preview and both downloads show them without
-another press.
+Two extras that come with it:
+- An **Expand all / Collapse all** control at the top, for the reader who wants the old
+  long-scroll view back in one click.
+- When the report is **printed or saved as PDF**, everything is forced open and the arrows
+  are hidden — a printed page must never come out blank.
 
-Under the list, one button: **Save these into the task**. It writes the current comments,
-pictures and pasted HTML back into the saved report, so next month's run opens with them
-already right. Not automatic — a run's edits are often just for this month's copy, and
-silently rewriting the saved recipe would be the wrong default.
+## 3. Borders around items and subsections
 
-## Decisions
+Each subsection gets a light box around it, and each item inside gets its own softer box.
+So the eye can see where one chart ends and the next begins, instead of everything
+floating in white space.
 
-- **Update, not Build.** `render_report_output` has always refused to offer the Build view,
-  because a run rebuilds the arrangement wholesale from the Task and filing items into
-  sections here would be undone by the next press of Run. That reasoning does *not* apply to
-  a block's own content: a manual block's picture and HTML come straight out of the skeleton
-  and nothing in a run produces them, so they are exactly the fields it is safe to edit here.
-  The Update view therefore edits content and never structure.
+Example: three charts stacked in a subsection currently look like one long strip; after
+this each sits in its own card, inside the subsection's outer frame.
 
-- **Comments are editable here but rewritten by the next run.** A run redrafts each report
-  item's comment for this month's numbers unless the *Rewrite the comments* box is cleared.
-  So an edit made here is this month's wording, and saving it into the task only sticks for a
-  user who runs with rewriting off — which is precisely the hand-written report that wants
-  it. Said in the button's tooltip rather than assumed.
+## 4. Small polish
 
-- **Matched by `item_id`, not by position.** The run's report is a deep copy of the Task's
-  skeleton, so every item carries the same id at both ends. Copying by id means a save is
-  exact even if a later Task Builder edit reordered things, and an item that no longer exists
-  in the saved report is skipped rather than guessed at.
+- More breathing room between sections.
+- An item lifts very slightly when the mouse is over it.
+- Tables get alternating light row shading so a wide row is easier to follow across.
+- A sticky table header, so the column names stay put while scrolling a long table.
 
-- **Only the by-hand fields travel.** `copy_authored_content` moves `comment`, `image`,
-  `image_mime`, `embed_html` and `embed_height` — and nothing else. It cannot carry a frame
-  or a figure into the skeleton even by accident, which is the rule `skeleton.to_dict`
-  enforces structurally and this must not undermine.
+All of the new look is written **before** the report's own stylesheet, exactly as the
+existing rules are — so any preset the user picked, or a stylesheet they hand-edited,
+still wins.
 
-- **The save button is the caller's.** `report_view` has no business importing `runner` or
-  `tasks` — `run_task.py` imports *it*. So the view takes an optional `on_save` callable and
-  the Run page supplies the one that writes to SQLite, the same arrangement `EmptyPool`
-  already uses for its button.
+## Where the work lands
 
-- **Nothing new is persisted.** `skeleton.py` already stores `comment`, `image`,
-  `image_mime`, `embed_html` and `embed_height` (phases 17–19). This phase writes into fields
-  that already round-trip, so a report saved before it loads and exports unchanged.
+- `dashboard/model.py` — the new block kind and the address it holds, plus the plain-English
+  check on that address (same shape as the picture check that is already there).
+- `app_pages/report_view.py` — the fourth "Add a block" button and the boxes to type the
+  address and the button words; the same controls on the Update screen.
+- `dashboard/html_export.py` — hands the address and button words to the template.
+- `dashboard/templates/report.html.j2` — the button itself, the fold-open markup and the
+  small script that drives it, and the new look.
+- `dashboard/excel_export.py` — a link block written into the workbook as a clickable cell.
 
-## Files changed
+## Tests, before moving on
 
-- `dashboard/model.py` — `AUTHORED_FIELDS` and `copy_authored_content(source, target)`,
-  pure, no Streamlit.
-- `app_pages/report_view.py` — `"Update"` in `OUTPUT_VIEWS`; `_render_update_view`,
-  `_render_update_item` and `_render_save_authored`; `render_report_output` gains `on_save`.
-- `app_pages/run_task.py` — `_save_authored_into_task`, wired in as `on_save`.
-
-## Verification
-
-- Run a saved report, change a picture block's picture and one item's comment, and check
-  Preview and the HTML download both show the new ones.
-- Press **Save these into the task**, run the report again, and check the new picture is
-  what comes back.
-- Leave a block untouched and check it keeps exactly what it had.
-- Run a task that has never been saved and check the save button explains itself rather than
-  failing.
-- Open a report saved before this phase and check it still runs, previews and downloads.
+- A link block with a good address renders a button that opens in a new tab.
+- A bad address (`javascript:`, a file path, empty) is refused with a message, not saved.
+- A saved report with no link blocks still exports exactly as it does today.
+- The folding markup is present, and the print rules force everything open.
+- A link block survives save → run → Update → save.

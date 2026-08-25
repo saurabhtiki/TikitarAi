@@ -140,6 +140,9 @@ def _build_formats(workbook) -> dict:
         "heading": workbook.add_format({"bold": True, "font_size": 11}),
         "comment": workbook.add_format({"text_wrap": True, "valign": "top", "italic": True}),
         "note": workbook.add_format({"italic": True, "font_color": "#767f88"}),
+        # What a workbook has instead of a button: the underlined blue cell every
+        # spreadsheet reader already knows is clickable.
+        "link": workbook.add_format({"font_color": "#0563c1", "underline": 1}),
     }
     # One format per combination of the three run styles a comment can carry. Built up
     # front for the same reason as the rest: a rich string needs a real format object per
@@ -337,6 +340,28 @@ def _text_width(value: str) -> int:
     return min(max(len(str(value)) + 2, _MIN_EMBED_WIDTH), _MAX_EMBED_WIDTH)
 
 
+def _write_link(worksheet, cursor: int, item, formats: dict) -> int:
+    """An External Link block as a clickable cell. Returns where the next thing goes.
+
+    Untouched cursor when the item carries no link, so an item that isn't a link block
+    writes nothing at all.
+
+    xlsxwriter refuses some addresses outright (too long, an unknown scheme) by raising,
+    and one bad link is not a reason to lose the workbook — so a refusal is written as
+    plain text instead, and the reader can still copy it out.
+    """
+    if not item.has_link():
+        return cursor
+
+    try:
+        worksheet.write_url(cursor, 0, item.link_url, formats["link"], item.link_label())
+    except (ValueError, TypeError) as error:
+        logger.warning("Could not write the link on item %s as a hyperlink: %s", item.item_id, error)
+        worksheet.write(cursor, 0, item.link_url, formats["note"])
+
+    return cursor + 2
+
+
 def _write_subsection(writer: pd.ExcelWriter, sheet_name: str, subsection, formats: dict) -> None:
     """Lays one subsection's items down a single worksheet, in report order."""
     workbook = writer.book
@@ -381,6 +406,8 @@ def _write_subsection(writer: pd.ExcelWriter, sheet_name: str, subsection, forma
 
         if item.has_embed():
             cursor = _write_embed(worksheet, sheet_name, cursor, item, formats, widths)
+
+        cursor = _write_link(worksheet, cursor, item, formats)
 
         # Through the same sanitizer the HTML export uses, so the workbook and the page
         # are showing the same comment — one as formatted runs, the other as markup.

@@ -21,6 +21,19 @@ phase 19 it *can* run script and reach this app's own origin, deliberately, so a
 grant is scoped to internal reports. Every other string — the title, the headings — is user
 text and is escaped by the template.
 
+Since phase 22 one more value is worth calling out, though it is not unescaped: an External
+Link block's address. It is escaped like every other string, but it goes into an `href` the
+browser will *follow*, which escaping alone says nothing about — so it is put through
+`model.link_problems` again here, and dropped if it would not be accepted today. That
+allow-list of `http://` and `https://` is what keeps a `javascript:` line out of the page,
+and it is applied on the way in (`model.set_item_link`), on the way out of a saved Task
+(`skeleton._item_from_dict`) and here.
+
+Sections and subsections are `<details>` elements as of phase 22, so the report opens as
+its own table of contents. That is the browser's own folding, not this module's: the only
+script in the exported page is the Expand all / Collapse all pair and the `beforeprint`
+handler that opens every fold, because a section printed shut is a blank page.
+
 Tables are cut to `pinned_tables.PREVIEW_ROWS`, with a line underneath saying how many rows
 there were. A report is something a person reads, and a browser handed a hundred thousand
 `<tr>` elements stops being readable long before it stops working. The **Excel** export is
@@ -45,7 +58,7 @@ from jinja2 import Environment, FileSystemLoader, TemplateError, select_autoesca
 from dashboard.embed_html import embed_document, sanitize_embed
 from dashboard.exceptions import ReportExportError
 from dashboard.images import item_png
-from dashboard.model import UNTITLED_REPORT, Report, walk
+from dashboard.model import UNTITLED_REPORT, Report, link_problems, walk
 from dashboard.pinned_tables import PREVIEW_ROWS
 from dashboard.rich_text import sanitize_comment
 
@@ -133,6 +146,13 @@ def _render_item(number: str, item) -> dict:
         # belt-and-braces the comment gets.
         "embed": embed_document(sanitize_embed(item.embed_html)),
         "embed_height": item.embed_height,
+        # Re-screened here rather than trusted from the item, the same belt-and-braces the
+        # comment and the paste get: this is the only typed text the template writes into
+        # an attribute the browser will follow, so a value that somehow reached the item
+        # without passing `set_item_link` — out of an old saved Task, say — is dropped
+        # rather than printed.
+        "link_url": item.link_url.strip() if not link_problems(item.link_url) else "",
+        "link_text": item.link_label(),
     }
 
 

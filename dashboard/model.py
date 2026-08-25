@@ -55,20 +55,23 @@ KIND_RESULT = "result"
 KIND_TEXT = "text"
 KIND_IMAGE = "image"
 KIND_EMBED = "embed"
+KIND_LINK = "link"
 
-MANUAL_KINDS = (KIND_TEXT, KIND_IMAGE, KIND_EMBED)
+MANUAL_KINDS = (KIND_TEXT, KIND_IMAGE, KIND_EMBED, KIND_LINK)
 
 # What each block is called on the button that makes it and on the card that shows it.
 BLOCK_LABELS = {
     KIND_TEXT: "Text",
     KIND_IMAGE: "Picture",
     KIND_EMBED: "HTML",
+    KIND_LINK: "Link",
 }
 
 BLOCK_ICONS = {
     KIND_TEXT: ":material/notes:",
     KIND_IMAGE: ":material/image:",
     KIND_EMBED: ":material/code_blocks:",
+    KIND_LINK: ":material/link:",
 }
 
 # The heading a new block carries until the user writes one, so it is never nameless in
@@ -77,6 +80,7 @@ BLOCK_HEADINGS = {
     KIND_TEXT: "Note",
     KIND_IMAGE: "Picture",
     KIND_EMBED: "Pasted HTML",
+    KIND_LINK: "External link",
 }
 
 # An item's picture is printed the full width of its column rather than in a corner, so it
@@ -106,6 +110,16 @@ DEFAULT_LOGO_HEIGHT = 56
 MIN_EMBED_HEIGHT = 100
 MAX_EMBED_HEIGHT = 3000
 DEFAULT_EMBED_HEIGHT = 400
+
+# The only two schemes an External Link block accepts. The address is written straight into
+# an `href` in the export, so this is the list that keeps `javascript:` — and a local file
+# path, which would not open on anyone else's machine — out of the page.
+LINK_SCHEMES = ("http://", "https://")
+
+# What the button says when the user gives no words for it, and how long those words may
+# be: a button is a button, not a paragraph.
+MAX_LINK_TEXT_CHARS = 80
+MAX_LINK_URL_CHARS = 2000
 
 
 def new_id() -> str:
@@ -146,6 +160,10 @@ class PinnedItem:
         embed_html: markup the user pasted in, already reduced to what
             `dashboard.embed_html` allows.
         embed_height: how tall to draw that block's frame, in CSS pixels.
+        link_url: the web address an External Link block opens, screened by
+            `link_problems` before it is ever stored.
+        link_text: what that block's button says. Falls back to the address itself, so a
+            link block is never a button with no words on it.
         column_with_previous: render this item beside the one above it rather than under
             it. The flag belongs to the item, not to a position, so moving an item carries
             its answer to "do I sit beside my neighbour" with it — and an item that lands
@@ -169,6 +187,8 @@ class PinnedItem:
     image_mime: str = ""
     embed_html: str = ""
     embed_height: int = DEFAULT_EMBED_HEIGHT
+    link_url: str = ""
+    link_text: str = ""
 
     def display_heading(self) -> str:
         """What to print above this item. Never empty."""
@@ -186,6 +206,13 @@ class PinnedItem:
 
     def has_embed(self) -> bool:
         return bool(self.embed_html.strip())
+
+    def has_link(self) -> bool:
+        return bool(self.link_url.strip())
+
+    def link_label(self) -> str:
+        """What to print on the button. Never empty when there is a link at all."""
+        return (self.link_text or "").strip() or self.link_url.strip()
 
     def is_manual_block(self) -> bool:
         """Whether the user made this block rather than the app producing it.
@@ -424,6 +451,71 @@ def clear_item_image(item: PinnedItem) -> None:
     item.image_mime = ""
 
 
+def link_problems(url: str, text: str = "") -> list[str]:
+    """Everything wrong with a would-be external link, in plain English. Empty means accept.
+
+    Same shape as `picture_problems` and `css_presets.validate_css`, and for the same
+    reason: the page needs something to show the user, not an exception to catch.
+
+    The address is the one piece of typed text this app writes into an `href`, so the check
+    is an allow-list of schemes rather than a search for bad ones — `javascript:`,
+    `data:` and a Windows file path are all refused by not being on it, and so is
+    whatever scheme is invented next.
+    """
+    address = str(url or "").strip()
+    problems: list[str] = []
+
+    if not address:
+        return ["Type the web address the button should open."]
+
+    if len(address) > MAX_LINK_URL_CHARS:
+        problems.append(
+            f"That address is {len(address):,} characters, over the {MAX_LINK_URL_CHARS:,} "
+            "limit. A link that long is usually a whole page pasted by mistake."
+        )
+
+    if not address.lower().startswith(LINK_SCHEMES):
+        problems.append(
+            "That doesn't look like a web address. It should start with http:// or https://."
+        )
+
+    forbidden = ("\n", "\r", "\t", " ", '"', "'", "<", ">")
+    if any(character in address for character in forbidden):
+        problems.append(
+            "The address has a space or a quote in it. Copy it again from the browser's "
+            "address bar."
+        )
+
+    if len(str(text or "").strip()) > MAX_LINK_TEXT_CHARS:
+        problems.append(
+            f"The button words are longer than {MAX_LINK_TEXT_CHARS} characters. Keep them "
+            "to a few words — the address itself is printed underneath."
+        )
+
+    return problems
+
+
+def set_item_link(item: PinnedItem, url: str, text: str = "") -> list[str]:
+    """Puts an external link on a block, or returns why it was refused.
+
+    Refusing leaves whatever link was already there, on the same grounds `set_logo` and
+    `set_item_image` give: a rejected change costs the change and never the item.
+    """
+    problems = link_problems(url, text)
+    if problems:
+        logger.info("Refused a link for item %s: %s", item.item_id, "; ".join(problems))
+        return problems
+
+    item.link_url = str(url).strip()
+    item.link_text = str(text or "").strip()
+    return []
+
+
+def clear_item_link(item: PinnedItem) -> None:
+    item.link_url = ""
+    item.link_text = ""
+
+
 # The fields on an item that a person writes and no run can produce. A report item's rows
 # and chart come back fresh every run; its note, its picture and its pasted markup do not —
 # they sit in the saved skeleton exactly as they were typed. So these are the five fields
@@ -435,7 +527,9 @@ def clear_item_image(item: PinnedItem) -> None:
 # skeleton drops would give the user a Save that reports success and loses the value on the
 # next load — the quietest way this could break. `TestAuthoredFields` in
 # `tests/test_dashboard_blocks.py` fails when a sixth field is added here and not there.
-AUTHORED_FIELDS = ("comment", "image", "image_mime", "embed_html", "embed_height")
+AUTHORED_FIELDS = (
+    "comment", "image", "image_mime", "embed_html", "embed_height", "link_url", "link_text",
+)
 
 
 def copy_authored_content(source: Report, target: Report) -> int:

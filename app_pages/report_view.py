@@ -62,12 +62,14 @@ from dashboard.model import (
     DEFAULT_EMBED_HEIGHT,
     KIND_EMBED,
     KIND_IMAGE,
+    KIND_LINK,
     KIND_TEXT,
     MANUAL_KINDS,
     MAX_ITEM_IMAGE_BYTES,
     PICTURE_FILE_TYPES,
     LOGO_POSITIONS,
     MAX_EMBED_HEIGHT,
+    MAX_LINK_TEXT_CHARS,
     MAX_LOGO_HEIGHT,
     MAX_ROW_COLUMNS,
     MIN_EMBED_HEIGHT,
@@ -78,6 +80,7 @@ from dashboard.model import (
     add_subsection,
     assign_item,
     clear_item_image,
+    clear_item_link,
     clear_logo,
     find_item,
     move,
@@ -89,6 +92,7 @@ from dashboard.model import (
     remove_subsection,
     set_embed_height,
     set_item_image,
+    set_item_link,
     set_logo,
     set_logo_height,
     set_logo_position,
@@ -146,6 +150,8 @@ def _item_summary(item: PinnedItem) -> str:
         parts.append("picture")
     if item.has_embed():
         parts.append("pasted HTML")
+    if item.has_link():
+        parts.append("link")
     if item.has_chart():
         parts.append("chart")
     if item.has_table():
@@ -164,6 +170,16 @@ def _render_item_output(item: PinnedItem, key_prefix: str) -> None:
         _render_item_picture(item)
     if item.has_embed():
         _render_embed(item.embed_html, item.embed_height)
+    if item.has_link():
+        # A real link rather than a button: `st.button` cannot open a new tab, and the
+        # report prints an anchor — so the preview shows the same thing the export will.
+        st.link_button(
+            item.link_label(),
+            item.link_url,
+            key=f"{key_prefix}_link",
+            icon=":material/open_in_new:",
+            help="Opens in a new tab. This is the button the report prints.",
+        )
     if item.has_chart():
         st.plotly_chart(item.figure, key=f"{key_prefix}_chart", width="stretch")
     if item.has_table():
@@ -419,7 +435,7 @@ def _row_count_by_name(tables: list) -> dict[str, int]:
 
 
 def _render_add_block() -> None:
-    """The three blocks the user writes rather than the app producing.
+    """The four blocks the user writes rather than the app producing.
 
     Beside "Pin a loaded table" because both answer the same question — *what else goes in
     this report* — and neither is something to step past on every visit, so both are
@@ -433,13 +449,15 @@ def _render_add_block() -> None:
         st.caption(
             "Blocks you write yourself. A **picture** is where an Excel chart or pivot goes "
             "— screenshot it and drop it in. **HTML** takes a pivot saved from Excel as a "
-            "web page, pasted in with its own colours."
+            "web page, pasted in with its own colours. **Link** prints a button that opens "
+            "a page in a new tab."
         )
 
         helps = {
             KIND_TEXT: "A heading and a note, with no data under it — a summary or a caveat.",
             KIND_IMAGE: "A picture you upload, printed the width of its column.",
             KIND_EMBED: "HTML you paste in, printed as it looks rather than as tags.",
+            KIND_LINK: "A button in the report that opens a web page in a new tab.",
         }
         with st.container(horizontal=True, key="db_add_block_row"):
             for kind in MANUAL_KINDS:
@@ -466,7 +484,9 @@ def _block_has_content(item: PinnedItem) -> bool:
     editor left untouched writes `<p><br></p>`, which is not a comment however un-blank the
     raw string looks.
     """
-    return bool(item.has_image() or item.has_embed() or sanitize_comment(item.comment))
+    return bool(
+        item.has_image() or item.has_embed() or item.has_link() or sanitize_comment(item.comment)
+    )
 
 
 def _render_pool(report: Report, empty_pool: EmptyPool | None = None) -> None:
@@ -900,6 +920,65 @@ def _render_embed_editor(item: PinnedItem) -> None:
     _render_embed(item.embed_html, item.embed_height)
 
 
+def _render_link_editor(item: PinnedItem) -> None:
+    """The address and the button words on an External Link block.
+
+    Stored through `set_item_link`, which is the only way an address gets onto an item — a
+    refused one leaves whatever was there and says why, the same as a refused picture.
+    Nothing is written on every rerun: a value that has not changed since the last pass is
+    already on the item, and re-storing it would replay the error message forever.
+    """
+    address = st.text_input(
+        "Web address",
+        value=item.link_url,
+        key=f"db_item_link_url_{item.item_id}",
+        placeholder="https://app.powerbi.com/…",
+        help=(
+            "The page the button opens, in a new tab. It has to start with http:// or "
+            "https:// — the report is a file that travels, so a folder on your own PC "
+            "would not open on anyone else's."
+        ),
+    )
+    words = st.text_input(
+        "Button words",
+        value=item.link_text,
+        key=f"db_item_link_text_{item.item_id}",
+        placeholder="Open the live dashboard",
+        help=(
+            f"What the button says. Up to {MAX_LINK_TEXT_CHARS} characters; leave it empty "
+            "and the address itself is printed on the button."
+        ),
+    )
+
+    typed = (address or "").strip(), (words or "").strip()
+    seen_key = f"db_item_link_seen_{item.item_id}"
+
+    if st.session_state.get(seen_key) != typed:
+        st.session_state[seen_key] = typed
+        if not typed[0]:
+            clear_item_link(item)
+        else:
+            problems = set_item_link(item, typed[0], typed[1])
+            if problems:
+                st.session_state[_link_problem_key(item)] = problems
+            else:
+                st.session_state.pop(_link_problem_key(item), None)
+
+    for problem in st.session_state.get(_link_problem_key(item), []):
+        st.error(problem, icon=":material/error:")
+
+    if item.has_link():
+        st.caption(f":grey[The report prints a button saying **{item.link_label()}**.]")
+    else:
+        st.caption(":grey[No link yet. Paste the address out of your browser's address bar.]")
+
+
+def _link_problem_key(item: PinnedItem) -> str:
+    """Where a refused address's reasons wait, so they survive the rerun that follows the
+    keystroke that caused them."""
+    return f"db_item_link_problem_{item.item_id}"
+
+
 def _render_block_editor(item: PinnedItem) -> None:
     """The one control a block needs, for the kind of block it is.
 
@@ -910,6 +989,8 @@ def _render_block_editor(item: PinnedItem) -> None:
         _render_picture_editor(item)
     elif item.kind == KIND_EMBED:
         _render_embed_editor(item)
+    elif item.kind == KIND_LINK:
+        _render_link_editor(item)
 
 
 # What the comment box says on a block someone wrote. The same wherever it is edited: a

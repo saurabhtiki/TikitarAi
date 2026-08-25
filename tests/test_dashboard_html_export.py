@@ -269,7 +269,11 @@ def test_a_comment_cannot_smuggle_anything_but_formatting_onto_the_page(frame):
     )
     html = build_html(_report_with(item), _css())
 
-    assert "<script>" not in html
+    # The report itself carries one `<script>` since phase 22 — the fold controls and the
+    # `beforeprint` handler, both constants at the end of the page. What must never appear
+    # is a script inside the report body, which is where a comment is written.
+    report_body = html.split("<body>", 1)[1].split("<script>", 1)[0]
+    assert "<script>" not in report_body
     assert "onclick" not in html
     assert "onerror" not in html
     assert "<p>Fine</p>" in html
