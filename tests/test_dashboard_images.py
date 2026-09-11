@@ -78,9 +78,20 @@ def test_nothing_at_all_is_not_a_failure():
 # --------------------------------------------------------------------------------------
 
 
+def _counting_rasterizer(monkeypatch, result: tuple[bytes | None, str]) -> list:
+    """Stubs the rasterizer to return `result`, and records every call it receives."""
+    calls: list = []
+
+    def rasterize(figure, **kwargs):
+        calls.append(figure)
+        return result
+
+    monkeypatch.setattr(images, "figure_to_png", rasterize)
+    return calls
+
+
 def test_a_drawn_chart_is_rasterized_once_and_reused(monkeypatch, figure):
-    calls = []
-    monkeypatch.setattr(images, "figure_to_png", lambda fig, **kwargs: (calls.append(fig), (FAKE_PNG, ""))[1])
+    calls = _counting_rasterizer(monkeypatch, (FAKE_PNG, ""))
     item = PinnedItem(heading="Sales", figure=figure)
 
     assert images.item_png(item) == FAKE_PNG
@@ -92,10 +103,7 @@ def test_a_failed_chart_is_not_retried_on_every_rerun(monkeypatch, figure):
     """Rasterizing drives a whole browser. Caching only the successes meant a chart that
     could not be drawn spent seconds relaunching one on every rerun and every export, to
     arrive at the same answer each time."""
-    calls = []
-    monkeypatch.setattr(
-        images, "figure_to_png", lambda fig, **kwargs: (calls.append(fig), (None, "no browser"))[1]
-    )
+    calls = _counting_rasterizer(monkeypatch, (None, "no browser"))
     item = PinnedItem(heading="Sales", figure=figure)
 
     assert images.item_png(item) is None
@@ -105,6 +113,7 @@ def test_a_failed_chart_is_not_retried_on_every_rerun(monkeypatch, figure):
 
 
 def test_an_item_with_no_chart_never_reaches_the_rasterizer(monkeypatch):
-    monkeypatch.setattr(images, "figure_to_png", lambda fig, **kwargs: pytest.fail("called"))
+    calls = _counting_rasterizer(monkeypatch, (FAKE_PNG, ""))
 
     assert images.item_png(PinnedItem(heading="A note")) is None
+    assert not calls

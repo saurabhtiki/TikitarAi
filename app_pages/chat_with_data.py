@@ -69,6 +69,7 @@ from chat_types.exceptions import ChatTypeStorageError
 from checks import session as checks_session
 from dashboard import images
 from dashboard import session as dashboard_session
+from dashboard.model import PinnedItem
 from engine import columns as engine_columns
 from engine import session
 from engine.exceptions import CalculatedColumnError, DataEngineError
@@ -708,7 +709,7 @@ def _render_pin_button(message: ChatMessage, index: int) -> None:
     )
 
 
-def _save_pinned_chart(item) -> None:
+def _save_pinned_chart(item: PinnedItem) -> None:
     """Turns a pinned chart into the picture the report will print, and says if it can't.
 
     The report file — HTML or Excel — cannot carry a live chart, only a picture of one, and
@@ -718,8 +719,9 @@ def _save_pinned_chart(item) -> None:
     watching. Doing it here instead means the person who pressed Pin finds out while they
     are still looking at the chart, and is told what went wrong.
 
-    Run once per pinned item, not once per rerun: `images.item_png` caches the failure as
-    well as the success, so this is a dictionary lookup on every rerun after the first.
+    The browser is driven once per pinned chart, not once per rerun: `images.item_png`
+    caches the failure as well as the success, so every rerun after the first only reads
+    what is already on the item.
     """
     if not item.has_chart() or item.png is not None:
         return
@@ -730,7 +732,7 @@ def _save_pinned_chart(item) -> None:
 
     if item.png_error:
         st.warning(
-            f"The chart is on your Dashboard, but it couldn't be saved as a picture, so the "
+            "The chart is on your Dashboard, but it couldn't be saved as a picture, so the "
             f"report will print its table instead. Reason: {item.png_error}",
             icon=":material/image_not_supported:",
         )

@@ -23,6 +23,7 @@ from auth.db import init_db, seed_default_admin
 from chat_types.db import init_chat_types_table
 from cleaner import session as cleaner_session
 from cleaner.db import init_cleaning_templates_table
+from dashboard import images
 from dashboard import session as dashboard_session
 from engine import columns as engine_columns
 from engine import session as engine_session
@@ -41,6 +42,14 @@ SALES_WITH_ORPHAN_CSV = b"cust_id,sku,basic\nc1,s1,100\nc2,s2,50\nc3,s1,20\nc9,s
 CUSTOMER_CSV = b"id,name\nc1,Ana\nc2,Bo\nc3,Cy\n"
 STOCK_CSV = b"sku,name\ns1,Widget\ns2,Gadget\n"
 STAFF_CSV = b"emp_id,dept\n007,Sales\n008,Ops\n"
+
+
+@pytest.fixture(autouse=True)
+def no_real_rasterizing(monkeypatch):
+    """Pinning a chart now turns it into a picture straight away, so the user is told
+    there and then if that fails. Doing it for real would launch a headless browser inside
+    every test on this page, so the page is driven against a stub."""
+    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: (b"\x89PNG fake", ""))
 
 
 def _make_app(tmp_path, monkeypatch, role="normal_user"):

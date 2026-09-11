@@ -183,9 +183,11 @@ class TestPipelineQuestions:
         assert answer.frame["total"].tolist() == [4000.0, 2000.0]
 
     def test_a_commentary_question_calls_the_separate_narrow_call(self, connection, stub_commentary):
+        """The sentence comes from the narrow call — and the rows it describes are shown
+        beside it, because "explain X by Y" is a question about a table."""
         answer = pipeline.answer(PROFILE, connection, "schema", "explain total basic by department")
         assert answer.text == "Sales is 4000 of the 6000 total."
-        assert answer.outputs == {routing.OUTPUT_COMMENTARY}
+        assert answer.outputs == {routing.OUTPUT_COMMENTARY, routing.OUTPUT_DATAFRAME}
 
     def test_a_default_question_gives_a_table_and_commentary(self, connection, stub_commentary):
         answer = pipeline.answer(PROFILE, connection, "schema", "total basic by department")
