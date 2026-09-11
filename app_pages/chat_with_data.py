@@ -103,7 +103,7 @@ except AuthDatabaseError:
 # --------------------------------------------------------------------------------------
 #
 # The uploader, the loaded-table summary and the previews all live in `setup_view`, shared
-# with Task Builder (requirement 7.3 step 2). What stays here is the chat-type layer over
+# with Report Builder (requirement 7.3 step 2). What stays here is the chat-type layer over
 # them, which is this page's alone.
 
 
@@ -570,7 +570,7 @@ def _dialog_chat_type_schema(payload: dict) -> None:
 
 
 DIALOGS = {
-    # Steps 2 and 3's three, shared with Task Builder.
+    # Steps 2 and 3's three, shared with Report Builder.
     **setup_view.SETUP_DIALOGS,
     "show_data": _dialog_show_data,
     "chat_type_schema": _dialog_chat_type_schema,
@@ -1014,7 +1014,7 @@ HIDDEN_UPLOAD_MOUNT = "de_upload_mount"
 # mount on Chat and Checks. Streamlit addresses an element by its position among its parent's
 # children, so swapping one for the other directly on the page changes what sits there; a run
 # that ends by asking for another leaves the previous occupant on screen, which is how two
-# "Step 1 · Your data" headers ended up showing at once on the Task Builder page. One slot that
+# "Step 1 · Your data" headers ended up showing at once on the Report Builder page. One slot that
 # is always present keeps the swap among its own children.
 UPLOAD_SLOT = "de_upload_slot"
 
@@ -1095,7 +1095,7 @@ if profile is not None:
 
     # Pinning from here — from an answer or from the Checks view — goes to the session
     # Dashboard. Said even though it is the default: the choice outlives the run that made
-    # it, so staying silent would pin into a Task's report after a visit to Task Builder.
+    # it, so staying silent would pin into a Task's report after a visit to Report Builder.
     dashboard_session.use_report()
 
     # Applied before any expander is created, since Streamlit forbids writing a widget's

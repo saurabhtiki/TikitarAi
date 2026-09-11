@@ -1,4 +1,4 @@
-"""Task Builder — record a whole analysis once, so it can be run again (requirement 7).
+"""Report Builder — record a whole analysis once, so it can be run again (requirement 7).
 
 Everything before this page is session-only: Chat with data loads files, builds a report on
 the Dashboard, and when the browser reloads it is all gone. A **Task** is that same pipeline
@@ -43,7 +43,7 @@ every run or `sync_tables` drops every loaded table, so off Setup it runs inside
 container. That container is not dead UI: deleting it loses the user's data the first time
 they switch views. This is the arrangement `chat_with_data.py` documents at length.
 
-Restricted to admins and superusers (requirement 2.2 grants Task Builder to those two), so
+Restricted to admins and superusers (requirement 2.2 grants Report Builder to those two), so
 this page carries a `require_role` guard like `user_management.py` — and `streamlit_app.py`
 registers it conditionally, so it isn't a locked door in a normal user's sidebar.
 """
@@ -667,7 +667,7 @@ if profile is not None:
     render_sidebar(profile)
     user_id = st.session_state["user_id"]
 
-    st.subheader("🧩 Task Builder")
+    st.subheader("🧩 Report Builder")
     st.write(
         ":blue[**Record a whole analysis once — the setup, the report items, the checks and "
         "the report — and save it to run again on next month's files.**]"

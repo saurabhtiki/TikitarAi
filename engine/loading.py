@@ -4,7 +4,7 @@ Deliberately thin. Every hard part — decoding, delimiter sniffing, sheet selec
 reading every cell as text so leading zeros survive, and detecting
 text/categorical/numeric/date/id — was solved in Stage 4 and is imported from `cleaner`
 rather than written a second time. Two independent type detectors would be the classic
-way for a Task authored in Task Builder to behave differently from the same file
+way for a Task authored in Report Builder to behave differently from the same file
 explored in Chat with Data.
 
 The one thing this module adds is the distinction the engine needs downstream:

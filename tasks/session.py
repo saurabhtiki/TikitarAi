@@ -9,7 +9,7 @@ what lives here is just the four things a Task has that nothing else owns: its n
 description, its persona, and which saved row it came from.
 
 `TB_REPORT_KEY` is the second half of requirement 7's "Pin to report". `dashboard/session.py`
-holds an *active* report key; the Task Builder page declares this one at the top of every run,
+holds an *active* report key; the Report Builder page declares this one at the top of every run,
 and every producer below it — the report items view, the checks view — then pins into the
 Task's report with no idea it is doing anything different from usual.
 """

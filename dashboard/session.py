@@ -14,7 +14,7 @@ the message, and the copy is what the report owns from then on.
 
 Nothing here is written to disk. Requirement 6.3 is explicit that the dashboard lives for
 the session only — reloading the browser starts a new report, and that is the design, not
-a gap. Saving reports is Task Builder's job (requirement 7).
+a gap. Saving reports is Report Builder's job (requirement 7).
 """
 
 import logging
@@ -54,7 +54,7 @@ def use_report(key: str = DB_REPORT_KEY) -> None:
     Called at the top of a page's run, by **every** page that touches a report, including
     the ones that want the default: the choice outlives the run that made it, so a page that
     stayed silent would inherit whichever report the last page to speak had selected — and
-    Chat with data would pin into a Task's report because the user had visited Task Builder
+    Chat with data would pin into a Task's report because the user had visited Report Builder
     earlier in the session.
     """
     st.session_state[DB_ACTIVE_REPORT_KEY] = key
@@ -369,7 +369,7 @@ def reset_dashboard() -> None:
     package below the page layer needs to know this one exists. A report about tables that
     no longer exist would otherwise read as if it described whatever is loaded next.
     """
-    # The *active* report, not `DB_REPORT_KEY` outright: Start over in Task Builder must
+    # The *active* report, not `DB_REPORT_KEY` outright: Start over in Report Builder must
     # clear the Task's report and leave the session Dashboard alone, and vice versa.
     for key in (
         active_report_key(),

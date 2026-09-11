@@ -20,7 +20,7 @@ Rules:
   `javascript:` line) is refused with a plain message — "That doesn't look like a web
   address. It should start with http:// or https://."
 - If the user gives no button words, the address itself is shown.
-- It works the same in Task Builder, in the Dashboard, and on the Update screen after a run.
+- It works the same in Report Builder, in the Dashboard, and on the Update screen after a run.
 
 ## 2. Sections *and* subsections fold open and shut
 

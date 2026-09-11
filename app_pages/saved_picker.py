@@ -1,4 +1,4 @@
-"""One select box for choosing something saved, shared by Task Builder and the Data Cleaner.
+"""One select box for choosing something saved, shared by Report Builder and the Data Cleaner.
 
 Both pages ask the same question — "which of your saved recipes?" — and both used to answer
 it with a scrolling list of cards. Cards read well at five and badly at fifty: an account
@@ -11,7 +11,7 @@ anything two pages share has to live outside them.
 
 What the picker deliberately does **not** do is act. It returns the chosen row and leaves
 Open, Delete and every consequence to the caller, because the two callers differ there:
-Task Builder opens a Task onto a screen of its own, while the Data Cleaner has to park the
+Report Builder opens a Task onto a screen of its own, while the Data Cleaner has to park the
 choice and act on it further down the page, below `st.file_uploader`.
 """
 
@@ -79,7 +79,7 @@ def select_saved(
         index: which option to open on, in the same terms `st.selectbox` uses — counting
             the `include_none` entry when there is one. None opens on the placeholder.
         include_none: adds a leading "none of them" entry, which the Data Cleaner needs and
-            Task Builder does not: there, not choosing is simply not pressing Open.
+            Report Builder does not: there, not choosing is simply not pressing Open.
         none_label: what that entry says.
         on_change: passed straight through, for a caller that has to react to the change
             rather than to the returned value.

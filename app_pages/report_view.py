@@ -1,6 +1,6 @@
 """The report workspace — arrange pinned items, preview the report, download it.
 
-Requirements 6.3 and 6.4, rendered. Extracted from `app_pages/dashboard.py` so Task Builder
+Requirements 6.3 and 6.4, rendered. Extracted from `app_pages/dashboard.py` so Report Builder
 (requirement 7.3 step 5) can put the same two views over a Task's own report. Not a
 `st.Page`: a page script's body executes on import, so importing one is not an option — this
 follows `checks_view.py` and `setup_view.py` in being a plain module a page calls.
@@ -27,7 +27,7 @@ session and every page test for nothing.
 
 Which report is worked on is the caller's — the `Report` is passed in. What an *empty* pool
 should say is the caller's too, since the way to fill one differs per page: the Dashboard
-sends the user to Chat with data, Task Builder to its own Report-Items view.
+sends the user to Chat with data, Report Builder to its own Report-Items view.
 """
 
 import logging
@@ -329,7 +329,7 @@ def _is_discardable(item: PinnedItem) -> bool:
 
 
 def _loadable_tables() -> list:
-    """The tables loaded on Chat with data or Task Builder, in load order.
+    """The tables loaded on Chat with data or Report Builder, in load order.
 
     Never raises: the report workspace opens on pages where no engine has been started, and
     a report with nothing to pin from is an ordinary state rather than an error.
@@ -381,7 +381,7 @@ def _pin_loaded(tables: list) -> int:
 def _render_pin_loaded() -> None:
     """Pins tables that are already loaded, so the user only writes titles and comments.
 
-    No uploader of its own: the tables loaded on Chat with data or Task Builder are already
+    No uploader of its own: the tables loaded on Chat with data or Report Builder are already
     the data — read, cleaned and typed once — and re-reading the file they came from would
     put a second, subtly different copy of the same numbers in the report.
 
@@ -1000,7 +1000,7 @@ BLOCK_COMMENT_HELP = (
 )
 
 # What it says on an item the app produced, on each of the two screens that offer one. They
-# differ because the honest answer differs: in Task Builder the comment arrived from the
+# differ because the honest answer differs: in Report Builder the comment arrived from the
 # chat, and on a finished run it is about to be redrafted by the next one.
 BUILD_COMMENT_HELP = (
     "Printed under the chart and table in both exports. It starts as the answer's own "
@@ -1212,7 +1212,7 @@ def _render_preview(report: Report, empty_message: str = EMPTY_PREVIEW) -> None:
     are for the exported file, and Streamlit renders in the app's own theme.
 
     `empty_message` is the caller's, because "place an item" is the answer on the Dashboard
-    and Task Builder and is not the answer on a screen with no Build view: a run's report is
+    and Report Builder and is not the answer on a screen with no Build view: a run's report is
     empty because the run produced nothing, and telling the user to go and arrange something
     would send them looking for a control that isn't there.
     """

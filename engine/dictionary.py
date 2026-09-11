@@ -11,7 +11,7 @@ resolves requirement 5.3's stated ambiguity between `Customer.Name` and `Stock.N
 they are two entries with two descriptions, and the rendered context always qualifies
 them.
 
-In Chat with Data these entries live only for the session. In Task Builder (Stage 7)
+In Chat with Data these entries live only for the session. In Report Builder (Stage 7)
 the same objects are serialized as the Task's schema signature, which is why they are
 plain dataclasses of JSON primitives.
 """

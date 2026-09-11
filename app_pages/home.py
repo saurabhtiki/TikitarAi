@@ -28,5 +28,5 @@ if profile is not None:
     st.write("🧹 **Data cleaner** tidies a file before you upload it.")
     st.write("👨‍💻 **Meetings** runs a subject-based chat with each invitee.")
     st.write("📊 **Run a task** plays saved tasks over uploded files & get Report.")
-    st.write("🛠️ **Task builder** Admins can record a task which users can run later to generate reports.")
+    st.write("🛠️ **Report builder** Admins can record a task which users can run later to generate reports.")
 

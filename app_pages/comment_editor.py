@@ -1,6 +1,6 @@
 """The comment box, with a small formatting toolbar (bold, italic, underline, lists).
 
-Both places that let a person write a report comment — the Task Builder's item list and
+Both places that let a person write a report comment — the Report Builder's item list and
 the report's structure editor — call `comment_editor` here, so a comment is written the
 same way wherever it is written, and there is one place that decides what the toolbar
 offers.

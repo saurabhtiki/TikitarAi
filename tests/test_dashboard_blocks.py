@@ -269,7 +269,7 @@ class TestCopyAuthoredContent:
         assert landed.image_mime == "image/png"
 
     def test_an_item_the_recipe_no_longer_holds_is_skipped(self):
-        """Deleted in Task Builder since this run. Putting it back would undo that
+        """Deleted in Report Builder since this run. Putting it back would undo that
         silently, so it is left out and the count says so."""
         run, recipe = self._pair()
         run.sections[0].subsections[0].items.append(new_block(KIND_TEXT))

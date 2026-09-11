@@ -1,12 +1,12 @@
 """Run a Task — pick a saved recipe, upload Current files, get the report (requirement 8).
 
-Task Builder records a whole analysis; this page plays it back. Nothing is typed and, when
+Report Builder records a whole analysis; this page plays it back. Nothing is typed and, when
 every stored statement still works, **nothing is asked of a model to produce the numbers**:
 every report item and every criteria came out of storage carrying the SQL that produced it.
 The one AI call a run makes by design is redrafting the comments for this month's figures,
 and the checkbox beside Run is how that is declined.
 
-Available to **any logged-in user** (requirement 8's first line), unlike Task Builder — a
+Available to **any logged-in user** (requirement 8's first line), unlike Report Builder — a
 Task is built by an admin and run by whoever runs the month. Each account still only sees its
 own Tasks: `tasks/db.py` scopes every read to `user_id`, and shared ownership is explicitly
 out of scope (requirement 9).
@@ -138,7 +138,7 @@ def _dialog_schema(payload: dict) -> None:
     if not task.schema.tables:
         st.warning(
             "This task was saved without any file schema, so there is nothing to match an "
-            "upload against. Open it in Task builder and save it again with the files loaded.",
+            "upload against. Open it in Report builder and save it again with the files loaded.",
             icon=":material/warning:",
         )
     if task.schema.tables:
@@ -249,7 +249,7 @@ def _render_picker(user_id: int) -> None:
 
     if not saved:
         st.info(
-            "You have no saved tasks yet. A task is built once in **Task builder** — the "
+            "You have no saved tasks yet. A task is built once in **Report builder** — the "
             "setup, the report items, the checks and the report — and run here every month.",
             icon=":material/info:",
         )
@@ -750,7 +750,7 @@ def _save_authored_into_task(user_id: int, task: Task, report) -> None:
     if task.task_id is None:
         st.error(
             "This report hasn't been saved yet, so there's nothing to write these into. "
-            "Save it in Task builder first.",
+            "Save it in Report builder first.",
             icon=":material/error:",
         )
         return
@@ -759,7 +759,7 @@ def _save_authored_into_task(user_id: int, task: Task, report) -> None:
     if not written:
         st.warning(
             "None of these items is in the saved report any more, so nothing was written. "
-            "The report was probably rebuilt in Task builder since this run.",
+            "The report was probably rebuilt in Report builder since this run.",
             icon=":material/warning:",
         )
         return
@@ -849,7 +849,7 @@ if profile is not None:
 
     # The whole reason `dashboard.session` has an active report key. Said at the top of the
     # run, before anything below can read or write a report, so this run's results land here
-    # rather than in the session Dashboard or a Task Builder's report.
+    # rather than in the session Dashboard or a Report Builder's report.
     dashboard_session.use_report(runner_session.RT_REPORT_KEY)
 
     # A container that is always here and usually empty. Writing the message straight onto the

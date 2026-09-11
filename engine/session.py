@@ -126,7 +126,7 @@ def get_statements() -> list[str]:
     """The ordered calculated-column statements.
 
     Replayed after every relationship rebuild, and the exact list requirement 7.5 has
-    Task Builder persist as part of the recipe.
+    Report Builder persist as part of the recipe.
     """
     return st.session_state.setdefault(DE_STATEMENTS_KEY, [])
 

@@ -17,7 +17,7 @@ pipeline.
 
 Above the uploader sits the **cleaning template** bar: a saved working set — every expected
 file with its steps, plus the summary tables saved off them — picked by name. A bar rather
-than Task Builder's gate, and one that only ever records intent; see the "Cleaning
+than Report Builder's gate, and one that only ever records intent; see the "Cleaning
 templates" section below for both reasons, the second of which is load-bearing.
 """
 
@@ -1268,7 +1268,7 @@ def _render_pending_dialog(table: session.TableState, frame) -> None:
 # a name instead of by repeating a dozen dialogs. `cleaner/template.py` says what one is,
 # `cleaner/matching.py` measures an upload against one, `cleaner/db.py` stores it.
 #
-# A **bar, not a gate.** Task Builder makes choosing a Task the whole first screen because a
+# A **bar, not a gate.** Report Builder makes choosing a Task the whole first screen because a
 # Task *is* that page. Cleaning files nobody has a template for is this page's entire
 # existing purpose, so a wall in front of the uploader would be a regression. The picker's
 # `— New template —` is the same "open one, or start a new one" offer, with nothing gated

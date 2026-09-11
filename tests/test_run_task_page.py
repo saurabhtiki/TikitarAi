@@ -1,12 +1,12 @@
 """AppTest coverage for the Run a Task page (requirement 8).
 
 The whole page, driven through real widgets, against a saved Task written by `tasks.db` — so
-what is run here is the same JSON Task Builder writes, not a fixture shaped like it.
+what is run here is the same JSON Report Builder writes, not a fixture shaped like it.
 
 Four behaviours are worth more than the rest, because each would stay invisible until someone
 had done a real month's work and then be expensive to discover:
 
-- **the page is open to an ordinary user**, unlike Task Builder (requirement 8's first line);
+- **the page is open to an ordinary user**, unlike Report Builder (requirement 8's first line);
 - **the upload widgets are mounted on the picker too**, or going back to run a second task
   against the same files arrives with the files gone;
 - **a mismatch is remapped rather than aborted** (requirement 8.1 step 5), including the
@@ -165,7 +165,7 @@ def _texts(app):
 
 class TestWhoMayRunOne:
     def test_an_ordinary_user_gets_the_page(self, tmp_path, monkeypatch):
-        """Requirement 8's first line. Task Builder is the admin half of this pair."""
+        """Requirement 8's first line. Report Builder is the admin half of this pair."""
         app, task_id = _app(tmp_path, monkeypatch, role="normal_user")
 
         assert not app.exception

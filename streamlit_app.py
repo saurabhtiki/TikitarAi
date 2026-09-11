@@ -114,7 +114,7 @@ else:
             st.Page("app_pages/meetings.py", title="Meetings", icon="👨‍💻")
         ],
         # Requirement 8's first line: running a saved task is open to any logged-in user,
-        # unlike building one. The section therefore exists for everyone, and Task builder
+        # unlike building one. The section therefore exists for everyone, and Report builder
         # is added to it below only for the two roles that may build.
         "Automate": [
             # "Reports" in the menu, `run_task.py` in the code: the interface calls a
@@ -139,7 +139,7 @@ else:
         ],
         "Account": [st.Page("app_pages/settings.py", title="Settings", icon=":material/settings:")],
     }
-    # Requirement 2.2 grants Task Builder to admins and superusers only. Registered
+    # Requirement 2.2 grants Report Builder to admins and superusers only. Registered
     # conditionally rather than left in the sidebar for everyone to be refused at, the same
     # call `user_management.py` gets — the page still carries its own `require_role` guard,
     # since navigation is not access control.
@@ -177,7 +177,7 @@ else:
         return buffer
     if st.session_state.get("role") in ("admin", "superuser"):
         pages["Automate"].append(
-            st.Page("app_pages/task_builder.py", title="Task builder", icon="🛠️")
+            st.Page("app_pages/task_builder.py", title="Report builder", icon="🛠️")
         )
     #button for backup on click download backup files
         if st.sidebar.button(":material/backup: Backup", width="stretch", key="backup_btn"):

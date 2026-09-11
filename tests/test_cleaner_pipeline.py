@@ -228,7 +228,7 @@ def test_validate_rejects_an_unknown_fill_strategy():
 
 
 def test_a_recipe_round_trips_through_json_unchanged():
-    """Task Builder stores this list verbatim in task_json, so it must survive
+    """Report Builder stores this list verbatim in task_json, so it must survive
     json.dumps/loads with no custom encoder."""
     steps = add_step([], make_step("skip_rows", {"top": 1, "bottom": 2, "promote_header": True}))
     steps = add_step(steps, make_step("set_column_types", {"by_column": {"amount": {"target_type": "numeric"}}}))

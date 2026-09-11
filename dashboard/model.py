@@ -542,7 +542,7 @@ def copy_authored_content(source: Report, target: Report) -> int:
 
     Matched on `item_id`, never on position: a run's report is a deep copy of the Task's
     skeleton, so the ids line up at both ends, and matching by id stays exact even if the
-    Task has since been reordered in Task Builder. An item with no twin is skipped rather
+    Task has since been reordered in Report Builder. An item with no twin is skipped rather
     than appended — it was deleted from the saved report, and putting it back would undo
     that silently.
 

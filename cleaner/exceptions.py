@@ -18,7 +18,7 @@ class InvalidStepError(DataCleanerError):
     """A cleaning step's action or parameters are invalid.
 
     Raised at validation time, before a step is admitted into a recipe, so that a
-    stored recipe is well-formed by construction — an invariant Stage 7 (Task Builder)
+    stored recipe is well-formed by construction — an invariant Stage 7 (Report Builder)
     depends on when it serializes recipes for later replay.
     """
 

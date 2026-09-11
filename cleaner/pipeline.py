@@ -1,6 +1,6 @@
 """The recipe: what a cleaning step list is, how steps enter it, and how it executes.
 
-This is the module Stage 7 (Task Builder) serializes and Stage 8 (Run a Task) replays,
+This is the module Stage 7 (Report Builder) serializes and Stage 8 (Run a Task) replays,
 so its two guarantees matter beyond this stage:
 
 1. A step is JSON round-trippable — `json.loads(json.dumps(steps)) == steps`.

@@ -1,4 +1,4 @@
-"""AppTest coverage for the Task Builder page (requirement 7).
+"""AppTest coverage for the Report Builder page (requirement 7).
 
 The whole page, driven through real widgets. Only two things are stubbed — the SQL builder
 and the AI connection — because those are the seams between this page and a provider.

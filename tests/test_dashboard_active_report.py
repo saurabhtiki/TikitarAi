@@ -1,6 +1,6 @@
 """The active report (requirement 7.3 step 5) — there is more than one report now.
 
-`dashboard/session.py` used to hold exactly one report under one hardcoded key. Task Builder
+`dashboard/session.py` used to hold exactly one report under one hardcoded key. Report Builder
 has its own, and the producers that pin into a report (`checks/`, `report_items/`) must not
 have to know which one they are pinning into. So the page says once, at the top of its run,
 and everything below follows.

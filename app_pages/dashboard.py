@@ -4,7 +4,7 @@ Requirements 6.3 and 6.4. Open to every logged-in role, so this page follows
 `settings.py` and `chat_with_data.py` and carries no `require_role` guard.
 
 The three views — Build, Preview, Download — live in `app_pages/report_view.py`, shared with
-Task Builder's Report view (requirement 7.3 step 5). What is left here is what is only true
+Report Builder's Report view (requirement 7.3 step 5). What is left here is what is only true
 of *this* report: it is the session Dashboard, fed by Chat with data, and it is not saved.
 
 Requirement 6.3 is explicit that the dashboard exists for the session only, which is why the
@@ -61,7 +61,7 @@ if profile is not None:
     )
 
     # Said even though this *is* the default: the choice outlives the run that made it, so a
-    # page that stayed silent would work on whichever report Task Builder last selected.
+    # page that stayed silent would work on whichever report Report Builder last selected.
     dashboard_session.use_report()
 
     report_view.render_report_workspace(dashboard_session.get_report(), empty_pool=EMPTY_POOL)

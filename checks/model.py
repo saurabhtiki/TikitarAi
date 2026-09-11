@@ -483,7 +483,7 @@ def to_json(check_set: CheckSet) -> str:
     """Serialises a set for storage.
 
     Shaped as a recipe rather than a snapshot, so requirement 7.5's `task_json` can embed
-    one of these unchanged when Task Builder arrives.
+    one of these unchanged when Report Builder arrives.
     """
     # No version bump for `summary`: an older reader uses `.get` for every key it knows and
     # simply ignores this one, and a set written before the field existed reads back as an

@@ -1274,10 +1274,10 @@ def render_checks(
         "is arranged and downloaded as HTML or Excel."
     ),
 ) -> None:
-    """The Checks view, shared by the Chat page and the Task Builder (requirement 7.3 step 4).
+    """The Checks view, shared by the Chat page and the Report Builder (requirement 7.3 step 4).
 
     The defaults are the Chat page's behaviour exactly as it was, so that page passes nothing
-    and is untouched. Task Builder turns three things off, and each for a reason of its own:
+    and is untouched. Report Builder turns three things off, and each for a reason of its own:
 
     Args:
         show_set_bar: the criteria set's name, Save set and Load set. Off in a Task, because a

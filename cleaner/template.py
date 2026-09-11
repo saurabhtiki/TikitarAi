@@ -1,6 +1,6 @@
 """What a cleaning template is, and how one is written down.
 
-A template is the Data Cleaner's answer to Task Builder's Task: the **whole working set**
+A template is the Data Cleaner's answer to Report Builder's Task: the **whole working set**
 recorded once — every expected file, the recipe that cleans it, and any Pivot / Group &
 total / Unpivot table saved off it — so that next month's files can be cleaned by picking
 a name instead of by repeating a dozen dialogs.

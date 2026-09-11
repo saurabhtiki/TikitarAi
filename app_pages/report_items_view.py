@@ -1,11 +1,11 @@
-"""The Report-Items view of the Task Builder (requirement 7.3 step 3).
+"""The Report-Items view of the Report Builder (requirement 7.3 step 3).
 
 A view fragment, not a registered `st.Page` — the same arrangement `checks_view.py` has with
 `chat_with_data.py`, and for the same reason: it needs what the page around it has already
 loaded (the DuckDB connection, the confirmed links, the column dictionary), and a page of its
 own would have to rebuild all three.
 
-**This is where Task Builder differs most from Chat with Data.** Chat has a conversation; a
+**This is where Report Builder differs most from Chat with Data.** Chat has a conversation; a
 Task has an ordered list. The distinction is not presentational — a Task is re-run months
 later against a different file (requirement 8.2), and a transcript has no order that can be
 replayed, while a list does. So the list is the product, and it holds two kinds of thing:
@@ -558,13 +558,13 @@ def _chart_figure(item: ReportItem, frame: pd.DataFrame):
 
 
 def _save_to_report(item: ReportItem, frame: pd.DataFrame) -> None:
-    """Freezes the run and pins it — the Task Builder's "Pin to report".
+    """Freezes the run and pins it — the Report Builder's "Pin to report".
 
     `pin_result` is idempotent on `source_id`, so re-running an item and pressing this again
     updates the copy already in the report rather than adding a second one.
 
     Which report it lands in is the page's business, not this module's: `dashboard.session`
-    holds an active-report key that Task Builder sets to its own. That is what keeps this call
+    holds an active-report key that Report Builder sets to its own. That is what keeps this call
     identical to the one the Checks view makes while the two land in different places.
     """
     item.saved_run = freeze_run(item.sql or "", frame)

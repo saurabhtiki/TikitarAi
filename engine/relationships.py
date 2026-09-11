@@ -544,7 +544,7 @@ def enforce(
     re-creates the working tables from their base tables, which would otherwise silently
     discard every calculated column the user added — so they are replayed on the way
     out, in the order they were applied. That ordered list is also exactly what
-    requirement 7.5 asks Task Builder to persist.
+    requirement 7.5 asks Report Builder to persist.
 
     Returns:
         The table names rebuilt, parents first.

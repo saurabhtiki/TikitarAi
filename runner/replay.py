@@ -587,7 +587,7 @@ def _replay_checks(
 ) -> None:
     """Every criteria, then the overview that compares them (requirement 8.2 step 3).
 
-    The persona used is the **Task's**, written onto the set as Task Builder does, so a run
+    The persona used is the **Task's**, written onto the set as Report Builder does, so a run
     speaks in the voice the Task was recorded with rather than whatever the embedded criteria
     set happened to be saved under.
     """

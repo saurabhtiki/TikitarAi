@@ -2,7 +2,7 @@
 
 Requirement 5, rendered. This is the shared body of "Step 1 · Your data", "Step 2 · How the
 tables link up" and "Step 3 · What the columns mean", extracted from `chat_with_data.py` so
-Task Builder (requirement 7.3 step 2) can put the same three steps on its own Setup view
+Report Builder (requirement 7.3 step 2) can put the same three steps on its own Setup view
 without duplicating them.
 
 Not a `st.Page`. Like `checks_view.py`, it is a plain module a page calls — a page script's
@@ -19,7 +19,7 @@ dutifully drop every loaded table. The caller is responsible for mounting it out
 when it has no place for it; see `chat_with_data.HIDDEN_UPLOAD_MOUNT`.
 
 Nothing here knows about chat types. The caller passes the declared column types it wants
-applied to this load (Chat with Data passes its active chat type's; Task Builder passes
+applied to this load (Chat with Data passes its active chat type's; Report Builder passes
 none), and the caller owns any report about how the upload measured up.
 """
 

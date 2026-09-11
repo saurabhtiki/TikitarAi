@@ -9,13 +9,13 @@ library of standalone utilities, sitting behind a role-based login system.
   files, confirm relationships, chat in natural language, pin useful
   outputs to a personal dashboard, download as HTML or Excel. Nothing here
   persists beyond the session.
-- **🛠️ Task Builder** (admin/superuser only) — an authoring workshop that
+- **🛠️ Report Builder** (admin/superuser only) — an authoring workshop that
   streamlines the full pipeline (upload → clean → link → chat → structured
   report) and saves the entire pipeline as a reusable **Task**.
 - **▶️ Run a Task** (any user) — pick a saved Task, upload new files, get
   the same report back automatically.
 
-Both Chat with Data and Task Builder run on a shared, in-memory **DuckDB
+Both Chat with Data and Report Builder run on a shared, in-memory **DuckDB
 data engine** (Section 5) that handles file loading, relationship
 management, joins, and calculated columns via real SQL.
 
@@ -56,14 +56,14 @@ dataframes, charts, or written commentary.
 | Manage own password / photo | ✅ | ✅ | ✅ |
 | Manage own saved LLM provider profiles | ✅ | ✅ | ✅ |
 | Run an existing Task | ✅ | ✅ | ✅ |
-| Build/save a new Task (Task Builder access) | ✅ | ✅ | ❌ |
+| Build/save a new Task (Report Builder access) | ✅ | ✅ | ❌ |
 | Add / delete user accounts | ✅ | ❌ | ❌ |
 | Change any user's role | ✅ | ❌ | ❌ |
 | Be deleted | ❌ (never) | ✅ (by superuser) | ✅ (by superuser) |
 
 - **Normal user:** full use of Chat with Data, Utilities, and any existing
   Task, but cannot create new Tasks.
-- **Admin:** everything a normal user can do, plus access to Task Builder.
+- **Admin:** everything a normal user can do, plus access to Report Builder.
   No user-management rights.
 - **Superuser:** everything above, plus sole authority to add/delete users
   and change roles.
@@ -192,12 +192,12 @@ utilities can be added here over time.*
 ## 5. Data Engine
 
 The shared, in-memory DuckDB foundation used by both Chat with Data
-(Section 6) and Task Builder (Section 7).
+(Section 6) and Report Builder (Section 7).
 
 ### 5.1 Loading Data
 - Every uploaded file is loaded into an in-memory DuckDB instance as a
   base table, scoped to the current session (Chat with Data) or authoring
-  session (Task Builder).
+  session (Report Builder).
 - Base tables are immutable. Calculated-column and delete-column actions
   (Section 5.4) are applied to a separate working table, never overwriting
   the original imported data — this preserves a clean path back to the
@@ -265,7 +265,7 @@ The shared, in-memory DuckDB foundation used by both Chat with Data
   it also resolves ambiguity between similarly-named columns from
   different joined tables (e.g. `Customer.Name` vs. `Stock.Name`).
 - In Chat with Data, descriptions apply only for the current session. In
-  Task Builder, descriptions are saved as part of the Task's schema
+  Report Builder, descriptions are saved as part of the Task's schema
   signature (Section 7.5) so they don't need re-entering every time the
   Task is reused.
 
@@ -293,9 +293,9 @@ The shared, in-memory DuckDB foundation used by both Chat with Data
   never the immutable base table.
 - The actual SQL statement executed is shown in the chat for transparency.
 - These changes persist for the remainder of the session (or authoring
-  flow, in Task Builder) and are reflected in every subsequent query and
+  flow, in Report Builder) and are reflected in every subsequent query and
   in the final report.
-- In Task Builder, each calculated/delete-column statement is captured in
+- In Report Builder, each calculated/delete-column statement is captured in
   order as part of the Task recipe (Section 7.5) and replayed on reuse.
 
 ### 5.5 Agent Execution
@@ -504,7 +504,7 @@ what the columns mean. No rows, no chat transcript.
 
 ---
 
-## 7. Task Builder
+## 7. Report Builder
 
 Restricted to `admin` and `superuser` roles. This is where a full pipeline
 — from raw file upload through a finished, deliberately structured report —
@@ -690,7 +690,7 @@ The following are explicitly not part of this build:
    actions)
 8. Chat Types (saved Steps 1–3 setups, schema matching on upload, criteria
    sets scoped to a chat type)
-9. Task Builder (cleaning-step capture, structure-first report building,
+9. Report Builder (cleaning-step capture, structure-first report building,
    knowledge base, save/reorder controls, full export formats)
 10. Run a Task (schema matching, sample-file generator, replay execution,
     preview screen)
