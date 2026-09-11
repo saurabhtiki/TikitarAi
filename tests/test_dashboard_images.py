@@ -117,3 +117,42 @@ def test_an_item_with_no_chart_never_reaches_the_rasterizer(monkeypatch):
 
     assert images.item_png(PinnedItem(heading="A note")) is None
     assert not calls
+
+
+# --------------------------------------------------------------------------------------
+# Finding a browser to draw with
+# --------------------------------------------------------------------------------------
+
+
+def _browser_installed_at(monkeypatch, path: str) -> None:
+    """Pretends exactly one browser exists on this machine, at `path`."""
+    monkeypatch.setattr(images.os.path, "isfile", lambda candidate: candidate == path)
+    monkeypatch.setattr(images.os, "access", lambda candidate, mode: candidate == path)
+
+
+def test_an_installed_browser_is_named_for_the_renderer(monkeypatch):
+    """The hosted app printed "Kaleido requires Google Chrome to be installed" while
+    chromium sat in /usr/bin. Naming it outright is what stops that."""
+    monkeypatch.delenv("BROWSER_PATH", raising=False)
+    _browser_installed_at(monkeypatch, "/usr/bin/chromium")
+
+    images._point_at_an_installed_browser()
+    assert images.os.environ["BROWSER_PATH"] == "/usr/bin/chromium"
+
+
+def test_a_browser_the_host_already_chose_is_left_alone(monkeypatch):
+    monkeypatch.setenv("BROWSER_PATH", "/opt/my-own-chrome")
+    _browser_installed_at(monkeypatch, "/usr/bin/chromium")
+
+    images._point_at_an_installed_browser()
+    assert images.os.environ["BROWSER_PATH"] == "/opt/my-own-chrome"
+
+
+def test_no_browser_anywhere_sets_nothing(monkeypatch):
+    """On Windows and macOS none of those paths exist, and kaleido's own search is the
+    one that should run — so nothing is set and nothing is broken."""
+    monkeypatch.delenv("BROWSER_PATH", raising=False)
+    monkeypatch.setattr(images.os.path, "isfile", lambda candidate: False)
+
+    images._point_at_an_installed_browser()
+    assert "BROWSER_PATH" not in images.os.environ

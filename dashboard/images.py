@@ -26,6 +26,7 @@ copy so the chart on screen is left exactly as it was.
 """
 
 import logging
+import os
 from typing import Any
 
 import plotly.graph_objects as go
@@ -55,6 +56,16 @@ EXPORT_MARGIN = {"l": 70, "r": 30, "t": 60, "b": 80}
 # under a dark theme carries pale axis text into the export and lands invisible on it.
 EXPORT_PAPER = "#ffffff"
 EXPORT_FONT_COLOUR = "#1f2933"
+
+# Where a browser lands on the Linux container a hosted Streamlit runs on, in the order
+# they are tried. Kaleido needs one to draw a chart, and a bare container has none until
+# `packages.txt` asks apt for chromium — at which point this is where it appears.
+_LINUX_BROWSERS = (
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+)
 
 # How much of a failure's first line survives into the report. Long enough for "Chrome
 # executable not found", short enough that the notice stays one line under the chart.
@@ -90,6 +101,27 @@ def _prepared_for_export(figure: Any) -> Any:
     return export_figure
 
 
+def _point_at_an_installed_browser() -> None:
+    """Names the browser kaleido should drive, when one is installed but not found.
+
+    Kaleido looks for a browser on PATH under a handful of known names. That works on a
+    desktop and usually works on a container, but "usually" is how this app came to print
+    "Kaleido requires Google Chrome to be installed" on a host where chromium was in fact
+    installed. `BROWSER_PATH` is the override kaleido's browser layer reads first, so
+    pointing it at a browser that is demonstrably there removes the guesswork.
+
+    Does nothing at all when the variable is already set — the host's own choice wins —
+    and nothing on Windows or macOS, where the paths below do not exist.
+    """
+    if os.environ.get("BROWSER_PATH"):
+        return
+    for candidate in _LINUX_BROWSERS:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            logger.info("Pointing the chart renderer at the browser installed at %s.", candidate)
+            os.environ["BROWSER_PATH"] = candidate
+            return
+
+
 def figure_to_png(
     figure: Any, *, width: int = PNG_WIDTH, height: int = PNG_HEIGHT, scale: int = PNG_SCALE
 ) -> tuple[bytes | None, str]:
@@ -113,6 +145,7 @@ def figure_to_png(
     if figure is None:
         return None, ""
 
+    _point_at_an_installed_browser()
     try:
         image = _prepared_for_export(figure).to_image(
             format="png", width=width, height=height, scale=scale
