@@ -27,7 +27,7 @@ FAKE_PNG = b"\x89PNG\r\n\x1a\nfake-bytes"
 def no_real_rasterizing(monkeypatch):
     """Rasterizing launches a headless browser. Every test here stubs it, so the suite
     stays offline and fast — the real call is exercised by hand, not in CI."""
-    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: FAKE_PNG)
+    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: (FAKE_PNG, ""))
 
 
 @pytest.fixture
@@ -329,13 +329,22 @@ def test_an_empty_report_renders_rather_than_failing():
 
 
 def test_a_failed_chart_falls_back_to_a_notice_and_its_table(monkeypatch, frame):
-    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: None)
+    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: (None, "no browser found"))
     item = PinnedItem(heading="Sales", frame=frame, figure=object())
 
     html = build_html(_report_with(item), _css())
     assert "couldn't be included as a picture" in html
     assert "<img" not in html
     assert "North" in html
+
+
+def test_a_failed_chart_says_why_it_could_not_be_drawn(monkeypatch, frame):
+    """The notice used to be the whole story, which left the one person who could fix the
+    cause with nothing to act on."""
+    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: (None, "no browser found"))
+    item = PinnedItem(heading="Sales", frame=frame, figure=object())
+
+    assert "no browser found" in build_html(_report_with(item), _css())
 
 
 def test_an_item_that_never_had_a_chart_says_nothing_about_one(frame):
@@ -353,7 +362,7 @@ def test_a_chart_is_rasterized_once_across_both_exports(monkeypatch, frame):
 
     def counting_rasterize(figure, **kwargs):
         calls.append(figure)
-        return FAKE_PNG
+        return FAKE_PNG, ""
 
     monkeypatch.setattr(images, "figure_to_png", counting_rasterize)
     report = _report_with(PinnedItem(heading="Sales", frame=frame, figure=object()))

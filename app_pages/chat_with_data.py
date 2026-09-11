@@ -67,6 +67,7 @@ from chat_types import model as chat_type_model
 from chat_types import session as chat_type_session
 from chat_types.exceptions import ChatTypeStorageError
 from checks import session as checks_session
+from dashboard import images
 from dashboard import session as dashboard_session
 from engine import columns as engine_columns
 from engine import session
@@ -680,7 +681,8 @@ def _render_pin_button(message: ChatMessage, index: int) -> None:
     the Dashboard. The state is the pinned copy still being in the report, so discarding it
     there brings this button back rather than stranding the answer.
     """
-    if dashboard_session.pinned_item(message) is not None:
+    pinned = dashboard_session.pinned_item(message)
+    if pinned is not None:
         st.button(
             "Pinned to Dashboard",
             key=f"an_pin_{index}",
@@ -689,6 +691,7 @@ def _render_pin_button(message: ChatMessage, index: int) -> None:
             help=f"Already on your Dashboard — {dashboard_session.pool_count()} item(s) waiting to be placed. "
             "Discard it there if you want to pin this answer again.",
         )
+        _save_pinned_chart(pinned)
         return
 
     # `on_click` rather than acting on the return value: a callback runs *before* the rerun
@@ -703,6 +706,34 @@ def _render_pin_button(message: ChatMessage, index: int) -> None:
         args=(message,),
         help="Copy this answer to your Dashboard. Nothing is asked for here — you title and arrange it on the Dashboard page.",
     )
+
+
+def _save_pinned_chart(item) -> None:
+    """Turns a pinned chart into the picture the report will print, and says if it can't.
+
+    The report file — HTML or Excel — cannot carry a live chart, only a picture of one, and
+    making that picture drives a headless browser that can fail for reasons outside this
+    app. That used to happen silently at download time: the report printed "this chart
+    couldn't be included as a picture" and the reason went to a terminal nobody was
+    watching. Doing it here instead means the person who pressed Pin finds out while they
+    are still looking at the chart, and is told what went wrong.
+
+    Run once per pinned item, not once per rerun: `images.item_png` caches the failure as
+    well as the success, so this is a dictionary lookup on every rerun after the first.
+    """
+    if not item.has_chart() or item.png is not None:
+        return
+
+    if not item.png_error:
+        with st.spinner("Saving the chart as a picture for your report…"):
+            images.item_png(item)
+
+    if item.png_error:
+        st.warning(
+            f"The chart is on your Dashboard, but it couldn't be saved as a picture, so the "
+            f"report will print its table instead. Reason: {item.png_error}",
+            icon=":material/image_not_supported:",
+        )
 
 
 def _chart_keys(index: int) -> chart_controls.ChartKeys:

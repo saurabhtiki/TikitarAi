@@ -391,7 +391,10 @@ def _write_subsection(writer: pd.ExcelWriter, sheet_name: str, subsection, forma
             )
             cursor += _IMAGE_ROWS
         elif item.has_chart():
-            worksheet.write(cursor, 0, "This chart couldn't be included as a picture.", formats["note"])
+            reason = f" ({item.png_error})" if item.png_error else ""
+            worksheet.write(
+                cursor, 0, f"This chart couldn't be included as a picture{reason}.", formats["note"]
+            )
             cursor += 2
 
         cursor = _write_picture(worksheet, cursor, item, formats)

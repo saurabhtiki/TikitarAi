@@ -142,7 +142,7 @@ tbody tr:nth-child(even) td { background: rgba(0, 0, 0, 0.022); }
           {% if item.image %}
           <img src="data:image/png;base64,{{ item.image }}" alt="{{ item.heading }}">
           {% elif item.chart_failed %}
-          <p class="note">This chart couldn't be included as a picture. Its data is below.</p>
+          <p class="note">This chart couldn't be included as a picture{% if item.chart_error %} ({{ item.chart_error }}){% endif %}. Its data is below.</p>
           {% endif %}
 
           {# A picture the user put on this block — an Excel chart or pivot they

@@ -31,7 +31,35 @@ class TestClassifyOutput:
         ["Why did sales drop", "Explain the variance", "Summary of payroll", "Summarise this", "Any insights"],
     )
     def test_commentary_keywords_ask_for_commentary(self, question):
-        assert routing.classify_output(question, MANY_ROWS) == {routing.OUTPUT_COMMENTARY}
+        """With nothing to tabulate, a commentary word gets a sentence and nothing else."""
+        assert routing.classify_output(question, SINGLE_VALUE) == {routing.OUTPUT_COMMENTARY}
+
+    @pytest.mark.parametrize(
+        "question",
+        ["Summary of remaining amount in rs by aging", "Any insights on payroll", "Explain the variance"],
+    )
+    def test_commentary_keywords_still_show_the_rows_behind_the_answer(self, question):
+        """"Summary of X by Y" asks for a sentence *about a table*. Matching a commentary
+        word used to return before the shape of the result got a say, so the numbers the
+        sentence described were dropped."""
+        assert routing.classify_output(question, MANY_ROWS) == {
+            routing.OUTPUT_DATAFRAME,
+            routing.OUTPUT_COMMENTARY,
+        }
+
+    def test_a_commentary_question_with_no_rows_stays_commentary_only(self):
+        assert routing.classify_output("Summary of payroll", None) == {routing.OUTPUT_COMMENTARY}
+        assert routing.classify_output("Summary of payroll", MANY_ROWS.head(0)) == {
+            routing.OUTPUT_COMMENTARY
+        }
+
+    def test_a_chart_question_is_not_given_a_table_as_well(self):
+        """Only a *bare* commentary question gains the table: a question that named the
+        output it wanted already said so."""
+        assert routing.classify_output("Summarise this in a chart", MANY_ROWS) == {
+            routing.OUTPUT_CHART,
+            routing.OUTPUT_COMMENTARY,
+        }
 
     @pytest.mark.parametrize("question", ["Give me all of it", "Show everything", "Full breakdown please"])
     def test_all_keywords_ask_for_all_three(self, question):

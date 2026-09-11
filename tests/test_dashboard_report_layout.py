@@ -23,7 +23,7 @@ FAKE_PNG = b"\x89PNG\r\n\x1a\nfake-bytes"
 
 @pytest.fixture(autouse=True)
 def no_real_rasterizing(monkeypatch):
-    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: FAKE_PNG)
+    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: (FAKE_PNG, ""))
 
 
 @pytest.fixture

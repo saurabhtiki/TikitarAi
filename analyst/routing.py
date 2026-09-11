@@ -66,7 +66,8 @@ def classify_output(question: str, frame: pd.DataFrame | None) -> set[str]:
     """Returns the output types a question and its result call for (requirement 6.2).
 
     The keyword rows are additive — "show me a table and a chart" yields both — and the
-    two defaults at the bottom of 6.2's table apply only when no keyword matched at all.
+    two defaults at the bottom of 6.2's table apply when no keyword matched at all, plus
+    the one case below where a commentary word alone would otherwise hide the rows.
 
     Args:
         question: what the user typed.
@@ -86,20 +87,35 @@ def classify_output(question: str, frame: pd.DataFrame | None) -> set[str]:
         outputs.add(OUTPUT_COMMENTARY)
 
     if outputs:
+        # "Summary of remaining amount by aging" asks for a sentence, but the rows behind
+        # that sentence *are* the answer — and a commentary word on its own used to
+        # suppress them, because matching any keyword returned before the shape of the
+        # result got a say. A question that also named a chart or a table is left alone:
+        # it already said which outputs it wanted.
+        if outputs == {OUTPUT_COMMENTARY} and has_table_shape(frame):
+            outputs.add(OUTPUT_DATAFRAME)
         return outputs
 
     # No keyword: the shape of the answer decides. A single value reads as a sentence; a
     # table of rows reads as a table, with a sentence to say what it shows.
-    if frame is None or frame.empty:
-        return {OUTPUT_COMMENTARY}
-    if is_single_value(frame):
-        return {OUTPUT_COMMENTARY}
-    return {OUTPUT_DATAFRAME, OUTPUT_COMMENTARY}
+    if has_table_shape(frame):
+        return {OUTPUT_DATAFRAME, OUTPUT_COMMENTARY}
+    return {OUTPUT_COMMENTARY}
 
 
 def is_single_value(frame: pd.DataFrame | None) -> bool:
     """True when a result is one cell — the "single value" row of requirement 6.2."""
     return frame is not None and frame.shape == (1, 1)
+
+
+def has_table_shape(frame: pd.DataFrame | None) -> bool:
+    """True when a result is worth showing as a table rather than saying in a sentence.
+
+    Nothing to show and a lone number are both sentences; anything else is a table. One
+    definition, used by both the commentary branch above and the no-keyword default, so
+    the two can never disagree about what counts as data.
+    """
+    return frame is not None and not frame.empty and not is_single_value(frame)
 
 
 def looks_like_column_action(message: str) -> str | None:

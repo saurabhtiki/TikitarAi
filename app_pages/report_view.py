@@ -1474,7 +1474,35 @@ def _build_exports(report: Report, css: str) -> tuple[str | None, bytes | None]:
             st.error(str(error), icon=":material/error:")
             workbook = None
 
+    _warn_about_missing_chart_pictures(report)
     return html, workbook
+
+
+def _warn_about_missing_chart_pictures(report: Report) -> None:
+    """Names any chart the exports had to leave out, and why.
+
+    Building the exports is the moment every chart is turned into a picture, so it is also
+    the moment any failure to do so becomes known. Saying it here rather than only inside
+    the downloaded file is the difference between a user who can fix the cause and one who
+    finds a line of apology in a report they have already sent on.
+    """
+    failed = [
+        (number, item)
+        for section in walk(report)
+        for subsection in section.subsections
+        for number, item in subsection.numbered()
+        if item.has_chart() and item.png_error
+    ]
+    if not failed:
+        return
+
+    st.warning(
+        f"{len(failed)} chart(s) couldn't be saved as pictures, so the report prints their "
+        "tables instead. Everything else downloads normally.",
+        icon=":material/image_not_supported:",
+    )
+    for number, item in failed:
+        st.markdown(f"- **{number} {item.display_heading()}** — {item.png_error}")
 
 
 def _render_html_preview(html: str | None) -> None:

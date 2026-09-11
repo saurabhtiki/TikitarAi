@@ -37,7 +37,7 @@ FAKE_PNG = base64.b64decode(
 @pytest.fixture(autouse=True)
 def no_real_rasterizing(monkeypatch):
     """Rasterizing launches a headless browser; the workbook only needs *some* bytes."""
-    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: FAKE_PNG)
+    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: (FAKE_PNG, ""))
 
 
 @pytest.fixture
@@ -204,12 +204,13 @@ def test_a_chart_is_embedded_as_a_picture(frame):
 
 
 def test_a_chart_that_could_not_be_drawn_leaves_a_note_instead(monkeypatch, frame):
-    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: None)
+    monkeypatch.setattr(images, "figure_to_png", lambda figure, **kwargs: (None, "no browser found"))
     report = _one_item_report(frame, figure=object())
     sheet = load_workbook(io.BytesIO(build_report_workbook(report)))["1.1 General"]
     text = "\n".join(str(cell.value) for row in sheet.iter_rows() for cell in row if cell.value is not None)
 
     assert "couldn't be included as a picture" in text
+    assert "no browser found" in text
     assert "North" in text
 
 

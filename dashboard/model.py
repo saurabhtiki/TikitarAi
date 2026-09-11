@@ -148,6 +148,10 @@ class PinnedItem:
         outputs: which of requirement 6.2's output types this item renders.
         png: the rasterized chart, cached after the first export so HTML and Excel
             downloads of the same report don't rasterize it twice.
+        png_error: why `png` is missing, when drawing the chart failed. Empty when the
+            chart drew, and when it was never attempted. Cached alongside `png` so a
+            chart that cannot be drawn is not retried on every rerun, and printed in the
+            report so the notice under a missing chart says what went wrong.
         source_id: what produced this item, for things that own their report item and
             re-save it — a criteria in `checks/` (requirement 6.5). None for anything
             pinned from the chat, where each pin is its own one-off snapshot.
@@ -180,6 +184,7 @@ class PinnedItem:
     figure: Any = None
     outputs: set[str] = field(default_factory=set)
     png: bytes | None = None
+    png_error: str = ""
     source_id: str | None = None
     column_with_previous: bool = False
     kind: str = KIND_RESULT

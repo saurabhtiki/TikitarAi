@@ -122,7 +122,9 @@ def _render_item(number: str, item) -> dict:
 
     `chart_failed` distinguishes "this item never had a chart" from "this item had one and
     it couldn't be rasterized" — the second earns a line of explanation next to the table
-    that replaced it, the first should say nothing at all.
+    that replaced it, the first should say nothing at all. `chart_error` says *why*, so
+    that line is something a reader can act on; it is escaped by the template like any
+    other text, since it originates in an exception message.
     """
     png = item_png(item)
     return {
@@ -133,6 +135,7 @@ def _render_item(number: str, item) -> dict:
         "comment": sanitize_comment(item.comment),
         "image": base64.b64encode(png).decode("ascii") if png else "",
         "chart_failed": item.has_chart() and png is None,
+        "chart_error": item.png_error,
         "table": frame_to_html(item.frame) if item.has_table() else "",
         "table_note": _table_note(item.frame) if item.has_table() else "",
         # A picture the user put on a block, as its own `data:` URI — kept apart from

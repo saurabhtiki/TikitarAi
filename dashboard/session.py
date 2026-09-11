@@ -175,6 +175,7 @@ def pin_result(
         existing.figure = figure
         existing.outputs = set(outputs or set())
         existing.png = None
+        existing.png_error = ""
         logger.info("Updated dashboard item %s from source %s.", existing.item_id, source_id)
         return existing
 
@@ -221,8 +222,11 @@ def pin_imported(
         existing.frame = copied
         existing.figure = figure
         existing.outputs = set(outputs or set())
-        # A cache of the *previous* figure, for the reason `pin_result` gives.
+        # A cache of the *previous* figure, for the reason `pin_result` gives. The error
+        # beside it goes too, so a new chart gets a fresh attempt rather than inheriting
+        # the last one's verdict.
         existing.png = None
+        existing.png_error = ""
         if not existing.heading.strip():
             existing.heading = heading
         logger.info("Refreshed imported item %s from source %s.", existing.item_id, source_id)

@@ -8,10 +8,15 @@ embedded, as a base64 `<img>` in the HTML and as a real picture in the workbook.
 The one rule this module exists to enforce: **an export never fails because a chart could
 not be drawn.** Rasterizing needs `kaleido`, which shells out to a headless Chromium and
 can fail for reasons that have nothing to do with the report — a locked-down machine, a
-missing browser, a figure with a font it can't resolve. So `figure_to_png` returns None on
-any failure and every caller treats None as "no image": the HTML writes the item's data
+missing browser, a figure with a font it can't resolve. So `figure_to_png` returns no image
+on any failure and every caller treats that as "no image": the HTML writes the item's data
 table plus a plain notice, the workbook writes the table without the picture. Losing a
 picture is a much smaller failure than losing the report.
+
+What it does *not* do any more is lose the reason. It comes back beside the missing image
+and is carried to the two places that can act on it — the notice in the report, and a
+warning on screen the moment a chart is pinned — because "this chart couldn't be included
+as a picture", on its own, tells the one person who could fix it nothing at all.
 
 The second thing it does is re-lay-out the figure before rendering it. A chart drawn for
 the app is drawn for a browser that resizes its margins to fit the axis labels and for a
@@ -51,6 +56,10 @@ EXPORT_MARGIN = {"l": 70, "r": 30, "t": 60, "b": 80}
 EXPORT_PAPER = "#ffffff"
 EXPORT_FONT_COLOUR = "#1f2933"
 
+# How much of a failure's first line survives into the report. Long enough for "Chrome
+# executable not found", short enough that the notice stays one line under the chart.
+_REASON_CHARS = 200
+
 
 def _prepared_for_export(figure: Any) -> Any:
     """A copy of the figure laid out for a fixed-size white page.
@@ -83,8 +92,8 @@ def _prepared_for_export(figure: Any) -> Any:
 
 def figure_to_png(
     figure: Any, *, width: int = PNG_WIDTH, height: int = PNG_HEIGHT, scale: int = PNG_SCALE
-) -> bytes | None:
-    """Rasterizes a Plotly figure, or returns None if it can't be.
+) -> tuple[bytes | None, str]:
+    """Rasterizes a Plotly figure. Returns `(png, "")`, or `(None, why it failed)`.
 
     Never raises. `except Exception` is deliberate and is the one place in this codebase
     it is right: the failure surface is a subprocess launching a browser, and the
@@ -93,22 +102,42 @@ def figure_to_png(
     nobody anticipated — the exact outcome this function exists to prevent. It covers the
     layout copy above for the same reason: a figure that can't be copied is a chart to skip,
     not a report to lose.
+
+    The *reason* is returned rather than only logged, which it used to be. Swallowing it
+    meant the report said "this chart couldn't be included as a picture" and nothing else,
+    on a machine where the only record of why was a stack trace in whichever terminal
+    happened to be running the app. Whatever this call is unhappy about — no browser to
+    drive, a browser that won't start, a font it can't resolve — the person looking at the
+    report is the person who can act on it, so they are told.
     """
     if figure is None:
-        return None
+        return None, ""
 
     try:
         image = _prepared_for_export(figure).to_image(
             format="png", width=width, height=height, scale=scale
         )
-    except Exception:
+    except Exception as error:
         logger.exception("Could not rasterize a chart for export; the export will carry its table instead.")
-        return None
+        return None, _reason(error)
 
     if not image:
         logger.warning("Chart rasterization returned no bytes; the export will carry its table instead.")
-        return None
-    return bytes(image)
+        return None, "the chart renderer returned an empty picture"
+    return bytes(image), ""
+
+
+def _reason(error: Exception) -> str:
+    """One short line naming what went wrong, safe to print in a report.
+
+    Kaleido's messages run to several paragraphs of install advice, so only the first line
+    is kept — enough to tell a missing browser from a broken figure without turning the
+    notice under a chart into a page of its own. The class name is the fallback for an
+    exception that carries no message at all, which would otherwise print as "()".
+    """
+    text = str(error).strip().splitlines()
+    first_line = text[0].strip() if text else ""
+    return first_line[:_REASON_CHARS] or type(error).__name__
 
 
 def item_png(item: Any) -> bytes | None:
@@ -118,9 +147,15 @@ def item_png(item: Any) -> bytes | None:
     slowest thing either export does — so the second download of the same report reuses
     the pictures the first one made. The cache is dropped whenever the item's chart is
     replaced, because `dashboard.session.pin` builds a fresh `PinnedItem` each time.
+
+    **A failure is cached too**, in `item.png_error`. Rasterizing drives a whole browser,
+    and a chart that cannot be drawn cannot usually be drawn a moment later either — so
+    retrying it on every rerun and every export, which is what caching only the successes
+    did, spent seconds per item to arrive at the same answer. `dashboard.session` clears
+    both fields together whenever an item's chart is replaced.
     """
     if item.figure is None:
         return None
-    if item.png is None:
-        item.png = figure_to_png(item.figure)
+    if item.png is None and not item.png_error:
+        item.png, item.png_error = figure_to_png(item.figure)
     return item.png
