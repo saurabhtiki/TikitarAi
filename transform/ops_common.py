@@ -145,7 +145,19 @@ def to_datetime(series: pd.Series, column: str) -> tuple[pd.Series, list[str]]:
     if pd.api.types.is_datetime64_any_dtype(series):
         return series, []
 
-    converted = pd.to_datetime(series, errors="coerce", dayfirst=True, format="mixed")
+    # ISO dates (2026-09-03) are unambiguous, but pandas' per-row "mixed" format
+    # guesser can still flip day/month on them when dayfirst=True is set — e.g.
+    # reading 2026-09-03 as 9 March instead of 3 September. Parse ISO strings on
+    # their own first, so only genuinely ambiguous formats (03/04/2025) go through
+    # the dayfirst guesser.
+    converted = pd.to_datetime(series, errors="coerce", format="ISO8601")
+    still_needed = converted.isna() & series.notna() & ~blank_mask(series)
+    if still_needed.any():
+        converted = converted.copy()
+        converted[still_needed] = pd.to_datetime(
+            series[still_needed], errors="coerce", dayfirst=True, format="mixed"
+        )
+
     failed = converted.isna() & series.notna() & ~blank_mask(series)
     if not failed.any():
         return converted, []

@@ -19,16 +19,30 @@ from transform.ops_aggregate import (
 from transform.ops_columns import (
     apply_change_dtype,
     apply_drop_columns,
+    apply_extract_by_position,
     apply_rename_column,
     apply_split_column,
+    validate_extract_by_position,
 )
 from transform.ops_combine import apply_concat, apply_lookup, apply_merge
 from transform.ops_derive import (
+    apply_absolute_value,
     apply_add_calculated_column,
     apply_add_conditional_column,
+    apply_add_today_date,
     apply_bucket_numeric,
     apply_date_difference,
     apply_extract_date_part,
+    apply_month_edge,
+    apply_row_min_max,
+    apply_row_percentage_of_total,
+    apply_shift_date,
+    validate_absolute_value,
+    validate_add_calculated_column,
+    validate_month_edge,
+    validate_row_min_max,
+    validate_row_percentage_of_total,
+    validate_shift_date,
 )
 from transform.ops_rows import (
     apply_drop_duplicates,
@@ -111,6 +125,21 @@ EXECUTOR_CASES = [
     ),
     ("rank_within_group", apply_rank_within_group, {"order_by": "amount"}),
     ("running_total", apply_running_total, {"value_column": "amount"}),
+    ("add_today_date", apply_add_today_date, {"new_column": "Loaded_On"}),
+    ("shift_date", apply_shift_date, {"column": "sold_on", "days": 30}),
+    ("month_edge", apply_month_edge, {"column": "sold_on", "edge": "end of month"}),
+    ("row_percentage_of_total", apply_row_percentage_of_total, {"column": "amount"}),
+    ("absolute_value", apply_absolute_value, {"column": "amount"}),
+    (
+        "row_min_max",
+        apply_row_min_max,
+        {"columns": ["customer_id", "amount"], "which": "largest"},
+    ),
+    (
+        "extract_by_position",
+        apply_extract_by_position,
+        {"column": "region", "start": 1, "length": 3},
+    ),
 ]
 
 
@@ -446,6 +475,48 @@ class TestCalculatedColumns:
         assert "amount_2" in result.columns
         assert any("already existed" in warning for warning in warnings_out)
 
+    def test_a_formula_can_choose_between_two_numbers(self, sales):
+        result, _ = apply_add_calculated_column(
+            {"source": sales},
+            {
+                "new_column": "payable",
+                "expression": "amount * 0.9 if amount > 200 else amount",
+            },
+        )
+        assert result["payable"].tolist() == [100.0, 200.0, 270.0, 360.0]
+
+    def test_a_chosen_answer_is_rounded_like_any_other(self, sales):
+        result, _ = apply_add_calculated_column(
+            {"source": sales},
+            {
+                "new_column": "share",
+                "expression": "amount / 3 if amount > 200 else 0",
+                "decimals": 2,
+            },
+        )
+        assert result["share"].tolist() == [0.0, 0.0, 100.0, 133.33]
+
+    def test_a_chosen_answer_still_gets_a_suffix_when_the_name_is_taken(self, sales):
+        result, warnings_out = apply_add_calculated_column(
+            {"source": sales},
+            {"new_column": "amount", "expression": "1 if amount > 200 else 0"},
+        )
+        assert result["amount_2"].tolist() == [0.0, 0.0, 1.0, 1.0]
+        assert any("already existed" in warning for warning in warnings_out)
+
+    def test_a_formula_that_is_only_a_test_becomes_a_one_or_zero_flag(self, sales):
+        result, _ = apply_add_calculated_column(
+            {"source": sales}, {"new_column": "big", "expression": "amount > 200"}
+        )
+        assert result["big"].tolist() == [0.0, 0.0, 1.0, 1.0]
+
+    def test_a_formula_with_an_if_but_no_else_is_refused_before_it_runs(self, sales):
+        with pytest.raises(InvalidStepParamsError, match="'if' but no 'else'"):
+            validate_add_calculated_column(
+                {"source": list(sales.columns)},
+                {"new_column": "payable", "expression": "amount * 0.9 if amount > 200"},
+            )
+
     def test_an_if_else_column_picks_between_two_fixed_values(self, sales):
         result, _ = apply_add_conditional_column(
             {"source": sales},
@@ -473,6 +544,23 @@ class TestCalculatedColumns:
             },
         )
         assert result["discount"].tolist() == [10.0, 10.0, 30.0, 20.0]
+
+    def test_an_if_else_answer_that_is_just_a_column_keeps_its_text(self, sales):
+        """A bare column name is how a conditional update carries an untouched column's
+        text forward. Running it through the arithmetic formula evaluator would turn
+        `region` into blanks, since 'North' and 'South' aren't numbers."""
+        result, _ = apply_add_conditional_column(
+            {"source": sales},
+            {
+                "new_column": "region_updated",
+                "column": "amount",
+                "comparison": "is less than",
+                "value": "150",
+                "result_if_true": "West",
+                "result_if_false": "region",
+            },
+        )
+        assert result["region_updated"].tolist() == ["West", "South", "North", "East"]
 
 
 class TestBucketNumeric:
@@ -719,3 +807,297 @@ class TestColumnOperations:
         frame = pd.DataFrame({"code": ["a.b"]})
         result, _ = apply_split_column({"source": frame}, {"column": "code", "separator": "."})
         assert result["code_1"].tolist() == ["a"]
+
+
+# --------------------------------------------------------------------------------------
+# Phase 30 - finance helpers
+# --------------------------------------------------------------------------------------
+
+
+class TestTodaysDate:
+    def test_every_row_gets_the_same_date(self, sales):
+        result, warnings_out = apply_add_today_date({"source": sales}, {"new_column": "Loaded_On"})
+        expected = pd.Timestamp.today().normalize()
+        assert result["Loaded_On"].tolist() == [expected] * len(sales)
+        assert warnings_out == []
+
+    def test_the_time_of_day_is_dropped_so_it_is_a_plain_date(self, sales):
+        result, _ = apply_add_today_date({"source": sales}, {})
+        stamped = result["today"].iloc[0]
+        assert (stamped.hour, stamped.minute, stamped.second) == (0, 0, 0)
+
+    def test_a_name_already_in_use_does_not_overwrite_it(self, sales):
+        result, _ = apply_add_today_date({"source": sales}, {"new_column": "region"})
+        assert result["region"].tolist() == sales["region"].tolist()
+        assert "region_2" in result.columns
+
+    def test_an_empty_table_gets_the_column_anyway(self):
+        frame = pd.DataFrame({"amount": pd.Series([], dtype="object")})
+        result, _ = apply_add_today_date({"source": frame}, {"new_column": "as_at"})
+        assert list(result.columns) == ["amount", "as_at"]
+        assert len(result) == 0
+
+
+class TestShiftDate:
+    def test_thirty_days_later_is_the_due_date(self):
+        frame = pd.DataFrame({"invoice_date": ["01/04/2025"]})
+        result, _ = apply_shift_date(
+            {"source": frame}, {"column": "invoice_date", "days": 30, "new_column": "due_date"}
+        )
+        assert result["due_date"].tolist() == [pd.Timestamp("2025-05-01")]
+
+    def test_a_minus_number_moves_the_date_earlier(self):
+        frame = pd.DataFrame({"due_date": ["01/04/2025"]})
+        result, _ = apply_shift_date(
+            {"source": frame}, {"column": "due_date", "days": -7, "new_column": "remind_on"}
+        )
+        assert result["remind_on"].tolist() == [pd.Timestamp("2025-03-25")]
+
+    def test_the_default_name_says_which_way_it_moved(self):
+        frame = pd.DataFrame({"invoice_date": ["01/04/2025"]})
+        result, _ = apply_shift_date({"source": frame}, {"column": "invoice_date", "days": -7})
+        assert "invoice_date minus 7 days" in result.columns
+
+    def test_a_value_that_isnt_a_date_becomes_blank_and_is_reported(self):
+        frame = pd.DataFrame({"invoice_date": ["01/04/2025", "not a date"]})
+        result, warnings_out = apply_shift_date(
+            {"source": frame}, {"column": "invoice_date", "days": 30, "new_column": "due_date"}
+        )
+        assert pd.isna(result["due_date"].iloc[1])
+        assert any("couldn't be read as a date" in warning for warning in warnings_out)
+
+    def test_a_day_count_that_isnt_a_number_is_refused(self, sales):
+        with pytest.raises(InvalidStepParamsError, match="whole number"):
+            apply_shift_date({"source": sales}, {"column": "sold_on", "days": "a month"})
+
+    def test_validate_catches_a_bad_day_count_before_the_step_is_added(self):
+        with pytest.raises(InvalidStepParamsError, match="whole number"):
+            validate_shift_date({"source": ["sold_on"]}, {"column": "sold_on", "days": "soon"})
+
+    def test_validate_insists_on_a_column(self):
+        with pytest.raises(InvalidStepParamsError, match="date column"):
+            validate_shift_date({"source": ["sold_on"]}, {"days": 30})
+
+    def test_a_day_count_beyond_a_century_is_refused_in_words_a_user_can_act_on(self, sales):
+        with pytest.raises(InvalidStepParamsError, match="at most 36,500 days"):
+            apply_shift_date({"source": sales}, {"column": "sold_on", "days": 99_999_999})
+
+
+class TestMonthEdge:
+    def test_the_start_of_the_month_is_the_first(self, sales):
+        result, _ = apply_month_edge(
+            {"source": sales}, {"column": "sold_on", "edge": "start of month", "new_column": "month"}
+        )
+        assert result["month"].tolist() == [
+            pd.Timestamp("2025-04-01"),
+            pd.Timestamp("2025-06-01"),
+            pd.Timestamp("2026-01-01"),
+            pd.Timestamp("2026-03-01"),
+        ]
+
+    def test_the_end_of_the_month_knows_how_long_each_month_is(self):
+        frame = pd.DataFrame({"sold_on": ["05/02/2024", "05/02/2026", "10/04/2026"]})
+        result, _ = apply_month_edge(
+            {"source": frame}, {"column": "sold_on", "edge": "end of month", "new_column": "month_end"}
+        )
+        assert result["month_end"].tolist() == [
+            pd.Timestamp("2024-02-29"),
+            pd.Timestamp("2026-02-28"),
+            pd.Timestamp("2026-04-30"),
+        ]
+
+    def test_a_date_already_on_the_last_day_stays_where_it_is(self):
+        frame = pd.DataFrame({"sold_on": ["31/03/2026"]})
+        result, _ = apply_month_edge(
+            {"source": frame}, {"column": "sold_on", "edge": "end of month", "new_column": "month_end"}
+        )
+        assert result["month_end"].tolist() == [pd.Timestamp("2026-03-31")]
+
+    def test_an_edge_the_step_doesnt_know_is_refused(self, sales):
+        with pytest.raises(InvalidStepParamsError, match="isn't a choice"):
+            apply_month_edge({"source": sales}, {"column": "sold_on", "edge": "middle of month"})
+
+    def test_validate_catches_an_unknown_edge(self):
+        with pytest.raises(InvalidStepParamsError, match="isn't a choice"):
+            validate_month_edge({"source": ["sold_on"]}, {"column": "sold_on", "edge": "someday"})
+
+
+class TestPercentageOfTotal:
+    def test_each_row_gets_its_share_and_the_column_adds_to_a_hundred(self, sales):
+        result, _ = apply_row_percentage_of_total({"source": sales}, {"column": "amount"})
+        shares = result["amount % of total"]
+        assert shares.tolist() == [10.0, 20.0, 30.0, 40.0]
+        assert round(shares.sum(), 6) == 100.0
+
+    def test_the_answer_is_rounded_to_the_places_asked_for(self):
+        frame = pd.DataFrame({"amount": ["1", "2", "0"]})
+        result, _ = apply_row_percentage_of_total(
+            {"source": frame}, {"column": "amount", "decimals": 1}
+        )
+        assert result["amount % of total"].tolist() == [33.3, 66.7, 0.0]
+
+    def test_a_column_adding_up_to_zero_gives_blanks_not_an_error(self):
+        frame = pd.DataFrame({"amount": ["100", "-100"]})
+        result, warnings_out = apply_row_percentage_of_total({"source": frame}, {"column": "amount"})
+        assert result["amount % of total"].isna().all()
+        assert any("adds up to zero" in warning for warning in warnings_out)
+
+    def test_values_that_arent_numbers_become_blank_and_are_reported(self):
+        frame = pd.DataFrame({"amount": ["100", "n/a", "300"]})
+        result, warnings_out = apply_row_percentage_of_total({"source": frame}, {"column": "amount"})
+        assert pd.isna(result["amount % of total"].iloc[1])
+        assert any("couldn't be read as a number" in warning for warning in warnings_out)
+
+    def test_validate_insists_on_a_column(self):
+        with pytest.raises(InvalidStepParamsError, match="number column"):
+            validate_row_percentage_of_total({"source": ["amount"]}, {})
+
+    def test_validate_catches_decimal_places_that_arent_a_number(self):
+        with pytest.raises(InvalidStepParamsError, match="whole number"):
+            validate_row_percentage_of_total(
+                {"source": ["amount"]}, {"column": "amount", "decimals": "a few"}
+            )
+
+
+class TestAbsoluteValue:
+    def test_the_minus_sign_goes_in_place(self):
+        frame = pd.DataFrame({"amount": ["-500", "300"]})
+        result, _ = apply_absolute_value({"source": frame}, {"column": "amount"})
+        assert result["amount"].tolist() == [500.0, 300.0]
+        assert list(result.columns) == ["amount"]
+
+    def test_an_accounting_negative_in_brackets_is_understood_too(self):
+        frame = pd.DataFrame({"amount": ["(500)"]})
+        result, _ = apply_absolute_value({"source": frame}, {"column": "amount"})
+        assert result["amount"].tolist() == [500.0]
+
+    def test_the_answer_can_go_in_a_new_column_instead(self):
+        frame = pd.DataFrame({"amount": ["-500"]})
+        result, _ = apply_absolute_value(
+            {"source": frame},
+            {"column": "amount", "mode": "add a new column", "new_column": "size"},
+        )
+        assert result["amount"].tolist() == ["-500"]
+        assert result["size"].tolist() == [500.0]
+
+    def test_a_value_that_isnt_a_number_becomes_blank_and_is_reported(self):
+        frame = pd.DataFrame({"amount": ["-500", "credit"]})
+        result, warnings_out = apply_absolute_value({"source": frame}, {"column": "amount"})
+        assert pd.isna(result["amount"].iloc[1])
+        assert any("couldn't be read as a number" in warning for warning in warnings_out)
+
+    def test_validate_catches_a_mode_the_step_doesnt_know(self):
+        with pytest.raises(InvalidStepParamsError, match="isn't a choice"):
+            validate_absolute_value({"source": ["amount"]}, {"column": "amount", "mode": "sideways"})
+
+
+class TestRowMinMax:
+    def test_the_largest_of_two_columns_is_taken_row_by_row(self):
+        frame = pd.DataFrame({"budget": ["100", "500"], "actual": ["150", "400"]})
+        result, _ = apply_row_min_max(
+            {"source": frame},
+            {"columns": ["budget", "actual"], "which": "largest", "new_column": "worst_case"},
+        )
+        assert result["worst_case"].tolist() == [150.0, 500.0]
+
+    def test_the_smallest_can_be_taken_instead(self):
+        frame = pd.DataFrame({"budget": ["100", "500"], "actual": ["150", "400"]})
+        result, _ = apply_row_min_max(
+            {"source": frame},
+            {"columns": ["budget", "actual"], "which": "smallest", "new_column": "best_case"},
+        )
+        assert result["best_case"].tolist() == [100.0, 400.0]
+
+    def test_more_than_two_columns_can_be_compared(self):
+        frame = pd.DataFrame({"q1": ["10"], "q2": ["40"], "q3": ["20"]})
+        result, _ = apply_row_min_max(
+            {"source": frame}, {"columns": ["q1", "q2", "q3"], "which": "largest"}
+        )
+        assert result["largest of the columns"].tolist() == [40.0]
+
+    def test_a_row_with_a_number_in_only_one_column_still_answers(self):
+        frame = pd.DataFrame({"budget": ["100", "x"], "actual": ["y", "400"]})
+        result, _ = apply_row_min_max(
+            {"source": frame}, {"columns": ["budget", "actual"], "which": "largest"}
+        )
+        assert result["largest of the columns"].tolist() == [100.0, 400.0]
+
+    def test_a_row_with_no_numbers_at_all_comes_out_blank_and_is_reported(self):
+        frame = pd.DataFrame({"budget": ["x"], "actual": ["y"]})
+        result, warnings_out = apply_row_min_max(
+            {"source": frame}, {"columns": ["budget", "actual"], "which": "largest"}
+        )
+        assert result["largest of the columns"].isna().all()
+        assert any("no number in any of those columns" in warning for warning in warnings_out)
+
+    def test_one_column_on_its_own_is_refused_because_there_is_nothing_to_compare(self):
+        frame = pd.DataFrame({"budget": ["100"]})
+        with pytest.raises(InvalidStepParamsError, match="at least two columns"):
+            apply_row_min_max({"source": frame}, {"columns": ["budget"], "which": "largest"})
+
+    def test_validate_catches_one_column_before_the_step_is_added(self):
+        with pytest.raises(InvalidStepParamsError, match="at least two columns"):
+            validate_row_min_max({"source": ["budget"]}, {"columns": ["budget"], "which": "largest"})
+
+    def test_validate_catches_a_choice_the_step_doesnt_know(self):
+        with pytest.raises(InvalidStepParamsError, match="isn't a choice"):
+            validate_row_min_max(
+                {"source": ["budget", "actual"]},
+                {"columns": ["budget", "actual"], "which": "middling"},
+            )
+
+
+class TestExtractByPosition:
+    def test_the_first_three_characters_of_a_code_come_out(self):
+        frame = pd.DataFrame({"invoice_no": ["INV000123", "CRN000456"]})
+        result, _ = apply_extract_by_position(
+            {"source": frame},
+            {"column": "invoice_no", "start": 1, "length": 3, "new_column": "doc_type"},
+        )
+        assert result["doc_type"].tolist() == ["INV", "CRN"]
+
+    def test_a_run_from_the_middle_can_be_taken(self):
+        frame = pd.DataFrame({"invoice_no": ["INV2526000123"]})
+        result, _ = apply_extract_by_position(
+            {"source": frame},
+            {"column": "invoice_no", "start": 4, "length": 4, "new_column": "year_code"},
+        )
+        assert result["year_code"].tolist() == ["2526"]
+
+    def test_the_default_name_says_which_characters_were_taken(self):
+        frame = pd.DataFrame({"invoice_no": ["INV000123"]})
+        result, _ = apply_extract_by_position(
+            {"source": frame}, {"column": "invoice_no", "start": 1, "length": 3}
+        )
+        assert "invoice_no 1-3" in result.columns
+
+    def test_a_length_running_past_the_end_takes_what_is_there(self):
+        frame = pd.DataFrame({"code": ["AB"]})
+        result, _ = apply_extract_by_position(
+            {"source": frame}, {"column": "code", "start": 1, "length": 5, "new_column": "piece"}
+        )
+        assert result["piece"].tolist() == ["AB"]
+
+    def test_a_value_shorter_than_the_start_comes_out_blank_and_is_reported(self):
+        frame = pd.DataFrame({"code": ["INV000123", "AB"]})
+        result, warnings_out = apply_extract_by_position(
+            {"source": frame}, {"column": "code", "start": 4, "length": 3, "new_column": "piece"}
+        )
+        assert result["piece"].tolist()[0] == "000"
+        assert pd.isna(result["piece"].iloc[1])
+        assert any("shorter than 4 character" in warning for warning in warnings_out)
+
+    def test_counting_from_zero_is_refused_rather_than_quietly_shifted(self):
+        frame = pd.DataFrame({"code": ["INV000123"]})
+        with pytest.raises(InvalidStepParamsError, match="starts at 1"):
+            apply_extract_by_position({"source": frame}, {"column": "code", "start": 0, "length": 3})
+
+    def test_validate_catches_a_position_that_isnt_a_number(self):
+        with pytest.raises(InvalidStepParamsError, match="whole number"):
+            validate_extract_by_position(
+                {"source": ["code"]}, {"column": "code", "start": "first", "length": 3}
+            )
+
+    def test_validate_insists_on_a_column(self):
+        with pytest.raises(InvalidStepParamsError, match="codes"):
+            validate_extract_by_position({"source": ["code"]}, {"start": 1, "length": 3})

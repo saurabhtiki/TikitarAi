@@ -68,6 +68,15 @@ TF_PIPELINE_DIALOG_KEY = "tf_pipeline_dialog"
 # exactly as it wrote them. Any edit of the step list clears it — see `set_steps`.
 TF_STEPS_SOURCE_KEY = "tf_steps_from_pipeline"
 
+# Plain English step entry. What the user typed, and what came back from the Light Model,
+# held across the reruns the dialog's own widgets cause. Every one starts `tf_ai_` so
+# `close_dialog` can forget the whole conversation in one sweep — a stale parse reappearing
+# under a freshly typed instruction would be worse than no parse at all.
+TF_AI_INSTRUCTION_KEY = "tf_ai_instruction"
+TF_AI_STEPS_KEY = "tf_ai_steps"
+TF_AI_WARNINGS_KEY = "tf_ai_warnings"
+TF_AI_CLARIFICATION_KEY = "tf_ai_clarification"
+
 MAX_UPLOAD_SIZE_MB = 50
 
 #: What a table's tab shows. The download always carries every row — the same rule phase 16
@@ -397,15 +406,50 @@ def open_dialog(mode: str) -> None:
 
 
 def close_dialog() -> None:
-    """Dismisses the dialog and forgets the form it held."""
+    """Dismisses the dialog and forgets the form — or the parse — it held."""
     st.session_state.pop(TF_DIALOG_KEY, None)
-    for key in [key for key in st.session_state if str(key).startswith("tf_form_")]:
+    for key in [
+        key
+        for key in st.session_state
+        if str(key).startswith("tf_form_") or str(key).startswith("tf_ai_")
+    ]:
         st.session_state.pop(key, None)
 
 
 def pending_dialog() -> str | None:
-    """`add`, `edit`, or None when no dialog is open."""
+    """`add`, `edit`, `ai_add`, `delete`, or None when no dialog is open."""
     return st.session_state.get(TF_DIALOG_KEY)
+
+
+# --------------------------------------------------------------------------------------
+# Plain English parse results
+# --------------------------------------------------------------------------------------
+
+
+def set_ai_parse(steps: list[TransformStep], warnings: list[str], clarification: str | None) -> None:
+    """Remembers what the Light Model made of the user's sentence."""
+    st.session_state[TF_AI_STEPS_KEY] = steps
+    st.session_state[TF_AI_WARNINGS_KEY] = warnings
+    st.session_state[TF_AI_CLARIFICATION_KEY] = clarification
+
+
+def ai_parse() -> tuple[list[TransformStep], list[str], str | None]:
+    """The last parse, or three empties before anything has been read."""
+    return (
+        st.session_state.get(TF_AI_STEPS_KEY, []),
+        st.session_state.get(TF_AI_WARNINGS_KEY, []),
+        st.session_state.get(TF_AI_CLARIFICATION_KEY),
+    )
+
+
+def clear_ai_parse() -> None:
+    """Throws the last parse away, leaving the typed instruction alone.
+
+    Pressed Read again, or changed the sentence: the old steps must not linger underneath
+    a new one, which is the only way a user could add steps they never saw described.
+    """
+    for key in (TF_AI_STEPS_KEY, TF_AI_WARNINGS_KEY, TF_AI_CLARIFICATION_KEY):
+        st.session_state.pop(key, None)
 
 
 def flash(message: str) -> None:

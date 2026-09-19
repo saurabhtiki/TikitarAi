@@ -16,10 +16,12 @@ from app_pages import saved_picker
 from auth.db import init_db, seed_default_admin
 from cleaner.loaders import list_sheet_names
 from engine import session as engine_session
+from llm import session as llm_session
 from llm.db import init_llm_table
+from transform import ai_parse
 from transform import session
 from transform.db import init_transform_pipelines_table, list_pipelines, load_pipeline
-from transform.pipeline import make_step
+from transform.pipeline import make_step, step_headline
 from transform.registry import get_operation
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -1107,3 +1109,215 @@ class TestColumnDetails:
         filled = dict(zip(stats["column"], stats["non_null"]))
         assert filled["amount"] == session.PREVIEW_ROWS + 25
 
+
+def _bonus_step(column: str = "bonus", expression: str = "amount * 0.12") -> dict:
+    return make_step(
+        "add_calculated_column",
+        {"source": "sales"},
+        {"new_column": column, "expression": expression},
+        "in_place",
+        "sales",
+    )
+
+
+class TestDescribeAStepDialog:
+    """Plain English step entry (requirements section 5, path 2).
+
+    The Light Model is monkeypatched at the page's own import sites, so no test here goes
+    near a provider. What is being checked is the *gate*: nothing reaches the step list
+    that the user has not seen described and pressed Add on.
+    """
+
+    LIGHT = {
+        "profile_id": 9,
+        "nickname": "Light",
+        "default_model": "small-model",
+        "provider_type": "local",
+    }
+
+    def _light(self, monkeypatch, profile):
+        monkeypatch.setattr(llm_session, "light_profile", lambda user_id: profile)
+
+    def _parse(self, monkeypatch, result, recorder=None):
+        def fake_parse(light, instruction, workspace):
+            if recorder is not None:
+                recorder.append(instruction)
+            return result
+
+        monkeypatch.setattr(ai_parse, "parse_instruction", fake_parse)
+
+    def _open(self, tmp_path, monkeypatch, *files):
+        app = _upload_and_load(
+            _make_app(tmp_path, monkeypatch), *(files or (("sales.csv", SALES_CSV),))
+        )
+        app.session_state[session.TF_DIALOG_KEY] = "ai_add"
+        app.run()
+        return app
+
+    def _read(self, app, instruction):
+        app.text_area(key=session.TF_AI_INSTRUCTION_KEY).set_value(instruction).run()
+        app.button(key="tf_ai_parse").click().run()
+        return app
+
+    def test_the_button_sits_next_to_add_a_step(self, tmp_path, monkeypatch):
+        app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        assert app.button(key="tf_ai_add_step") is not None
+        assert app.button(key="tf_add_step") is not None
+
+    def test_it_opens_on_an_instruction_box(self, tmp_path, monkeypatch):
+        self._light(monkeypatch, self.LIGHT)
+        app = self._open(tmp_path, monkeypatch)
+        assert not app.exception
+        assert app.text_area(key=session.TF_AI_INSTRUCTION_KEY) is not None
+
+    def test_with_no_light_model_it_explains_rather_than_offering_a_box(self, tmp_path, monkeypatch):
+        self._light(monkeypatch, None)
+        app = self._open(tmp_path, monkeypatch)
+        assert not app.exception
+        assert any("No Light Model is configured" in warning.value for warning in app.warning)
+        with pytest.raises(KeyError):
+            app.text_area(key=session.TF_AI_INSTRUCTION_KEY)
+
+    def test_with_no_light_model_nothing_is_ever_sent(self, tmp_path, monkeypatch):
+        asked = []
+        self._light(monkeypatch, None)
+        self._parse(monkeypatch, ([], [], None), asked)
+        app = self._open(tmp_path, monkeypatch)
+        app.button(key="tf_ai_close").click().run()
+        assert asked == []
+
+    def test_reading_an_instruction_shows_the_steps_but_adds_nothing_yet(self, tmp_path, monkeypatch):
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([_bonus_step()], [], None))
+        app = self._read(self._open(tmp_path, monkeypatch), "add bonus")
+
+        assert not app.exception
+        assert _steps(app) == []
+        assert app.button(key="tf_ai_commit") is not None
+
+    def test_the_summary_uses_the_same_words_the_step_list_uses(self, tmp_path, monkeypatch):
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([_bonus_step()], [], None))
+        app = self._read(self._open(tmp_path, monkeypatch), "add bonus")
+
+        headline = step_headline(_bonus_step(), 0)
+        assert any(headline in block.value for block in app.markdown)
+
+    def test_what_the_user_typed_is_what_gets_sent(self, tmp_path, monkeypatch):
+        asked = []
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([_bonus_step()], [], None), asked)
+        self._read(self._open(tmp_path, monkeypatch), "add a bonus column")
+        assert asked == ["add a bonus column"]
+
+    def test_pressing_add_puts_the_steps_in_the_list(self, tmp_path, monkeypatch):
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([_bonus_step()], [], None))
+        app = self._read(self._open(tmp_path, monkeypatch), "add bonus")
+        app.button(key="tf_ai_commit").click().run()
+
+        assert not app.exception
+        assert [step["operation"] for step in _steps(app)] == ["add_calculated_column"]
+        assert session.TF_DIALOG_KEY not in app.session_state
+
+    def test_several_steps_are_added_in_the_order_they_were_shown(self, tmp_path, monkeypatch):
+        parsed = [_bonus_step(), _bonus_step("total_pay", "amount + bonus")]
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, (parsed, [], None))
+        app = self._read(self._open(tmp_path, monkeypatch), "two columns")
+        app.button(key="tf_ai_commit").click().run()
+
+        assert not app.exception
+        assert [step["params"]["new_column"] for step in _steps(app)] == ["bonus", "total_pay"]
+
+    def test_a_clarification_is_shown_and_nothing_is_added(self, tmp_path, monkeypatch):
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([], [], "Forecasting is not something this tool can do."))
+        app = self._read(self._open(tmp_path, monkeypatch), "forecast next year")
+
+        assert not app.exception
+        assert any("Forecasting is not" in info.value for info in app.info)
+        assert _steps(app) == []
+        with pytest.raises(KeyError):
+            app.button(key="tf_ai_commit")
+
+    def test_a_dropped_step_is_reported_rather_than_hidden(self, tmp_path, monkeypatch):
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([], ["Skipped a step: train_a_model is not a step."], None))
+        app = self._read(self._open(tmp_path, monkeypatch), "do magic")
+
+        assert any("train_a_model" in warning.value for warning in app.warning)
+        assert _steps(app) == []
+
+    def test_preview_runs_the_steps_without_adding_them(self, tmp_path, monkeypatch):
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([_bonus_step()], [], None))
+        app = self._read(self._open(tmp_path, monkeypatch), "add bonus")
+        app.button(key="tf_ai_preview").click().run()
+
+        assert not app.exception
+        assert _steps(app) == []
+        assert any("bonus" in list(frame.value.columns) for frame in app.dataframe)
+
+    def test_cancel_closes_the_dialog_and_forgets_the_parse(self, tmp_path, monkeypatch):
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([_bonus_step()], [], None))
+        app = self._read(self._open(tmp_path, monkeypatch), "add bonus")
+        app.button(key="tf_ai_cancel").click().run()
+
+        assert _steps(app) == []
+        assert session.TF_DIALOG_KEY not in app.session_state
+        assert session.TF_AI_STEPS_KEY not in app.session_state
+
+    def test_a_step_that_no_longer_fits_is_refused_at_add_time(self, tmp_path, monkeypatch):
+        """The parse validated against the workspace as it was. The check has to happen
+        again at Add, or a parse gone stale could slip a broken step into the pipeline."""
+        stale = make_step(
+            "add_calculated_column",
+            {"source": "sales"},
+            {"new_column": "bonus", "expression": "salary * 2"},
+            "in_place",
+            "sales",
+        )
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([stale], [], None))
+        app = self._read(self._open(tmp_path, monkeypatch), "add bonus")
+        app.button(key="tf_ai_commit").click().run()
+
+        # `sales.csv` has no `salary` column, so the step cannot be admitted.
+        assert not app.exception
+        assert _steps(app) == []
+        assert app.error
+
+    def test_a_step_that_fails_on_the_data_is_not_left_in_the_list(self, tmp_path, monkeypatch):
+        """Validation passes, the run doesn't. The step must not be appended first and
+        then found to be broken - a pipeline is not a place to leave a step that cannot
+        run, and the user would have no idea it was there."""
+        breaks = make_step(
+            "add_calculated_column",
+            {"source": "sales"},
+            {"new_column": "ratio", "expression": "amount / nonsense("},
+            "in_place",
+            "sales",
+        )
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([breaks], [], None))
+        app = self._read(self._open(tmp_path, monkeypatch), "add a ratio")
+        app.button(key="tf_ai_commit").click().run()
+
+        assert not app.exception
+        assert _steps(app) == []
+        assert app.error
+
+    def test_the_steps_are_numbered_from_where_the_list_already_ends(self, tmp_path, monkeypatch):
+        """A dialog that starts counting at one points at the wrong rows the moment the
+        pipeline is not empty."""
+        self._light(monkeypatch, self.LIGHT)
+        self._parse(monkeypatch, ([_bonus_step()], [], None))
+        app = self._open(tmp_path, monkeypatch)
+        app.session_state[session.TF_STEPS_KEY] = [_bonus_step("first_one", "amount * 2")]
+        app.run()
+        app = self._read(app, "add bonus")
+
+        headline = step_headline(_bonus_step(), 1)
+        assert any(headline in block.value for block in app.markdown)

@@ -27,12 +27,20 @@ from auth.exceptions import AuthDatabaseError
 from cleaner import loaders, profiling
 from cleaner.exceptions import DataCleanerError
 from engine import session as engine_session
+from llm import session as llm_session
 from sidebar import render_sidebar
+from transform import ai_parse
 from transform import db as transform_db
 from transform import session
 from transform.exceptions import PipelineStorageError, TransformError
 from transform.matching import required_columns_by_table
-from transform.pipeline import describe_steps, frames_created_by, step_headline, validate_step
+from transform.pipeline import (
+    apply_steps_with_report,
+    describe_steps,
+    frames_created_by,
+    step_headline,
+    validate_step,
+)
 from transform.registry import get_operation, operations_by_category
 from transform.workspace import NamedFrame, frame_names
 
@@ -309,18 +317,39 @@ def _render_steps(workspace: dict[str, NamedFrame], report) -> None:
         for index, step in enumerate(steps):
             _render_one_step(index, step, outcomes.get(index), is_last=index == len(steps) - 1)
 
-    st.button(
-        "Add a step",
-        key="tf_add_step",
-        type="primary",
-        icon=":material/add:",
-        disabled=not workspace,
-        help="Pick what you want to do and which table to do it to."
-        if workspace
-        else "Upload and load a file first.",
-        on_click=session.open_dialog,
-        args=("add",),
-    )
+    # Two ways in, per section 5 of the requirements document: the picker is the primary
+    # path and stays first and primary-coloured, plain English sits beside it as the
+    # convenience. Both end in the same step list, so neither is a mode the user is stuck
+    # in — they can describe one step and pick the next.
+    pick_column, describe_column = st.columns(2)
+    with pick_column:
+        st.button(
+            "Add a step",
+            key="tf_add_step",
+            type="primary",
+            icon=":material/add:",
+            width="stretch",
+            disabled=not workspace,
+            help="Pick what you want to do and which table to do it to."
+            if workspace
+            else "Upload and load a file first.",
+            on_click=session.open_dialog,
+            args=("add",),
+        )
+    with describe_column:
+        st.button(
+            "Describe a step",
+            key="tf_ai_add_step",
+            icon=":material/auto_awesome:",
+            width="stretch",
+            disabled=not workspace,
+            help="Type what you want in plain English and let the Light Model turn it "
+            "into steps."
+            if workspace
+            else "Upload and load a file first.",
+            on_click=session.open_dialog,
+            args=("ai_add",),
+        )
 
 
 def _render_one_step(index: int, step: dict, outcome, is_last: bool) -> None:
@@ -554,6 +583,239 @@ def _commit_step(step: dict | None, workspace: dict[str, NamedFrame], *, editing
 
     session.close_dialog()
     session.flash("Step saved." if editing else "Step added.")
+    st.rerun(scope="app")
+
+
+# --------------------------------------------------------------------------------------
+# Plain English step entry
+#
+# Section 5 of the requirements document's second input path. The dialog is deliberately
+# one screen with one decision on it: type, Read it, look at what came back, Add. There is
+# no per-step editor — the parsed steps are shown in exactly the words the step list will
+# use, and a wrong one is fixed by rewording the sentence and reading it again, which is
+# faster than correcting a form the user did not fill in.
+#
+# Nothing is added until the user presses Add, so an instruction the model misreads costs
+# a re-type and nothing else.
+# --------------------------------------------------------------------------------------
+
+
+@st.dialog("Describe a step", width="large", on_dismiss=session.close_dialog)
+def _render_ai_add_dialog(workspace: dict[str, NamedFrame]) -> None:
+    """Type an instruction, see the steps it became, add them all."""
+    light = llm_session.light_profile(st.session_state["user_id"])
+    if light is None:
+        st.warning(
+            "No Light Model is configured. Set one in Settings → LLM providers, or use "
+            "Add a step to build this by hand.",
+            icon=":material/error:",
+        )
+        if st.button(
+            "Close",
+            key="tf_ai_close",
+            width="stretch",
+            help="Closes this box without adding anything.",
+        ):
+            session.close_dialog()
+            st.rerun(scope="app")
+        return
+
+    st.text_area(
+        "What do you want to do?",
+        key=session.TF_AI_INSTRUCTION_KEY,
+        height=100,
+        placeholder="add a calculated column bonus = salary * 0.12",
+        help="Name the tables and columns as they appear above for the best result. "
+        "One sentence is usually enough.",
+    )
+    st.caption(
+        f":red[Read by **{light['nickname']}** ({light['default_model']}). It can only "
+        "choose from the steps this page already has - it never writes code.]"
+    )
+
+    if st.button(
+        "Read it",
+        key="tf_ai_parse",
+        type="primary",
+        width="stretch",
+        icon=":material/auto_awesome:",
+        help="Turns your sentence into steps. Nothing is added until you press Add.",
+    ):
+        _run_ai_parse(light, workspace)
+
+    steps, warnings_out, clarification = session.ai_parse()
+    if not steps and not warnings_out and not clarification:
+        return
+
+    st.divider()
+    _render_ai_result(workspace, steps, warnings_out, clarification)
+
+
+def _run_ai_parse(light: dict, workspace: dict[str, NamedFrame]) -> None:
+    """Sends the instruction and stores what came back.
+
+    `parse_instruction` never raises, so there is no error path here beyond the warnings
+    it returns — a failed call is reported as "we couldn't read that", with the picker
+    still sitting behind this dialog.
+    """
+    instruction = st.session_state.get(session.TF_AI_INSTRUCTION_KEY, "")
+    session.clear_ai_parse()
+
+    with st.spinner(f"Asking {light['default_model']}…"):
+        steps, warnings_out, clarification = ai_parse.parse_instruction(
+            light, instruction, workspace
+        )
+
+    logger.info(
+        "Plain-English parse produced %d step(s), %d warning(s).", len(steps), len(warnings_out)
+    )
+    session.set_ai_parse(steps, warnings_out, clarification)
+
+
+def _render_ai_result(
+    workspace: dict[str, NamedFrame],
+    steps: list[dict],
+    warnings_out: list[str],
+    clarification: str | None,
+) -> None:
+    """What came back: the steps in the step list's own words, then Preview and Add."""
+    if clarification:
+        st.info(clarification, icon=":material/info:")
+    for warning in warnings_out:
+        st.warning(warning, icon=":material/error:")
+
+    if not steps:
+        st.caption(
+            ":red[Nothing was added. Try naming the table and columns exactly, or use "
+            "Add a step to build it by hand.]"
+        )
+        return
+
+    # Numbered from where the list actually ends, so "Step 4" in this dialog is the
+    # Step 4 the user will see afterwards rather than a count starting again at one.
+    already = len(session.get_steps())
+    st.write(f"**This becomes {len(steps)} step(s):**")
+    for index, step in enumerate(steps):
+        st.write(step_headline(step, already + index))
+
+    st.divider()
+    preview_column, add_column, cancel_column = st.columns([2, 2, 1])
+
+    with preview_column:
+        show_preview = st.button(
+            "Preview",
+            key="tf_ai_preview",
+            width="stretch",
+            icon=":material/visibility:",
+            help="Runs these steps and shows the first few rows of the answer.",
+        )
+    with add_column:
+        add_now = st.button(
+            f"Add {len(steps)} step(s)",
+            key="tf_ai_commit",
+            type="primary",
+            width="stretch",
+            icon=":material/check:",
+            help="Adds every step above to the list, in order.",
+        )
+    with cancel_column:
+        if st.button(
+            "Cancel",
+            key="tf_ai_cancel",
+            width="stretch",
+            help="Closes this box without adding anything.",
+        ):
+            session.close_dialog()
+            st.rerun(scope="app")
+
+    if show_preview:
+        _render_ai_preview(workspace, steps)
+    if add_now:
+        _commit_ai_steps(steps, workspace)
+
+
+def _render_ai_preview(workspace: dict[str, NamedFrame], steps: list[dict]) -> None:
+    """Runs all the parsed steps and shows the last one's table.
+
+    The last step's output is the one the user asked for; the tables in between are
+    scaffolding. Showing every one of them would bury the answer.
+    """
+    after, report = apply_steps_with_report(workspace, steps)
+
+    failed = next((outcome for outcome in report if outcome.status == "failed"), None)
+    if failed is not None:
+        st.error(
+            f"Step {failed.index + 1} ({failed.label}) wouldn't run. {failed.message}",
+            icon=":material/error:",
+        )
+        return
+    if not report:
+        st.error("These steps didn't run.", icon=":material/error:")
+        return
+
+    frame = after[report[-1].output_name].frame
+    st.caption(
+        f":red[{report[-1].output_name}: {len(frame):,} row(s), {len(frame.columns):,} column(s)]"
+    )
+    st.dataframe(
+        frame.head(session.DIALOG_PREVIEW_ROWS),
+        key="tf_ai_preview_table",
+        width="stretch",
+        hide_index=True,
+    )
+
+
+def _commit_ai_steps(steps: list[dict], workspace: dict[str, NamedFrame]) -> None:
+    """Adds every parsed step, in order, or stops at the first one that won't go.
+
+    Each step is re-validated against the workspace as it stands after the ones before it,
+    which is the same check `_commit_step` makes — a step is never admitted on the strength
+    of having been validated at parse time, because the user may have added a step by hand
+    in between.
+
+    A failure part-way leaves the earlier steps in place. They are ordinary steps by then,
+    editable and deletable like any other, and silently undoing work the user watched
+    succeed would be the more surprising behaviour.
+    """
+    running = workspace
+    already = len(session.get_steps())
+    added = 0
+    problem: str | None = None
+
+    for step in steps:
+        # Numbered against the list the user is looking at, not against this batch.
+        number = already + added + 1
+        try:
+            validate_step(step, running)
+        except TransformError as error:
+            logger.info("AI step refused at commit time: %s", error)
+            problem = f"Step {number} couldn't be added: {error}"
+            break
+
+        # Run it *before* it joins the list. A step that validates but falls over on the
+        # real data must not be left behind in the pipeline for the user to discover.
+        after, report = apply_steps_with_report(running, [step])
+        if report and report[0].status == "failed":
+            logger.info("AI step failed while being added: %s", report[0].message)
+            problem = f"Step {number} ({report[0].label}) wouldn't run. {report[0].message}"
+            break
+
+        session.append_step(step)
+        added += 1
+        running = after
+
+    if problem is not None:
+        # The dialog stays open so the message is actually read — closing and rerunning
+        # would throw the only explanation away. The parse is dropped, so a second press
+        # of Add cannot add the earlier steps all over again.
+        session.clear_ai_parse()
+        if added:
+            problem += f" The {added} step(s) before it were kept."
+        st.error(problem, icon=":material/error:")
+        return
+
+    session.close_dialog()
+    session.flash(f"Added {added} step(s).")
     st.rerun(scope="app")
 
 
@@ -1298,6 +1560,8 @@ if profile is not None:
         pending = session.pending_dialog()
         if pending == "add":
             _render_add_dialog(workspace)
+        elif pending == "ai_add":
+            _render_ai_add_dialog(workspace)
         elif pending == "edit":
             _render_edit_dialog(workspace)
         elif pending == "delete":

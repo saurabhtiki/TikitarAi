@@ -164,3 +164,108 @@ class TestTokenizerPrefersTheLongerColumnName:
     def test_tokenize_returns_column_tokens_for_known_names(self):
         tokens = tokenize("price * 2", ["price"])
         assert [token.kind for token in tokens] == ["column", "operator", "number"]
+
+
+class TestComparisons:
+    """A test on its own is a formula: 1 where it passes, 0 where it doesn't."""
+
+    @pytest.mark.parametrize(
+        ("formula", "expected"),
+        [
+            ("da > 15", [0.0, 1.0, 1.0]),
+            ("da < 15", [1.0, 0.0, 0.0]),
+            ("da >= 20", [0.0, 1.0, 1.0]),
+            ("da <= 20", [1.0, 1.0, 0.0]),
+            ("da == 20", [0.0, 1.0, 0.0]),
+            ("da = 20", [0.0, 1.0, 0.0]),
+            ("da != 20", [1.0, 0.0, 1.0]),
+            ("da <> 20", [1.0, 0.0, 1.0]),
+        ],
+    )
+    def test_each_comparison_gives_one_or_zero(self, frame, formula, expected):
+        values, _ = evaluate(frame, formula)
+        assert values.tolist() == expected
+
+    def test_arithmetic_is_worked_out_before_the_comparison(self, frame):
+        values, _ = evaluate(frame, "da * 2 > 30")
+        assert values.tolist() == [0.0, 1.0, 1.0]
+
+    def test_a_two_character_comparison_is_not_read_as_two_operators(self, frame):
+        tokens = tokenize("da >= 20", list(frame.columns))
+        assert [token.value for token in tokens] == ["da", ">=", 20.0]
+
+    def test_a_column_that_is_not_a_number_never_passes_the_test(self, frame):
+        values, _ = evaluate(frame, "mixed > 0")
+        assert values.tolist() == [0.0, 1.0, 1.0]
+
+    def test_two_comparisons_can_be_added_as_flags(self, frame):
+        values, _ = evaluate(frame, "(da > 15) + (basic > 0)")
+        assert values.tolist() == [1.0, 2.0, 1.0]
+
+    def test_comparing_three_values_at_once_is_refused(self, frame):
+        with pytest.raises(InvalidStepParamsError, match="only two values at a time"):
+            evaluate(frame, "10 < da < 25")
+
+
+class TestIfElse:
+    """A formula that picks between two numbers - the point of this phase."""
+
+    def test_it_picks_one_of_two_numbers(self, frame):
+        values, _ = evaluate(frame, "1 if da > 15 else 0")
+        assert values.tolist() == [0.0, 1.0, 1.0]
+
+    def test_each_branch_can_be_arithmetic(self, frame):
+        values, _ = evaluate(frame, "basic * 0.9 if da > 15 else basic")
+        assert values.tolist() == pytest.approx([1000.0, 2250.0, -450.0])
+
+    def test_a_bracketed_branch_reads_the_same_way(self, frame):
+        values, _ = evaluate(frame, "(basic * 0.9) if da > 15 else basic")
+        assert values.tolist() == pytest.approx([1000.0, 2250.0, -450.0])
+
+    def test_a_bracketed_choice_can_be_used_inside_a_bigger_formula(self, frame):
+        values, _ = evaluate(frame, "(0 if da > 15 else 1) * basic")
+        assert values.tolist() == [1000.0, 0.0, -0.0]
+
+    def test_a_column_name_with_spaces_works_in_every_part(self, frame):
+        values, _ = evaluate(frame, "[net sales] * 2 if [net sales] > 1 else [net sales]")
+        assert values.tolist() == [10.0, 10.0, 10.0]
+
+    def test_a_negative_answer_is_read_as_one_value(self, frame):
+        values, _ = evaluate(frame, "0 if da > 15 else -1")
+        assert values.tolist() == [-1.0, 0.0, 0.0]
+
+    def test_choices_can_be_chained_and_are_read_right_to_left(self, frame):
+        values, _ = evaluate(frame, "1 if da > 25 else 2 if da > 15 else 3")
+        assert values.tolist() == [3.0, 2.0, 1.0]
+
+    def test_a_test_that_cannot_be_read_as_a_number_takes_the_else_answer(self, frame):
+        # 'mixed' is ["x", "1", "2"]; the first row is unreadable, so it falls to else.
+        values, warnings_out = evaluate(frame, "1 if mixed > 0 else 0")
+        assert values.tolist() == [0.0, 1.0, 1.0]
+        assert any("couldn't be read as a number" in warning for warning in warnings_out)
+
+    def test_a_choice_with_no_columns_still_fills_every_row(self, frame):
+        values, _ = evaluate(frame, "7 if 2 > 1 else 9")
+        assert values.tolist() == [7.0, 7.0, 7.0]
+
+    def test_an_if_with_no_else_is_refused(self, frame):
+        with pytest.raises(InvalidStepParamsError, match="'if' but no 'else'"):
+            evaluate(frame, "1 if da > 15")
+
+    def test_an_else_with_no_if_is_refused(self, frame):
+        with pytest.raises(InvalidStepParamsError, match="'else' with no 'if'"):
+            evaluate(frame, "1 else 0")
+
+    def test_an_empty_part_is_refused(self, frame):
+        with pytest.raises(InvalidStepParamsError, match="Part of the formula is empty"):
+            evaluate(frame, "da if else 1")
+
+    def test_a_column_whose_name_starts_with_if_is_still_a_column(self):
+        frame = pd.DataFrame({"ifscode": [2, 4]})
+        values, _ = evaluate(frame, "ifscode * 2")
+        assert values.tolist() == [4.0, 8.0]
+
+    def test_every_branch_counts_towards_the_columns_the_formula_reads(self, frame):
+        assert referenced_columns(
+            "basic if da > 1 else [net sales]", list(frame.columns)
+        ) == ["basic", "da", "net sales"]

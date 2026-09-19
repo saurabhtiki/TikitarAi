@@ -1,4 +1,4 @@
-"""Column-level operations: change type, drop, rename, split.
+"""Column-level operations: change type, drop, rename, split, take part of a code.
 
 `change_dtype` is the most important entry in the whole catalog and the reason it is listed
 first. `cleaner.loaders` reads every uploaded cell as text on purpose, so that a leading
@@ -250,4 +250,85 @@ def validate_split_column(columns_by_role: dict, params: dict) -> None:
 
 
 def required_split_column(params: dict) -> dict[str, list[str]]:
+    return {"source": [str(params.get("column", ""))]}
+
+
+# --------------------------------------------------------------------------------------
+# extract_by_position
+# --------------------------------------------------------------------------------------
+
+
+def apply_extract_by_position(frames_by_role: dict, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    """Pulls a fixed run of characters out of a code column, counted by position.
+
+    `split_column` needs something to split *on*; a code like `INV000123` has no separator,
+    so the only way to read the `INV` out of it is "the first 3 characters". Both numbers are
+    1-based, so "start at 1, length 3" reads the way a person says it.
+
+    A value shorter than the asked-for start has nothing to give and comes out blank, with a
+    count of how many rows that happened to.
+    """
+    frame = source_frame(frames_by_role)
+    column = str(params.get("column", ""))
+    require_columns(frame, [column], "Take part of a code")
+
+    start = _position(params.get("start", 1), "Start at character")
+    length = _position(params.get("length", 1), "How many characters")
+
+    result = frame.copy()
+    text = result[column].astype("string")
+    pieces = text.str.slice(start - 1, start - 1 + length)
+    # An empty answer is not the same as a short one being trimmed: it means the value ran
+    # out before the start position, so it reads better as a blank than as "".
+    pieces = pieces.where(pieces.str.len() > 0)
+
+    new_name = unique_column_name(
+        result, str(params.get("new_column") or f"{column} {start}-{start + length - 1}")
+    )
+    result[new_name] = pieces
+
+    too_short = int(pieces.isna().sum() - text.isna().sum())
+    warnings_out = (
+        [f"{too_short:,} row(s) were shorter than {start} character(s) and are blank."]
+        if too_short > 0
+        else []
+    )
+    return result, warnings_out
+
+
+def _position(value: object, label: str) -> int:
+    """A 1-based character position as a whole number of at least 1.
+
+    Raises:
+        InvalidStepParamsError: if it isn't a whole number, or is below 1. Counting from
+            zero here would quietly shift every answer by one character, so a 0 is refused
+            rather than forgiven.
+    """
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError) as error:
+        raise InvalidStepParamsError(
+            f"'{label}' needs a whole number, but got '{value}'."
+        ) from error
+    if number < 1:
+        raise InvalidStepParamsError(f"'{label}' starts at 1, so {number} can't be used.")
+    return number
+
+
+def describe_extract_by_position(step: dict) -> str:
+    params = step.get("params", {})
+    return (
+        f"Took {params.get('length', 1)} character(s) of {params.get('column')} from "
+        f"position {params.get('start', 1)}"
+    )
+
+
+def validate_extract_by_position(columns_by_role: dict, params: dict) -> None:
+    if not str(params.get("column", "")).strip():
+        raise InvalidStepParamsError("Choose the column holding the codes.")
+    _position(params.get("start", 1), "Start at character")
+    _position(params.get("length", 1), "How many characters")
+
+
+def required_extract_by_position(params: dict) -> dict[str, list[str]]:
     return {"source": [str(params.get("column", ""))]}

@@ -8,9 +8,15 @@ requirements document (section 4.3) says must be reachable without any free-form
 - "weighted average rate per stock item" is a calculated column (`rate * qty`), two group
   totals and a second calculated column — four ordinary steps, no custom code.
 
-`add_conditional_column` exists as its own operation rather than as `IF()` inside the
-expression grammar on purpose. Adding functions to the expression parser is how a small
-whitelist turns into a language, and a language is the thing section 2.1 rules out.
+A simple numeric branch can also be written straight into a formula - `price * 0.9 if
+quantity > 100 else price` is one `add_calculated_column` step. That is a comparison and a
+choice between two numbers, nothing more; the expression grammar still has no functions and
+no names other than columns, which is what section 2.1 rules out.
+
+`add_conditional_column` stays a separate operation because it does the things a formula
+cannot: a **text** answer ("North" -> "high"), the comparison kinds that are not maths
+(`contains`, `is not`, `is blank` - see `ops_rows.COMPARISONS`), and carrying another
+column's text across unchanged. A formula only ever produces numbers.
 """
 
 import logging
@@ -52,6 +58,19 @@ MONTH_CHOICES = [
 ]
 
 DATE_UNITS = ["days", "months", "years"]
+
+#: How far `shift_date` will move a date, in days — a century either way. Beyond this pandas
+#: runs out of timestamp range and raises about nanoseconds, which tells a user nothing.
+MAX_DAY_SHIFT = 36500
+
+#: Which end of a date's month `month_edge` gives back.
+MONTH_EDGES = ["start of month", "end of month"]
+
+#: Whether `absolute_value` overwrites the column or writes the answer beside it.
+ABSOLUTE_MODES = ["update the same column", "add a new column"]
+
+#: Which way `row_min_max` compares across a row's columns.
+ROW_EXTREMES = ["largest", "smallest"]
 
 
 # --------------------------------------------------------------------------------------
@@ -143,14 +162,34 @@ def _answer_values(frame: pd.DataFrame, answer: object, side: str) -> tuple[pd.S
     down the table. Tried as a formula first, because that is the interesting case, and
     falling back silently means `North` is a plain word rather than an error about an
     unknown column.
+
+    An answer that is nothing but one column's name is a special case, checked before the
+    formula path: this is how "keep whatever Remarks already said" is written, and
+    Remarks is usually text. Running it through the formula evaluator would read it as
+    arithmetic and turn every row into a number (or a blank, if it isn't one) - fine for
+    `amount * 0.1`, wrong for a plain carry-over of a text column.
     """
     text = str(answer).strip()
+    referenced = _sole_column_reference(text, frame)
+    if referenced is not None:
+        return frame[referenced], []
     try:
         values, warnings_out = evaluate(frame, text)
         return values, warnings_out
     except InvalidStepParamsError:
         logger.debug("The %s answer '%s' isn't a formula; using it as a fixed value.", side, text)
         return pd.Series([answer] * len(frame), index=frame.index), []
+
+
+def _sole_column_reference(text: str, frame: pd.DataFrame) -> str | None:
+    """The column `text` names, if it names nothing but one column - else `None`.
+
+    Matches `[net sales]` or a bare `net_sales`, same spellings the formula grammar
+    accepts, but only when the whole answer is that one name with nothing else around it.
+    """
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    return text if text in frame.columns else None
 
 
 def describe_add_conditional_column(step: dict) -> str:
@@ -398,3 +437,339 @@ def validate_bucket_numeric(columns_by_role: dict, params: dict) -> None:
 
 def required_bucket_numeric(params: dict) -> dict[str, list[str]]:
     return {"source": [str(params.get("column", ""))]}
+
+
+# --------------------------------------------------------------------------------------
+# add_today_date
+# --------------------------------------------------------------------------------------
+
+
+def apply_add_today_date(frames_by_role: dict, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    """Adds a column holding today's date, the same value in every row.
+
+    The stamp a finance user puts on a working file so that "as at" is written down rather
+    than remembered: `Loaded_On` = 19/09/2026 on every row. The time of day is dropped, so
+    the column is a plain date and a later date difference counts whole days.
+
+    The date is read when the step *runs*, not when it was added, which is the behaviour a
+    saved pipeline wants: next month's replay stamps next month's date.
+    """
+    frame = source_frame(frames_by_role)
+    today = pd.Timestamp.today().normalize()
+
+    result = frame.copy()
+    new_name = unique_column_name(result, str(params.get("new_column") or "today"))
+    result[new_name] = pd.Series([today] * len(result), index=result.index, dtype="datetime64[ns]")
+    return result, []
+
+
+def describe_add_today_date(step: dict) -> str:
+    params = step.get("params", {})
+    return f"Added {params.get('new_column') or 'today'} holding today's date"
+
+
+def validate_add_today_date(columns_by_role: dict, params: dict) -> None:
+    """Nothing to check: there is no column to read and the name has a fallback."""
+    return None
+
+
+def required_add_today_date(params: dict) -> dict[str, list[str]]:
+    return {"source": []}
+
+
+# --------------------------------------------------------------------------------------
+# shift_date
+# --------------------------------------------------------------------------------------
+
+
+def apply_shift_date(frames_by_role: dict, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    """Adds a column holding a date column moved forward or back by a number of days.
+
+    `Due Date = Invoice Date + 30`. A negative number moves backwards, which is how a
+    reminder date ("7 days before it is due") is written.
+    """
+    frame = source_frame(frames_by_role)
+    column = str(params.get("column", ""))
+    require_columns(frame, [column], "Add or subtract days")
+
+    days = _day_shift(params.get("days", 0))
+    dates, warnings_out = to_datetime(frame[column], column)
+
+    result = frame.copy()
+    default_name = f"{column} {'plus' if days >= 0 else 'minus'} {abs(days)} days"
+    new_name = unique_column_name(result, str(params.get("new_column") or default_name))
+    result[new_name] = dates + pd.Timedelta(days=days)
+    return result, warnings_out
+
+
+def whole_number(value: object, label: str) -> int:
+    """A parameter as a whole number, or a message naming the box it came from.
+
+    Raises:
+        InvalidStepParamsError: if the value isn't a whole number.
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError) as error:
+        raise InvalidStepParamsError(
+            f"'{label}' needs a whole number, but got '{value}'."
+        ) from error
+
+
+def _day_shift(value: object) -> int:
+    """The number of days `shift_date` will move by.
+
+    Raises:
+        InvalidStepParamsError: if it isn't a whole number, or is further than
+            `MAX_DAY_SHIFT` — which pandas would refuse anyway, in a message about
+            nanosecond bounds that no user of this page can act on.
+    """
+    days = whole_number(value, "Days to add")
+    if abs(days) > MAX_DAY_SHIFT:
+        raise InvalidStepParamsError(
+            f"'Days to add' can move a date by at most {MAX_DAY_SHIFT:,} days (about 100 "
+            f"years), but got {days:,}."
+        )
+    return days
+
+
+def _safe_int(value: object) -> int:
+    """A whole number for a description line, or 0 - a description never raises."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def describe_shift_date(step: dict) -> str:
+    params = step.get("params", {})
+    days = _safe_int(params.get("days", 0))
+    direction = "back" if days < 0 else "forward"
+    return f"Moved {params.get('column')} {direction} by {abs(days)} day(s)"
+
+
+def validate_shift_date(columns_by_role: dict, params: dict) -> None:
+    if not str(params.get("column", "")).strip():
+        raise InvalidStepParamsError("Choose the date column to move.")
+    _day_shift(params.get("days", 0))
+
+
+def required_shift_date(params: dict) -> dict[str, list[str]]:
+    return {"source": [str(params.get("column", ""))]}
+
+
+# --------------------------------------------------------------------------------------
+# month_edge
+# --------------------------------------------------------------------------------------
+
+
+def apply_month_edge(frames_by_role: dict, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    """Adds a column holding the first or the last day of a date's month.
+
+    What a monthly report is dated by: every date in March 2026 becomes 01/03/2026 or
+    31/03/2026, so rows group together however untidy the day numbers are.
+    """
+    frame = source_frame(frames_by_role)
+    column = str(params.get("column", ""))
+    edge = params.get("edge", MONTH_EDGES[0])
+    require_columns(frame, [column], "Start or end of month")
+    if edge not in MONTH_EDGES:
+        raise InvalidStepParamsError(f"'{edge}' isn't a choice this step knows.")
+
+    dates, warnings_out = to_datetime(frame[column], column)
+    # `MonthEnd(1)` on a date already sitting on the last day would step into the *next*
+    # month, so both answers are worked out from the month's first day instead.
+    starts = dates.dt.to_period("M").dt.to_timestamp()
+    values = starts if edge == "start of month" else starts + pd.offsets.MonthEnd(1)
+
+    result = frame.copy()
+    new_name = unique_column_name(result, str(params.get("new_column") or f"{column} {edge}"))
+    result[new_name] = values
+    return result, warnings_out
+
+
+def describe_month_edge(step: dict) -> str:
+    params = step.get("params", {})
+    return f"Took the {params.get('edge', MONTH_EDGES[0])} of {params.get('column')}"
+
+
+def validate_month_edge(columns_by_role: dict, params: dict) -> None:
+    if not str(params.get("column", "")).strip():
+        raise InvalidStepParamsError("Choose the date column.")
+    if params.get("edge") not in MONTH_EDGES:
+        raise InvalidStepParamsError(f"'{params.get('edge')}' isn't a choice this step knows.")
+
+
+def required_month_edge(params: dict) -> dict[str, list[str]]:
+    return {"source": [str(params.get("column", ""))]}
+
+
+# --------------------------------------------------------------------------------------
+# row_percentage_of_total
+# --------------------------------------------------------------------------------------
+
+
+def apply_row_percentage_of_total(
+    frames_by_role: dict, params: dict
+) -> tuple[pd.DataFrame, list[str]]:
+    """Adds a column holding each row's share of the column's total, as a percentage.
+
+    "What fraction of sales is this branch?" - the whole column is totalled once and every
+    row is divided by that one total, so the new column adds up to 100.
+
+    A column totalling zero gives a blank in every row rather than an error or an infinity,
+    the same divide-by-zero rule the calculated-column formula follows.
+    """
+    frame = source_frame(frames_by_role)
+    column = str(params.get("column", ""))
+    require_columns(frame, [column], "Percentage of total")
+
+    numbers, warnings_out = to_numeric(frame[column], column)
+    total = float(numbers.sum(skipna=True))
+
+    if total == 0:
+        shares = pd.Series(float("nan"), index=frame.index, dtype="float64")
+        warnings_out.append(
+            f"'{column}' adds up to zero, so every row's share is blank rather than an error."
+        )
+    else:
+        shares = numbers / total * 100
+        decimals = params.get("decimals")
+        if decimals is not None:
+            shares = shares.round(whole_number(decimals, "Decimal places"))
+
+    result = frame.copy()
+    new_name = unique_column_name(result, str(params.get("new_column") or f"{column} % of total"))
+    result[new_name] = shares
+    return result, warnings_out
+
+
+def describe_row_percentage_of_total(step: dict) -> str:
+    params = step.get("params", {})
+    return f"Worked out each row's share of the total {params.get('column')}"
+
+
+def validate_row_percentage_of_total(columns_by_role: dict, params: dict) -> None:
+    if not str(params.get("column", "")).strip():
+        raise InvalidStepParamsError("Choose the number column to share out.")
+    if params.get("decimals") is not None:
+        whole_number(params.get("decimals"), "Decimal places")
+
+
+def required_row_percentage_of_total(params: dict) -> dict[str, list[str]]:
+    return {"source": [str(params.get("column", ""))]}
+
+
+# --------------------------------------------------------------------------------------
+# absolute_value
+# --------------------------------------------------------------------------------------
+
+
+def apply_absolute_value(frames_by_role: dict, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    """Drops the minus sign: -500 becomes 500.
+
+    Ledger extracts hand out credits as negatives; a report that wants "how much moved",
+    not "which way", needs the size alone. Accounting negatives in brackets - `(500)` - are
+    already understood by `to_numeric`, so they come out as 500 too.
+
+    A value that can't be read as a number becomes blank and is reported, the same rule
+    `change_dtype` follows.
+    """
+    frame = source_frame(frames_by_role)
+    column = str(params.get("column", ""))
+    require_columns(frame, [column], "Absolute value")
+
+    numbers, warnings_out = to_numeric(frame[column], column)
+    sizes = numbers.abs()
+
+    result = frame.copy()
+    if params.get("mode", ABSOLUTE_MODES[0]) == "add a new column":
+        new_name = unique_column_name(result, str(params.get("new_column") or f"{column} size"))
+        result[new_name] = sizes
+    else:
+        result[column] = sizes
+    return result, warnings_out
+
+
+def describe_absolute_value(step: dict) -> str:
+    params = step.get("params", {})
+    return f"Dropped the minus sign from {params.get('column')}"
+
+
+def validate_absolute_value(columns_by_role: dict, params: dict) -> None:
+    if not str(params.get("column", "")).strip():
+        raise InvalidStepParamsError("Choose the number column.")
+    if params.get("mode") is not None and params.get("mode") not in ABSOLUTE_MODES:
+        raise InvalidStepParamsError(f"'{params.get('mode')}' isn't a choice this step knows.")
+
+
+def required_absolute_value(params: dict) -> dict[str, list[str]]:
+    return {"source": [str(params.get("column", ""))]}
+
+
+# --------------------------------------------------------------------------------------
+# row_min_max
+# --------------------------------------------------------------------------------------
+
+
+def apply_row_min_max(frames_by_role: dict, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    """Adds a column holding the smallest or largest of several columns, row by row.
+
+    This compares *sideways*: on each row it looks across `Budget` and `Actual` and keeps
+    the higher of the two. That is not `groupby_aggregate`, which totals one column
+    downwards over many rows - a distinction worth spelling out, because both get called
+    "max" in conversation.
+
+    A row where none of the chosen columns holds a number comes out blank rather than
+    failing the step.
+    """
+    frame = source_frame(frames_by_role)
+    requested = [str(column) for column in params.get("columns", [])]
+    which = params.get("which", ROW_EXTREMES[0])
+    require_columns(frame, requested, "Smallest or largest across columns")
+    if which not in ROW_EXTREMES:
+        raise InvalidStepParamsError(f"'{which}' isn't a choice this step knows.")
+    if len(requested) < 2:
+        raise InvalidStepParamsError("Choose at least two columns to compare.")
+
+    warnings_out: list[str] = []
+    converted: dict[str, pd.Series] = {}
+    for column in requested:
+        numbers, conversion_warnings = to_numeric(frame[column], column)
+        converted[column] = numbers
+        warnings_out.extend(conversion_warnings)
+
+    side_by_side = pd.DataFrame(converted, index=frame.index)
+    values = side_by_side.min(axis=1) if which == "smallest" else side_by_side.max(axis=1)
+
+    blank_rows = int(values.isna().sum())
+    if blank_rows:
+        warnings_out.append(
+            f"{blank_rows:,} row(s) had no number in any of those columns, so their answer "
+            f"is blank."
+        )
+
+    result = frame.copy()
+    new_name = unique_column_name(
+        result, str(params.get("new_column") or f"{which} of the columns")
+    )
+    result[new_name] = values
+    return result, warnings_out
+
+
+def describe_row_min_max(step: dict) -> str:
+    params = step.get("params", {})
+    columns = ", ".join(str(column) for column in params.get("columns", []))
+    return f"Took the {params.get('which', ROW_EXTREMES[0])} of {columns} on each row"
+
+
+def validate_row_min_max(columns_by_role: dict, params: dict) -> None:
+    chosen = [str(column) for column in params.get("columns", [])]
+    if len(chosen) < 2:
+        raise InvalidStepParamsError("Choose at least two columns to compare.")
+    if params.get("which") not in ROW_EXTREMES:
+        raise InvalidStepParamsError(f"'{params.get('which')}' isn't a choice this step knows.")
+
+
+def required_row_min_max(params: dict) -> dict[str, list[str]]:
+    return {"source": [str(column) for column in params.get("columns", [])]}
