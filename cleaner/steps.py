@@ -323,7 +323,10 @@ def _apply_remove_empty_rows(frame: pd.DataFrame, params: dict) -> tuple[pd.Data
     else:
         existing, warnings_out = list(frame.columns), []
 
-    if not existing:
+    if not existing or frame.empty:
+        # `blank_mask(...).all(axis=1)` raises "Cannot perform reduction 'all' with string
+        # dtype" on a frame with no rows, so an already-empty table has to short-circuit.
+        # Reachable whenever an earlier step has filtered everything out.
         return frame.copy(), warnings_out
 
     subset = frame[existing]

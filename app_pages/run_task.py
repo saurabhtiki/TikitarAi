@@ -496,7 +496,7 @@ def _render_match(report: matching.MatchReport, loaded_tables: list) -> None:
             st.markdown(f"- {problem}")
 
     for note in report.notes():
-        st.caption(f":grey[{note}]")
+        st.caption(f":red[{note}]")
 
 
 def _render_remap(task: Task, report: matching.MatchReport, loaded_tables: list) -> None:
@@ -604,7 +604,7 @@ def _render_column_remap(task: Task, report: matching.MatchReport) -> None:
         ]
         if not spare:
             st.caption(
-                f":grey[**{missing.column}** is missing from **{missing.table}** and there is "
+                f":red[**{missing.column}** is missing from **{missing.table}** and there is "
                 "no spare column in that file to map it to — the column has to be added to "
                 "the file itself.]"
             )
@@ -662,7 +662,7 @@ def _render_run_controls(user_id: int, report: matching.MatchReport, loaded_tabl
     )
 
     st.caption(
-        ":grey[Running restores the task's links and column meanings onto the files you have "
+        ":red[Running restores the task's links and column meanings onto the files you have "
         "loaded, replacing any you set up by hand in this session.]"
     )
 
@@ -720,7 +720,7 @@ def _render_summary(result) -> None:
     else:
         st.warning(result.headline(), icon=":material/auto_awesome:")
 
-    st.caption(f":grey[Run finished {result.finished_at}.]")
+    st.caption(f":red[Run finished {result.finished_at}.]")
 
     with st.expander(
         "Step by step",

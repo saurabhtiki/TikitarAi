@@ -9,7 +9,7 @@ A Streamlit + Agno AI app where any employee (Meeting Creator) creates subject-b
 Any employee (not a single fixed Admin) can create a meeting with:
 - **Subject** — e.g. "PO No 123"
 - **Meeting Context** — short 2-4 line narrative on the purpose of this meeting (e.g. "This chat is to discuss and resolve open issues on PO 123 with supplier ABC Traders — delivery delay, revised payment terms, and a quality complaint.") Feeds the system prompt alongside Persona; gives AI the "why" behind the conversation.
-- **Persona** — system prompt, e.g. "You are the Purchase Manager..."
+- **Persona** — system prompt, e.g. "You are the Finance Manager..."
   - **Default Persona (per user):** each employee can save their own default persona (`user_defaults.default_persona`), pre-filled on every new meeting they create, editable per meeting. The meeting stores its own snapshot at creation time — later changes to the default don't affect past meetings.
 - **Context/SOP** — 2-3 page rules/knowledge text (meeting-level, general)
 - **Agenda** — list of items, added serially via UI. Each item has a **type**:

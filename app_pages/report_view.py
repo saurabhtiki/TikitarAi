@@ -190,7 +190,7 @@ def _render_item_output(item: PinnedItem, key_prefix: str) -> None:
         st.dataframe(shown, key=f"{key_prefix}_frame", width="stretch", hide_index=True)
         if len(item.frame) > len(shown):
             st.caption(
-                f":grey[Showing {len(shown):,} of {len(item.frame):,} rows. "
+                f":red[Showing {len(shown):,} of {len(item.frame):,} rows. "
                 "The Excel download has all of them.]"
             )
 
@@ -525,7 +525,7 @@ def _render_pool(report: Report, empty_pool: EmptyPool | None = None) -> None:
             st.markdown(f"{_item_icon(item)} **{item.display_heading()}**")
             st.caption(_item_summary(item))
             if item.is_manual_block() and not _block_has_content(item):
-                st.caption(":grey[Empty so far. Place it, then fill it in on the right.]")
+                st.caption(":red[Empty so far. Place it, then fill it in on the right.]")
 
             target = None
             if choices:
@@ -579,7 +579,7 @@ def _render_pool(report: Report, empty_pool: EmptyPool | None = None) -> None:
 
             if not _is_discardable(item):
                 st.caption(
-                    ":grey[Leave it unplaced to keep it out of the report, or remove it from "
+                    ":red[Leave it unplaced to keep it out of the report, or remove it from "
                     "the Checks tab that made it.]"
                 )
 
@@ -680,7 +680,7 @@ def _render_subsection_body(report: Report, section, subsection, number: str, in
             st.rerun(scope="app")
 
     if not subsection.items:
-        st.caption(":grey[Empty — place a pinned item here from the Unplaced list.]")
+        st.caption(":red[Empty — place a pinned item here from the Unplaced list.]")
         return
 
     # Numbered here too, from the same `numbered_items`, so the number beside an item while
@@ -837,7 +837,7 @@ def _render_picture_editor(item: PinnedItem) -> None:
     _absorb_item_image(item, upload)
 
     if not item.has_image():
-        st.caption(":grey[No picture yet. Copy a chart or a pivot out of Excel, save it as a picture, and drop it here.]")
+        st.caption(":red[No picture yet. Copy a chart or a pivot out of Excel, save it as a picture, and drop it here.]")
         return
 
     _render_item_picture(item)
@@ -894,7 +894,7 @@ def _render_embed_editor(item: PinnedItem) -> None:
             st.warning(embed_html.explain_empty_paste(pasted), icon=":material/report:")
         else:
             st.caption(
-                ":grey[Nothing pasted yet. In Excel: **File → Save As → Web Page**. That "
+                ":red[Nothing pasted yet. In Excel: **File → Save As → Web Page**. That "
                 "writes a folder ending `_files` next to it — open **sheet001.htm** from "
                 "inside the folder in a text editor and copy the lot.]"
             )
@@ -916,7 +916,7 @@ def _render_embed_editor(item: PinnedItem) -> None:
         ),
     )
 
-    st.caption(":grey[This is what the report will show:]")
+    st.caption(":red[This is what the report will show:]")
     _render_embed(item.embed_html, item.embed_height)
 
 
@@ -968,9 +968,9 @@ def _render_link_editor(item: PinnedItem) -> None:
         st.error(problem, icon=":material/error:")
 
     if item.has_link():
-        st.caption(f":grey[The report prints a button saying **{item.link_label()}**.]")
+        st.caption(f":red[The report prints a button saying **{item.link_label()}**.]")
     else:
-        st.caption(":grey[No link yet. Paste the address out of your browser's address bar.]")
+        st.caption(":red[No link yet. Paste the address out of your browser's address bar.]")
 
 
 def _link_problem_key(item: PinnedItem) -> str:
@@ -1151,7 +1151,7 @@ def _render_logo_controls(report: Report) -> None:
         _absorb_logo_upload(report, upload)
 
         if not report.has_logo():
-            st.caption(":grey[No logo yet. The report prints its title on its own.]")
+            st.caption(":red[No logo yet. The report prints its title on its own.]")
             return
 
         _render_logo_thumbnail(report)
@@ -1222,7 +1222,7 @@ def _render_preview(report: Report, empty_message: str = EMPTY_PREVIEW) -> None:
         return
 
     st.caption(
-        ":grey[Order, numbering and content are exactly what downloads, rendered in the "
+        ":red[Order, numbering and content are exactly what downloads, rendered in the "
         "app's own theme. To see the chosen style, use the preview under **Download**.]"
     )
 
@@ -1282,7 +1282,7 @@ def _render_update_view(report: Report, on_save: Callable[[Report], None] | None
         return
 
     st.caption(
-        ":grey[Change the notes, pictures and pasted HTML that a run can't produce for "
+        ":red[Change the notes, pictures and pasted HTML that a run can't produce for "
         "itself. The numbers above them are this run's and are not editable here.]"
     )
 
@@ -1323,7 +1323,7 @@ def _render_save_authored(report: Report, on_save: Callable[[Report], None]) -> 
     be the wrong default — so the report is only changed when this is pressed.
     """
     st.caption(
-        ":grey[The edits above already apply to this run's preview and downloads. Saving "
+        ":red[The edits above already apply to this run's preview and downloads. Saving "
         "them puts them in the report itself, so next month's run starts with them.]"
     )
     if st.button(
@@ -1522,7 +1522,7 @@ def _render_html_preview(html: str | None) -> None:
 
     with st.expander("Preview the HTML", icon=":material/preview:", expanded=True):
         st.caption(
-            ":grey[This is the file itself, styling and all. Scroll it here, then press "
+            ":red[This is the file itself, styling and all. Scroll it here, then press "
             "Download HTML above to keep it.]"
         )
         st.iframe(html, height=HTML_PREVIEW_HEIGHT)
@@ -1753,7 +1753,7 @@ def _render_element_controls(draft: custom_style.StyleSettings) -> custom_style.
     )
     spec = specs[label]
     element = draft.element(spec.key)
-    st.caption(f":grey[{spec.hint}]")
+    st.caption(f":red[{spec.hint}]")
 
     font_size = st.slider(
         "Text size",
@@ -1939,7 +1939,7 @@ def _render_theme_shelf(draft: custom_style.StyleSettings) -> None:
 
         themes = _saved_themes(user_id)
         if not themes:
-            st.caption(":grey[No saved themes yet.]")
+            st.caption(":red[No saved themes yet.]")
             return
 
         theme_ids = {theme["name"]: theme["theme_id"] for theme in themes}

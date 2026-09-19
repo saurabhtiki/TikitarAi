@@ -378,7 +378,7 @@ def _render_match_notes(report: matching.MatchReport | None) -> None:
         # No report and still something to say: every uploaded file may have been discarded
         # for not belonging to this chat type, leaving no tables to check.
         for note in _discarded_note():
-            st.caption(f":grey[{note}]")
+            st.caption(f":red[{note}]")
         return
 
     if report.ok:
@@ -398,7 +398,7 @@ def _render_match_notes(report: matching.MatchReport | None) -> None:
         st.warning(warning, icon=":material/error:")
 
     for note in [*report.notes(), *_discarded_note()]:
-        st.caption(f":grey[{note}]")
+        st.caption(f":red[{note}]")
 
 
 def _discard_extra_tables(extra_tables: list[str]) -> None:

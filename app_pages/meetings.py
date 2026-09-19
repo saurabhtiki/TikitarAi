@@ -800,10 +800,10 @@ def _render_summary(summary) -> None:
         if entry.is_table:
             # A table item is never "discussed" — its line is a row count, so a tick beside a
             # half-filled grid would be claiming something the number underneath contradicts.
-            st.markdown(f":grey[:material/table:] **{entry.item}**")
+            st.markdown(f":red[:material/table:] **{entry.item}**")
         else:
             icon = ":material/check_circle:" if entry.discussed else ":material/radio_button_unchecked:"
-            st.markdown(f":{'green' if entry.discussed else 'grey'}[{icon}] **{entry.item}**")
+            st.markdown(f":{'green' if entry.discussed else 'red'}[{icon}] **{entry.item}**")
         st.write(entry.notes or "_Not discussed._")
 
     if summary.other_extra.strip():

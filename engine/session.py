@@ -59,9 +59,13 @@ class EngineTable:
     Attributes:
         from_cleaner: adopted from the Data Cleaner rather than uploaded here. Decides
             whether `adopt_cleaner_tables` rebuilds it.
+        from_transform: adopted from Transform Data. A flag of its own rather than a
+            shared "adopted from somewhere" one, because each adoption replaces only its
+            own page's tables: with one flag, exporting from Transform Data would silently
+            delete the tables the Data Cleaner had sent over, and the other way round.
         uploader_managed: whether the file uploader still decides this table's fate.
             True for a fresh upload, so removing its file removes the table; False for
-            anything adopted from the Data Cleaner, and False from the moment the uploader
+            anything adopted from another page, and False from the moment the uploader
             loses the file behind it — see `detach_uploader_tables`.
     """
 
@@ -73,6 +77,7 @@ class EngineTable:
     semantic_types: dict[str, str] = field(default_factory=dict)
     row_count: int = 0
     from_cleaner: bool = False
+    from_transform: bool = False
     uploader_managed: bool = True
 
 
@@ -270,6 +275,7 @@ def _register(
     file_id: str | None = None,
     sheet_name: str | None = None,
     from_cleaner: bool = False,
+    from_transform: bool = False,
 ) -> EngineTable:
     duckdb_session.register_table(connection(), table_name, frame)
     return EngineTable(
@@ -281,9 +287,10 @@ def _register(
         semantic_types=semantic_types,
         row_count=len(frame),
         from_cleaner=from_cleaner,
-        # A cleaner table has no entry in the uploader at all, so it must never be part of
-        # the uploader's reconciliation.
-        uploader_managed=not from_cleaner,
+        from_transform=from_transform,
+        # An adopted table has no entry in the uploader at all, so it must never be part
+        # of the uploader's reconciliation.
+        uploader_managed=not (from_cleaner or from_transform),
     )
 
 
@@ -670,6 +677,76 @@ def adopt_cleaner_tables() -> tuple[list[EngineTable], list[str]]:
     st.session_state[DE_TABLES_KEY] = adopted
     bump_rebuild()
     logger.info("Adopted %d table(s) from the Data Cleaner.", sum(1 for t in adopted.values() if t.from_cleaner))
+    return list(adopted.values()), warnings
+
+
+# --------------------------------------------------------------------------------------
+# Transform Data handoff
+# --------------------------------------------------------------------------------------
+
+
+def adopt_transform_tables(frames: dict[str, pd.DataFrame]) -> tuple[list[EngineTable], list[str]]:
+    """Loads Transform Data's finished tables straight into the engine.
+
+    The parallel of `adopt_cleaner_tables`, with one deliberate difference: the frames are
+    **passed in** rather than read back out of the other page's session state. Transform
+    Data holds no DataFrames in session state at all (see `transform.session`) — its tables
+    are derived by replaying the steps over the uploads — so a read from here would mean
+    re-running the whole pipeline in the engine, a second execution that could disagree
+    with what the user just looked at. The page has the answer in hand; it hands it over.
+
+    Only the tables the user chose for export are passed, not every intermediate named
+    table: a join's two raw halves aren't useful to chat over, only the result.
+
+    The frames are snapshotted by copy. Transforming further afterwards does not
+    retroactively change what is loaded here; the button simply stays available to
+    re-adopt, which re-registers under the same name rather than accumulating copies.
+
+    Returns:
+        `(adopted_tables, warnings)`.
+    """
+    existing = get_tables()
+    # Everything *except* this page's previous export survives — re-exporting replaces
+    # what Transform Data sent last time and leaves the Data Cleaner's tables alone.
+    adopted: dict[str, EngineTable] = {
+        table_id: table for table_id, table in existing.items() if not table.from_transform
+    }
+    taken = {table.table_name for table in adopted.values()}
+    warnings: list[str] = []
+
+    for source_name, frame in (frames or {}).items():
+        table_id = f"transform::{source_name}"
+        # A table with no columns cannot be queried and would fail at registration; no
+        # rows is fine and is loaded, since "this month there were none" is an answer.
+        if frame is None or not len(frame.columns):
+            warnings.append(f"'{source_name}' has no columns, so it wasn't loaded.")
+            continue
+
+        try:
+            # No declared types: a transform step that changed a column's type already
+            # changed the frame's own dtype, so reading the types back off the result is
+            # the whole answer — there is no separate cleaning log to reconcile with.
+            prepared, semantic = loading.prepare_cleaned_frame(frame.copy(), None)
+            table_name = duckdb_session.slugify_table_name(source_name, taken)
+            adopted[table_id] = _register(
+                table_id,
+                table_name,
+                f"Transform Data - {source_name}",
+                prepared,
+                semantic,
+                from_transform=True,
+            )
+            taken.add(table_name)
+        except (TableLoadError, DataEngineError) as error:
+            logger.exception("Could not adopt '%s' from Transform Data.", source_name)
+            warnings.append(f"'{source_name}': {error}")
+
+    st.session_state[DE_TABLES_KEY] = adopted
+    bump_rebuild()
+    logger.info(
+        "Adopted %d table(s) from Transform Data.",
+        sum(1 for table in adopted.values() if table.from_transform),
+    )
     return list(adopted.values()), warnings
 
 

@@ -26,6 +26,8 @@ from reports.db import init_report_datasets_table
 from reports.exceptions import ReportDataError
 from tasks.db import init_tasks_table
 from tasks.exceptions import TaskStorageError
+from transform.db import init_transform_pipelines_table
+from transform.exceptions import PipelineStorageError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ def bootstrap_database() -> bool:
         # After `tasks`, whose `task_id` it references (Phase 13).
         init_report_datasets_table()
         init_cleaning_templates_table()
+        init_transform_pipelines_table()
         init_report_themes_table()
     except (
         AuthDatabaseError,
@@ -62,6 +65,7 @@ def bootstrap_database() -> bool:
         MeetingStorageError,
         TaskStorageError,
         TemplateStorageError,
+        PipelineStorageError,
         ThemeStorageError,
         ReportDataError,
     ):
@@ -78,6 +82,7 @@ except (
     ChecksStorageError,
     MeetingStorageError,
     TemplateStorageError,
+    PipelineStorageError,
     ThemeStorageError,
     ReportDataError,
 ):
@@ -131,6 +136,7 @@ else:
         ],
         "Utilities": [
             st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon="🧹"),
+            st.Page("app_pages/transform_data.py", title="Transform data", icon="🔀"),
             st.Page("app_pages/add_files.py", title="Append Files", icon="➕"),
             st.Page("app_pages/mergedata.py", title="Merge Files", icon="🔀"),
             st.Page("app_pages/PdfExtracter.py", title="PDF Extracter", icon="🗂️"),

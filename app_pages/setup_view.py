@@ -115,7 +115,7 @@ def _confirm_uploads(uploads: list) -> list:
         return uploads
 
     names = ", ".join(upload.name for upload in waiting)
-    st.caption(f":grey[Waiting to load: {names}. Choose sheets above if you need to, then press Load.]")
+    st.caption(f":red[Waiting to load: {names}. Choose sheets above if you need to, then press Load.]")
     if st.button(
         f"Load {len(waiting)} file(s)",
         key="de_load_files",
@@ -171,13 +171,13 @@ def mount_upload(
     if cleared:
         # Said on the run that clears, next to the box that is now empty, so the step reads
         # the same way it does at the very start of a session.
-        st.caption(f":grey[Cleared {cleared} table(s). Upload the files for this run.]")
+        st.caption(f":red[Cleared {cleared} table(s). Upload the files for this run.]")
 
     if detached:
         # Said once, on the run that detaches, rather than standing permanently: the box
         # above being empty while tables are listed below is confusing exactly once.
         st.caption(
-            f":grey[The box above forgets its files when you leave this page, so it looks empty — "
+            f":red[The box above forgets its files when you leave this page, so it looks empty — "
             f"your {detached} loaded table(s) are still here and still queryable. Use **Remove** "
             "beside a table to drop it.]"
         )
