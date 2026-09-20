@@ -36,6 +36,15 @@ LD_DIALOG_KEY = "ld_open_dialog"
 LD_DATA_KEY = "ld_built_data"
 LD_TABLE_KEY = "ld_spec_table"
 
+#: What the last plain-English generation came back with, held between the press of "Read
+#: it" and the press of "Replace"/"Add to it" - two reruns apart, so it cannot live in a
+#: local. Cleared the moment either is pressed, or the dialog is closed.
+LD_PROPOSAL_KEY = "ld_ai_proposal"
+
+#: The user's standing guidance for the generator, mirrored here so the text area keeps what
+#: was typed while the dialog is open. The spec is the copy that is saved.
+LD_GUIDANCE_KEY = "ld_ai_guidance"
+
 
 @dataclass
 class BuiltData:
@@ -100,6 +109,29 @@ def store_built_data(data: BuiltData) -> None:
 def clear_built_data() -> None:
     """Forgets the flattened data, so the next render rebuilds it."""
     st.session_state.pop(LD_DATA_KEY, None)
+
+
+# --------------------------------------------------------------------------------------
+# The plain-English proposal (phase 33)
+# --------------------------------------------------------------------------------------
+
+
+def set_ai_proposal(spec: DashboardSpec | None, warnings: list[str],
+                    clarification: str | None) -> None:
+    """Remembers what the generator came back with, for the next rerun to show."""
+    st.session_state[LD_PROPOSAL_KEY] = (spec, list(warnings), clarification)
+
+
+def ai_proposal() -> tuple[DashboardSpec | None, list[str], str | None]:
+    """The last generation, or an empty result when there has not been one."""
+    stored = st.session_state.get(LD_PROPOSAL_KEY)
+    if not isinstance(stored, tuple) or len(stored) != 3:
+        return None, [], None
+    return stored
+
+
+def clear_ai_proposal() -> None:
+    st.session_state.pop(LD_PROPOSAL_KEY, None)
 
 
 def delete_panel(panel_id: str) -> bool:
@@ -185,6 +217,6 @@ def reset_dashboard_spec() -> None:
     selection: a leftover selection index pointing into a list that no longer exists is
     exactly the kind of state that produces an edit dialog for a panel nobody can see.
     """
-    for key in (LD_SPEC_KEY, LD_DIALOG_KEY, LD_DATA_KEY, LD_TABLE_KEY,
-                "ld_table_reset_pending"):
+    for key in (LD_SPEC_KEY, LD_DIALOG_KEY, LD_DATA_KEY, LD_TABLE_KEY, LD_PROPOSAL_KEY,
+                LD_GUIDANCE_KEY, "ld_table_reset_pending"):
         st.session_state.pop(key, None)

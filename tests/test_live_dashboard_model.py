@@ -228,6 +228,20 @@ def test_a_dashboard_survives_a_round_trip():
     assert back.panels[0].properties == {"number_format": "currency"}
 
 
+def test_the_ai_guidance_survives_a_round_trip():
+    """The user writes it once and expects it to still apply next month, so it is stored
+    with the dashboard rather than left in the session."""
+    spec = m.DashboardSpec(ai_guidance="always show currency in INR")
+    assert m.from_json(m.to_json(spec)).ai_guidance == "always show currency in INR"
+
+
+def test_a_dashboard_saved_before_the_guidance_existed_still_opens():
+    raw = json.dumps({"version": 1, "dashboard": {"title": "Older"}, "panels": []})
+    back = m.from_json(raw)
+    assert back.title == "Older"
+    assert back.ai_guidance == ""
+
+
 def test_a_logo_survives_a_round_trip():
     spec = m.DashboardSpec(logo_bytes=b"\x89PNG\r\n", logo_mime="image/png")
     back = m.from_json(m.to_json(spec))

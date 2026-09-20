@@ -22,23 +22,35 @@ from live_dashboard import model as m
 #: What `_scenario` replaces on the shared `engine.session` module.
 STUBBED = ("connection", "table_names", "get_relationships", "rebuild_count")
 
+#: The Light Model the Describe dialog is told it has. Stubbed rather than read from the
+#: LLM database, so these tests never depend on whether a provider happens to be configured.
+LIGHT = {
+    "profile_id": 1,
+    "nickname": "Light",
+    "default_model": "small-model",
+    "provider_type": "local",
+}
+
 
 @pytest.fixture(autouse=True)
 def leave_the_engine_session_as_it_was_found():
-    """Puts the real `engine.session` functions back after each test.
+    """Puts the real `engine.session` and `llm.session` functions back after each test.
 
-    `_scenario` stubs them by assigning onto the module, which every other test in the run
+    `_scenario` stubs them by assigning onto the modules, which every other test in the run
     shares - so without this, a later test asking the engine for real tables would get this
     file's two-table fixture instead and fail somewhere far away from the cause.
     """
     from engine import session as engine_session
+    from llm import session as llm_session
 
     saved = {name: getattr(engine_session, name) for name in STUBBED}
+    saved_light = llm_session.light_profile
     try:
         yield
     finally:
         for name, value in saved.items():
             setattr(engine_session, name, value)
+        llm_session.light_profile = saved_light
 
 
 def _scenario():
@@ -64,6 +76,37 @@ def _scenario():
     engine.table_names = lambda: ["Transactions", "Customer"]
     engine.get_relationships = lambda: [Relationship("Transactions", "CustID", "Customer", "CustID")]
     engine.rebuild_count = lambda: 0
+
+    dashboard_view.llm_session.light_profile = lambda user_id: {
+        "profile_id": 1,
+        "nickname": "Light",
+        "default_model": "small-model",
+        "provider_type": "local",
+    }
+
+    dashboard_view.render_dashboard(1)
+
+
+def _scenario_without_a_light_model():
+    """The same view with no Light Model configured - what most users see on day one."""
+    import duckdb
+
+    from app_pages import dashboard_view
+    from engine.relationships import Relationship
+
+    connection = duckdb.connect()
+    connection.execute("CREATE TABLE Customer(CustID INT, CustName VARCHAR, CreditPeriod INT)")
+    connection.execute("CREATE TABLE Transactions(TxnID INT, CustID INT, Amount DOUBLE)")
+    connection.execute("INSERT INTO Customer VALUES (5,'ABC Traders',30),(6,'XYZ Corp',45)")
+    connection.execute("INSERT INTO Transactions VALUES (1,5,5000.0),(2,6,3200.0),(3,5,1500.0)")
+
+    engine = dashboard_view.engine_session
+    engine.connection = lambda: connection
+    engine.table_names = lambda: ["Transactions", "Customer"]
+    engine.get_relationships = lambda: [Relationship("Transactions", "CustID", "Customer", "CustID")]
+    engine.rebuild_count = lambda: 0
+
+    dashboard_view.llm_session.light_profile = lambda user_id: None
 
     dashboard_view.render_dashboard(1)
 
@@ -299,3 +342,100 @@ def test_the_title_reaches_the_spec():
     app = _app()
     app.text_input(key="ld_title").set_value("Monthly sales").run()
     assert _spec(app).title == "Monthly sales"
+
+
+# ------------------------------------------------------------------ describe in plain English
+
+
+def _proposal(*titles: str) -> m.DashboardSpec:
+    """What `ai_spec.propose_dashboard` would have returned, without calling a model.
+
+    Put straight into session state rather than generated: what these tests are about is
+    what the two accept buttons *do* with a proposal, and `test_live_dashboard_ai_spec.py`
+    already covers how one is made.
+    """
+    return m.DashboardSpec(
+        title="Generated",
+        filter_position=m.FILTER_TOP,
+        panels=[
+            m.PanelSpec(visual_type=m.VISUAL_CHART, sub_type=m.CHART_BAR,
+                        source_table="Transactions", measure_column="Amount",
+                        group_by="Customer - CustName", title=title, row_number=1)
+            for title in titles
+        ],
+    )
+
+
+def _open_describe(app: AppTest, proposal: m.DashboardSpec | None = None,
+                   warnings: list[str] | None = None) -> AppTest:
+    app.session_state["ld_open_dialog"] = ("describe", {})
+    if proposal is not None or warnings is not None:
+        app.session_state["ld_ai_proposal"] = (proposal, warnings or [], None)
+    app.run()
+    assert not app.exception
+    return app
+
+
+def test_the_describe_button_opens_the_dialog():
+    app = _app()
+    app.button(key="ld_ai_button").click().run()
+    assert app.session_state["ld_open_dialog"][0] == "describe"
+    assert not app.exception
+
+
+def test_with_no_light_model_the_dialog_says_so_rather_than_offering_a_box():
+    app = AppTest.from_function(_scenario_without_a_light_model, default_timeout=120)
+    app.session_state["ld_open_dialog"] = ("describe", {})
+    app.run()
+
+    assert not app.exception
+    assert any("No Light Model" in warning.value for warning in app.warning)
+    assert not app.get("text_area")
+
+
+def test_replacing_the_dashboard_swaps_the_visuals():
+    app = _add_chart(_app(), title="Built by hand")
+    _open_describe(app, _proposal("Generated one", "Generated two"))
+
+    app.button(key="ld_ai_replace").click().run()
+
+    assert [panel.title for panel in _spec(app).panels] == ["Generated one", "Generated two"]
+    assert "ld_ai_proposal" not in app.session_state
+
+
+def test_adding_to_the_dashboard_keeps_what_was_there():
+    app = _add_chart(_app(), title="Built by hand", row=2)
+    _open_describe(app, _proposal("Generated"))
+
+    app.button(key="ld_ai_append").click().run()
+
+    spec = _spec(app)
+    assert [panel.title for panel in spec.panels] == ["Built by hand", "Generated"]
+    # Underneath the hand-built row rather than beside it - a generated row 1 landing on
+    # top of an existing row 1 would silently rearrange the page.
+    assert spec.panels[1].row_number == 3
+
+
+def test_cancelling_the_description_leaves_the_dashboard_alone():
+    app = _add_chart(_app(), title="Built by hand")
+    _open_describe(app, _proposal("Generated"))
+
+    app.button(key="ld_ai_cancel").click().run()
+
+    assert [panel.title for panel in _spec(app).panels] == ["Built by hand"]
+    assert "ld_ai_proposal" not in app.session_state
+
+
+def test_a_description_that_produced_nothing_says_what_to_do_next():
+    app = _open_describe(_app(), None, ["We couldn't read that description: no answer"])
+    assert any("couldn't read that" in warning.value for warning in app.warning)
+    assert "ld_ai_replace" not in {button.key for button in app.button}
+
+
+def test_the_extra_guidance_is_kept_on_the_dashboard():
+    """Saved as it is typed, whether or not the user goes on to generate anything - it is
+    the kind of preference that is written once and expected to still apply next month."""
+    app = _open_describe(_app())
+    app.text_area(key="ld_ai_guidance").set_value("always show currency in INR").run()
+
+    assert _spec(app).ai_guidance == "always show currency in INR"

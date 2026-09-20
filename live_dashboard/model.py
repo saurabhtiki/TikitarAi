@@ -230,6 +230,12 @@ class DashboardSpec:
         filter_position: top strip or left rail.
         logo_bytes / logo_mime: the picture for the header, validated on the way in. Bytes
             rather than a path, because the exported file has to carry it.
+        ai_guidance: the user's own standing preferences for plain-English generation
+            ("always show currency in INR", "prefer horizontal bars"). Stored with the
+            dashboard rather than with the session, because it is the kind of thing a user
+            writes once and expects to still apply next month. It is *added to* the
+            generator's fixed rules and can never replace them - see
+            `live_dashboard/ai_spec.py`.
     """
 
     title: str = ""
@@ -240,6 +246,7 @@ class DashboardSpec:
     filter_position: str = FILTER_TOP
     main_table: str = ""
     palette: str = PALETTE_DEFAULT
+    ai_guidance: str = ""
     panels: list[PanelSpec] = field(default_factory=list)
 
     def display_title(self) -> str:
@@ -638,6 +645,7 @@ def to_json(spec: DashboardSpec) -> str:
             ),
             "main_table": spec.main_table,
             "palette": spec.palette,
+            "ai_guidance": spec.ai_guidance,
         },
         "panels": [_panel_to_dict(panel) for panel in spec.panels],
     }
@@ -700,5 +708,8 @@ def from_json(text: str) -> DashboardSpec:
         filter_position=position if position in FILTER_POSITIONS else FILTER_TOP,
         main_table=str(settings.get("main_table") or ""),
         palette=str(settings.get("palette") or PALETTE_DEFAULT),
+        # Absent from anything saved before phase 33, which is why it reads as "" rather
+        # than failing the load - an older dashboard simply has no preferences yet.
+        ai_guidance=str(settings.get("ai_guidance") or ""),
         panels=[_panel_from_dict(raw) for raw in raw_panels if isinstance(raw, dict)],
     )

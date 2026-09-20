@@ -29,12 +29,14 @@ from analyst.charts import (
 )
 from engine import session as engine_session
 from engine.exceptions import DataEngineError
+from live_dashboard import ai_spec
 from live_dashboard import flatten
 from live_dashboard import html_export
 from live_dashboard import model
 from live_dashboard import payload as payload_module
 from live_dashboard import session as dashboard_session
 from live_dashboard.exceptions import DashboardDataError, DashboardExportError, LiveDashboardError
+from llm import session as llm_session
 
 logger = logging.getLogger(__name__)
 
@@ -425,7 +427,182 @@ def _delete_panel_dialog(panel_id: str) -> None:
             st.rerun(scope="app")
 
 
-def _render_pending_dialog(data: dashboard_session.BuiltData) -> None:
+@st.dialog("Describe a dashboard", width="large")
+def _ai_dialog(data: dashboard_session.BuiltData, user_id: int) -> None:
+    """Type what the dashboard should show, see what it became, then accept it.
+
+    Shaped after `app_pages/transform_data.py::_render_ai_add_dialog`, including its first
+    move: with no Light Model configured this says so and offers nothing else, rather than
+    presenting a box that would fail on submit.
+    """
+    spec = dashboard_session.get_spec()
+
+    light = llm_session.light_profile(user_id)
+    if light is None:
+        st.warning(
+            "No Light Model is configured. Set one in Settings -> LLM providers, or use "
+            "Add a visual to build this by hand.",
+            icon=":material/error:",
+        )
+        if st.button("Close", key="ld_ai_close", width="stretch",
+                     help="Closes this box without changing anything."):
+            dashboard_session.close_dialog()
+            st.rerun(scope="app")
+        return
+
+    st.text_area(
+        "What should this dashboard show?",
+        key="ld_ai_instruction",
+        height=100,
+        placeholder="total sales card, sales by customer as a bar chart, monthly trend as a "
+                    "line, and a customer filter",
+        help="Name the columns as they appear in your data for the best result. One or two "
+             "sentences is usually enough.",
+    )
+
+    with st.expander("Extra guidance for AI", expanded=False):
+        # Seeded into session state rather than passed as `value=`, so the widget has one
+        # source of truth across reruns, and written straight back onto the spec - guidance
+        # the user typed is saved whether or not they go on to generate anything.
+        if dashboard_session.LD_GUIDANCE_KEY not in st.session_state:
+            st.session_state[dashboard_session.LD_GUIDANCE_KEY] = spec.ai_guidance
+        st.text_area(
+            "Your own preferences",
+            key=dashboard_session.LD_GUIDANCE_KEY,
+            height=80,
+            placeholder="always show currency in INR; prefer horizontal bar charts",
+            help="Added on top of the fixed rules and saved with this dashboard. It can add "
+                 "a preference; it can never let the AI invent a column or a chart type.",
+        )
+        spec.ai_guidance = str(st.session_state.get(dashboard_session.LD_GUIDANCE_KEY) or "")
+
+    st.caption(
+        f":red[Read by **{light['nickname']}** ({light['default_model']}). It can only "
+        "choose from the visuals this page already has - it never writes code, and it only "
+        "uses columns your data really has.]"
+    )
+
+    if st.button("Read it", key="ld_ai_generate", type="primary", width="stretch",
+                 icon=":material/auto_awesome:",
+                 help="Turns your description into visuals. Nothing changes until you accept."):
+        _run_ai_generation(light, data)
+
+    proposed, warnings_out, clarification = dashboard_session.ai_proposal()
+    if proposed is None and not warnings_out and not clarification:
+        return
+
+    st.divider()
+    _render_ai_result(spec, proposed, warnings_out, clarification)
+
+
+def _run_ai_generation(light: dict, data: dashboard_session.BuiltData) -> None:
+    """Sends the description and stores what came back.
+
+    `propose_dashboard` never raises, so there is no error path here beyond the warnings it
+    returns - a failed call is reported as "we couldn't read that", with Add a visual still
+    sitting behind this dialog.
+    """
+    spec = dashboard_session.get_spec()
+    instruction = st.session_state.get("ld_ai_instruction", "")
+    guidance = st.session_state.get(dashboard_session.LD_GUIDANCE_KEY, "")
+    dashboard_session.clear_ai_proposal()
+
+    with st.spinner(f"Asking {light['default_model']}..."):
+        proposed, warnings_out, clarification = ai_spec.propose_dashboard(
+            light, instruction, data.tables,
+            main_table=spec.main_table, guidance=guidance,
+        )
+
+    logger.info(
+        "Plain-English dashboard produced %d visual(s), %d warning(s).",
+        0 if proposed is None else len(proposed.panels), len(warnings_out),
+    )
+    dashboard_session.set_ai_proposal(proposed, warnings_out, clarification)
+
+
+def _render_ai_result(spec: model.DashboardSpec, proposed: model.DashboardSpec | None,
+                      warnings_out: list[str], clarification: str | None) -> None:
+    """What came back, and the two honest ways to accept it.
+
+    Both are offered because both are real: generating is normally a *first draft*, which
+    replaces what is there, but a user who already has half a dashboard wants these added to
+    it. Replace says how many visuals it will remove, since that is the destructive one.
+    """
+    if clarification:
+        st.info(clarification, icon=":material/info:")
+    for warning in warnings_out:
+        st.warning(warning, icon=":material/error:")
+
+    if proposed is None or not proposed.panels:
+        st.caption(
+            ":red[Nothing was added. Try naming the columns exactly as they appear, or use "
+            "Add a visual to build it by hand.]"
+        )
+        return
+
+    st.write(f"**This becomes {len(proposed.panels)} visual(s):**")
+    for panel in proposed.panels:
+        st.write("- " + ai_spec.describe_panel(panel))
+
+    st.divider()
+    replace_column, append_column, cancel_column = st.columns([2, 2, 1])
+
+    with replace_column:
+        existing = len(spec.panels)
+        if st.button(
+            "Replace the dashboard",
+            key="ld_ai_replace",
+            type="primary",
+            width="stretch",
+            icon=":material/auto_awesome:",
+            help=(f"Removes the {existing} visual(s) already here and uses these instead."
+                  if existing else "Builds the dashboard from these visuals."),
+        ):
+            _accept_proposal(proposed, replace=True)
+    with append_column:
+        if st.button("Add to it", key="ld_ai_append", width="stretch", icon=":material/add:",
+                     help="Keeps what is already here and adds these underneath."):
+            _accept_proposal(proposed, replace=False)
+    with cancel_column:
+        if st.button("Cancel", key="ld_ai_cancel", width="stretch",
+                     help="Closes this box without changing anything."):
+            dashboard_session.clear_ai_proposal()
+            dashboard_session.close_dialog()
+            st.rerun(scope="app")
+
+
+def _accept_proposal(proposed: model.DashboardSpec, *, replace: bool) -> None:
+    """Puts the generated visuals onto the real dashboard.
+
+    The spec is mutated rather than swapped even when replacing, so the user's own settings
+    the generator has no opinion about - the logo, the theme, the palette, the main table -
+    survive a regeneration.
+    """
+    spec = dashboard_session.get_spec()
+
+    if replace:
+        spec.panels = list(proposed.panels)
+        spec.title = proposed.title or spec.title
+        spec.subtitle = proposed.subtitle or spec.subtitle
+        spec.filter_position = proposed.filter_position
+    else:
+        # Underneath what is already there, so a generated row 1 does not land on top of a
+        # hand-built one.
+        offset = max((panel.row_number for panel in spec.visuals()), default=0)
+        for panel in proposed.panels:
+            if not panel.is_filter():
+                panel.row_number += offset
+        spec.panels.extend(proposed.panels)
+
+    # The guidance is not copied from the proposal: the dialog already wrote what the user
+    # typed onto the spec, and an older proposal would carry a stale copy of it.
+    dashboard_session.clear_ai_proposal()
+    dashboard_session.close_dialog()
+    dashboard_session.queue_table_reset()
+    st.rerun(scope="app")
+
+
+def _render_pending_dialog(data: dashboard_session.BuiltData, user_id: int) -> None:
     pending = dashboard_session.pending_dialog()
     if pending is None:
         return
@@ -436,6 +613,8 @@ def _render_pending_dialog(data: dashboard_session.BuiltData) -> None:
         _edit_panel_dialog(data, payload.get("panel_id", ""))
     elif action == "delete":
         _delete_panel_dialog(payload.get("panel_id", ""))
+    elif action == "describe":
+        _ai_dialog(data, user_id)
 
 
 # --------------------------------------------------------------------------------------
@@ -591,11 +770,21 @@ def render_dashboard(user_id: int) -> None:
     _render_settings(spec)
     st.divider()
 
-    if st.button("Add a visual", key="ld_add_panel_button", type="primary",
-                 icon=":material/add_chart:",
-                 help="Add a filter, card, chart or table to this dashboard."):
-        dashboard_session.open_dialog("add")
-        st.rerun(scope="app")
+    add_column, describe_column = st.columns(2)
+    with add_column:
+        if st.button("Add a visual", key="ld_add_panel_button", type="primary",
+                     width="stretch", icon=":material/add_chart:",
+                     help="Add a filter, card, chart or table to this dashboard."):
+            dashboard_session.open_dialog("add")
+            st.rerun(scope="app")
+    with describe_column:
+        if st.button("Describe a dashboard", key="ld_ai_button", width="stretch",
+                     icon=":material/auto_awesome:",
+                     help="Say what you want in plain English and let the Light Model draft "
+                          "the visuals. You can edit every one of them afterwards."):
+            dashboard_session.clear_ai_proposal()
+            dashboard_session.open_dialog("describe")
+            st.rerun(scope="app")
 
     available = data.available_columns()
     frame, panel_ids = _spec_frame(spec, available)
@@ -652,7 +841,7 @@ def render_dashboard(user_id: int) -> None:
                     dashboard_session.open_dialog("delete", {"panel_id": panel_id})
                     st.rerun(scope="app")
 
-    _render_pending_dialog(data)
+    _render_pending_dialog(data, user_id)
 
     if spec.panels:
         st.divider()

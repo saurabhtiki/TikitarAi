@@ -354,6 +354,12 @@ class TestDashboardSpec:
         assert [item.panel_id for item in back.dashboard_spec.panels] == [panel.panel_id]
         assert back.dashboard_spec.panels[0].group_by == "department"
 
+    def test_the_ai_guidance_travels_with_it(self, task):
+        """A preference typed once has to be there next month, which means inside the Task."""
+        task.dashboard_spec.ai_guidance = "prefer horizontal bar charts"
+        back = model.from_json(model.to_json(task), name=task.name)
+        assert back.dashboard_spec.ai_guidance == "prefer horizontal bar charts"
+
     def test_the_dashboard_is_a_recipe_with_no_rows_in_it(self, task):
         """Same promise the report items make: it describes next month's data too."""
         from live_dashboard.model import VISUAL_TABLE, add_panel
