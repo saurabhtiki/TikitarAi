@@ -12,7 +12,7 @@ produces an error.
 
 import pandas as pd
 
-from analyst.charts import AGG_AVERAGE, AGG_COUNT, AGG_SUM, CHART_BAR, CHART_LINE
+from analyst.charts import AGG_AVERAGE, AGG_COUNT, AGG_SUM, CHART_BAR, CHART_LINE, CHART_PIE
 from live_dashboard import ai_spec
 from live_dashboard import model as m
 from live_dashboard.ai_spec import ProposedDashboard, ProposedPanel
@@ -153,14 +153,32 @@ def test_an_invented_visual_type_is_dropped(monkeypatch):
     assert "gauge" in warnings[0]
 
 
-def test_an_invented_sub_type_is_dropped_rather_than_repaired(monkeypatch):
-    """Turning a treemap into a bar chart would hand the user a visual they never asked for
-    and no sign that anything was changed."""
+def test_a_shape_we_cannot_draw_falls_back_and_says_so(monkeypatch):
+    """The headline of phase 34, and the one most likely to regress into a silent drop.
+
+    A treemap needs drawing code inside the exported file and there is none, but the idea
+    behind it is good - so the nearest shape is drawn and the swap is *reported*. Silently
+    turning it into a bar would hand the user a visual they never asked for with no sign
+    anything had changed; dropping it throws the idea away.
+    """
     spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(
-        panels=[_chart(sub_type="treemap")]
+        panels=[_chart(sub_type="treemap", title="Share by product")]
+    ))
+    assert spec is not None
+    assert spec.panels[0].sub_type == CHART_PIE
+    assert len(warnings) == 1
+    assert "treemap" in warnings[0] and "pie" in warnings[0].lower()
+    assert "Share by product" in warnings[0]
+
+
+def test_a_shape_with_no_honest_stand_in_is_still_refused(monkeypatch):
+    """The fence is wider now, not gone. Nothing on this page resembles a map, and drawing
+    a bar chart of geography would be a wrong answer rather than a near one."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(
+        panels=[_chart(sub_type="map")]
     ))
     assert spec is None
-    assert "treemap" in warnings[0]
+    assert "map" in warnings[0]
 
 
 def test_a_missing_sub_type_takes_the_default(monkeypatch):
@@ -179,12 +197,35 @@ def test_an_aggregation_synonym_is_understood(monkeypatch):
 
 
 def test_an_unknown_aggregation_is_dropped(monkeypatch):
-    """A wrong total is the one error with nothing on screen to give it away."""
+    """A wrong total is the one error with nothing on screen to give it away.
+
+    Unlike a chart shape, there is no "nearest total" worth falling back to: a geometric
+    mean silently shown as an average is a different number wearing the right label.
+    """
     spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(
-        panels=[_chart(aggregation="median")]
+        panels=[_chart(aggregation="geometric mean")]
     ))
     assert spec is None
-    assert "median" in warnings[0]
+    assert "geometric mean" in warnings[0]
+
+
+def test_the_wider_aggregations_are_understood(monkeypatch):
+    """Phase 33's five were an arbitrarily small list - the browser can do all of these."""
+    words = [("median", m.AGG_MEDIAN), ("count unique", m.AGG_DISTINCT),
+             ("standard deviation", m.AGG_STDEV), ("share", m.AGG_PERCENT_OF_TOTAL)]
+    for word, expected in words:
+        spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(
+            panels=[_chart(aggregation=word)]
+        ))
+        assert warnings == [], (word, warnings)
+        assert spec.panels[0].aggregation == expected, word
+
+    # A running total has to run along a date, so it is asked for over one.
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(
+        panels=[_chart(aggregation="cumulative", group_by="TxnDate", sub_type="line")]
+    ))
+    assert warnings == []
+    assert spec.panels[0].aggregation == m.AGG_RUNNING_TOTAL
 
 
 def test_a_count_needs_no_measure_column(monkeypatch):
@@ -386,3 +427,40 @@ def test_a_panel_is_described_in_words_a_reader_can_check():
     assert "Sum of Amount" in described
     assert "TxnDate" in described
     assert "row 2" in described
+
+
+def test_counting_different_customers_is_not_refused_for_being_text(monkeypatch):
+    """The most obvious use of "count unique", and it is over a name.
+
+    Everything else reads the cell as a number, so summing a customer name is still refused
+    - but refusing to *count* them would refuse the question the aggregation exists for.
+    """
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[
+        ProposedPanel(visual_type="card", source_table=MAIN,
+                      measure_column="Customer - CustName", aggregation="count unique",
+                      title="Customers"),
+    ]))
+
+    assert warnings == []
+    assert spec.panels[0].aggregation == m.AGG_DISTINCT
+
+
+def test_summing_a_name_is_still_refused_and_suggests_the_one_that_works(monkeypatch):
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[
+        _chart(measure_column="Customer - CustName", aggregation="sum"),
+    ]))
+
+    assert spec is None
+    assert "isn't a number" in warnings[0]
+    assert "Count unique" in warnings[0]
+
+
+def test_a_histogram_is_described_as_a_spread_rather_than_a_total(monkeypatch):
+    """A histogram totals nothing, so "Sum of Amount" would describe a different chart."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[
+        _chart(sub_type="histogram", group_by="", title="Order sizes"),
+    ]))
+
+    assert warnings == []
+    sentence = ai_spec.describe_panel(spec.panels[0])
+    assert "spread" in sentence and "Sum" not in sentence

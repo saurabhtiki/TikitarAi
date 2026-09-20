@@ -61,6 +61,28 @@ def column_type(series: pd.Series) -> str:
     return TYPE_TEXT
 
 
+def date_columns(tables: dict[str, pd.DataFrame]) -> frozenset[str]:
+    """Every column across the embedded tables that holds dates.
+
+    Names only, not per-table: a panel names one table, and two tables sharing a column name
+    almost always share its meaning. The cost of being wrong is a nominal axis where a time
+    axis was wanted, which is visible and harmless.
+
+    Here rather than in `html_export` because two callers need the same answer: the export
+    decides whether a line is spaced by elapsed time, and `model.panel_problems` decides
+    whether a running total has an order to run along.
+    """
+    found = set()
+    for frame in tables.values():
+        for name in frame.columns:
+            try:
+                if column_type(frame[name]) == TYPE_DATE:
+                    found.add(str(name))
+            except (TypeError, ValueError) as error:
+                logger.info("Could not read the type of column %r: %s", name, error)
+    return frozenset(found)
+
+
 def _cell(value, kind: str):
     """One value as something `json.dumps` can write and JavaScript can use directly.
 

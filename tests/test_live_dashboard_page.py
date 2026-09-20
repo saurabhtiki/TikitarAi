@@ -230,10 +230,10 @@ def test_the_add_dialog_offers_only_the_sub_types_that_fit_the_visual_type():
     app = _app()
     app.button(key="ld_add_panel_button").click().run()
 
-    from analyst.charts import CHART_LABELS
-
     sub_type = app.selectbox(key="ld_add_sub_type")
-    assert list(sub_type.options) == [CHART_LABELS[kind] for kind in m.CHART_SUB_TYPES]
+    assert list(sub_type.options) == [
+        m.DASHBOARD_CHART_LABELS[kind] for kind in m.CHART_SUB_TYPES
+    ]
 
 
 def test_switching_to_a_filter_changes_the_sub_types_on_offer():
@@ -439,3 +439,38 @@ def test_the_extra_guidance_is_kept_on_the_dashboard():
     app.text_area(key="ld_ai_guidance").set_value("always show currency in INR").run()
 
     assert _spec(app).ai_guidance == "always show currency in INR"
+
+
+# ------------------------------------------------- phase 34: the wider vocabulary
+
+
+def test_the_aggregation_picker_offers_the_dashboards_own_wider_list():
+    """The page and the exported file must offer the same totals, or a card could be built
+    here that the downloaded file has no arithmetic for."""
+    app = _app()
+    app.button(key="ld_add_panel_button").click().run()
+
+    aggregation = app.selectbox(key="ld_add_aggregation")
+    assert list(aggregation.options) == list(m.DASHBOARD_AGGREGATIONS.values())
+
+
+def test_the_currency_picker_appears_only_once_the_format_says_money():
+    """Asked at the moment it means something, so the form stays short for everyone else."""
+    app = _app()
+    app.button(key="ld_add_panel_button").click().run()
+    assert not [box for box in app.selectbox if box.key == "ld_add_currency"]
+
+    app.text_input(key="ld_add_properties").set_value("format:currency").run()
+
+    currency = app.selectbox(key="ld_add_currency")
+    assert list(currency.options) == list(m.CURRENCY_CODES)
+    assert not app.exception
+
+
+def test_a_combo_chart_asks_for_its_second_number_in_the_form():
+    app = _app()
+    app.button(key="ld_add_panel_button").click().run()
+    app.selectbox(key="ld_add_sub_type").set_value(m.CHART_COMBO).run()
+
+    assert app.selectbox(key="ld_add_measure_2")
+    assert not app.exception

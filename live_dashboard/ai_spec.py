@@ -46,12 +46,25 @@ from analyst.charts import (
     AGG_MAXIMUM,
     AGG_MINIMUM,
     AGG_SUM,
-    AGGREGATION_LABELS,
-    CHART_LABELS,
+    CHART_BAR,
+    CHART_BAR_HORIZONTAL,
+    CHART_PIE,
+    CHART_SCATTER,
     SORT_LABELS,
     SORT_LARGEST,
 )
+from live_dashboard import payload
 from live_dashboard.model import (
+    AGG_DISTINCT,
+    AGG_MEDIAN,
+    AGG_PERCENT_OF_TOTAL,
+    AGG_RUNNING_TOTAL,
+    AGG_STDEV,
+    CHART_BOXPLOT,
+    TEXT_FRIENDLY_AGGREGATIONS,
+    CHART_HISTOGRAM,
+    DASHBOARD_AGGREGATIONS,
+    DASHBOARD_CHART_LABELS,
     DashboardSpec,
     FILTER_LABELS,
     FILTER_POSITIONS,
@@ -98,6 +111,49 @@ _AGGREGATION_SYNONYMS: dict[str, str] = {
     "max": AGG_MAXIMUM,
     "maximum": AGG_MAXIMUM,
     "highest": AGG_MAXIMUM,
+    "middle": AGG_MEDIAN,
+    "med": AGG_MEDIAN,
+    "unique": AGG_DISTINCT,
+    "countunique": AGG_DISTINCT,
+    "distinctcount": AGG_DISTINCT,
+    "uniquecount": AGG_DISTINCT,
+    "nunique": AGG_DISTINCT,
+    "standarddeviation": AGG_STDEV,
+    "std": AGG_STDEV,
+    "spread": AGG_STDEV,
+    "share": AGG_PERCENT_OF_TOTAL,
+    "shareoftotal": AGG_PERCENT_OF_TOTAL,
+    "percentoftotal": AGG_PERCENT_OF_TOTAL,
+    "%oftotal": AGG_PERCENT_OF_TOTAL,
+    "percentage": AGG_PERCENT_OF_TOTAL,
+    "proportion": AGG_PERCENT_OF_TOTAL,
+    "cumulative": AGG_RUNNING_TOTAL,
+    "cumulativetotal": AGG_RUNNING_TOTAL,
+    "running": AGG_RUNNING_TOTAL,
+    "runningsum": AGG_RUNNING_TOTAL,
+    "runningtotal": AGG_RUNNING_TOTAL,
+    "ytd": AGG_RUNNING_TOTAL,
+}
+
+#: A chart shape we can't draw, mapped onto the nearest one we can.
+#:
+#: The fence around shapes is real and this is where it stops being silent. A shape needs
+#: drawing code *inside the exported file*; a shape with none is a blank box discovered after
+#: the file has been emailed. But dropping the visual throws away a good idea, so the nearest
+#: honest shape is drawn instead and the swap is always reported - never quietly applied.
+#:
+#: A shape with no sensible stand-in (a map) is deliberately absent: it still refuses, and
+#: says why. A gauge is absent for the same reason - flattened to a card it loses the dial,
+#: which is the only thing anyone asks a gauge for.
+_SHAPE_FALLBACKS: dict[str, str] = {
+    "treemap": CHART_PIE,
+    "sunburst": CHART_PIE,
+    "funnel": CHART_BAR_HORIZONTAL,
+    "waterfall": CHART_BAR,
+    "radar": CHART_BAR,
+    "bubble": CHART_SCATTER,
+    "violin": CHART_BOXPLOT,
+    "density": CHART_HISTOGRAM,
 }
 
 _INSTRUCTIONS = """\
@@ -118,6 +174,12 @@ Hard rules:
   means measure_column=the amount column, group_by=the customer column. Never the other
   way round.
 - A table names the columns it shows in `columns`.
+- Some sub-types need one more field, and are dropped without it:
+  bar_stacked, bar_grouped and heatmap need `colour_by` (the second breakdown);
+  combo needs `measure_column_2` (the number drawn as a line over the bars);
+  histogram needs `measure_column` and NO `group_by` - it shows one number's spread.
+- "percent_of_total" only works on a chart, never a card. "running_total" only works on a
+  chart broken down by a DATE column.
 - row_number lays the page out: visuals sharing a number sit side by side. Put cards
   together on row 1, then charts two to a row, then tables on rows of their own. Filters
   ignore row_number - say where they go with filter_position ("top" or "left").
@@ -150,7 +212,10 @@ class ProposedPanel(BaseModel):
         default="", description="Comma separated; the filter's column, or a table's columns"
     )
     measure_column: str = Field(default="", description="The number column to aggregate")
-    aggregation: str = Field(default="", description="sum, count, average, minimum, maximum")
+    measure_column_2: str = Field(
+        default="", description="Only for a combo chart: the second number, drawn as a line"
+    )
+    aggregation: str = Field(default="", description="An aggregation from the catalog")
     group_by: str = Field(default="", description="The column the number is broken down by")
     colour_by: str = Field(default="", description="Optional second breakdown, for a legend")
     sort: str = Field(default="", description="A sort order from the catalog")
@@ -187,7 +252,7 @@ def describe_catalog_for_prompt() -> str:
     """
     sub_labels: dict[str, str] = {}
     sub_labels.update(FILTER_LABELS)
-    sub_labels.update(CHART_LABELS)
+    sub_labels.update(DASHBOARD_CHART_LABELS)
 
     lines: list[str] = []
     for visual_type in VISUAL_TYPES:
@@ -199,7 +264,7 @@ def describe_catalog_for_prompt() -> str:
         lines.append("    sub-types: " + ", ".join(described))
 
     lines.append("Aggregations: " + ", ".join(
-        f"{key} ({label})" for key, label in AGGREGATION_LABELS.items()
+        f"{key} ({label})" for key, label in DASHBOARD_AGGREGATIONS.items()
     ))
     lines.append("Sort orders: " + ", ".join(
         f"{key} ({label})" for key, label in SORT_LABELS.items()
@@ -321,29 +386,45 @@ def _resolve_visual_type(proposed: ProposedPanel) -> tuple[str, str | None]:
     )
 
 
-def _resolve_sub_type(proposed: ProposedPanel, visual_type: str) -> tuple[str, str | None]:
-    """The sub-type, or a sentence saying why this row was dropped.
+def _resolve_sub_type(
+    proposed: ProposedPanel, visual_type: str
+) -> tuple[str, str | None, str | None]:
+    """The sub-type, plus either a reason the row was dropped or a note about a swap.
 
-    A blank is filled in with the visual type's default - the model leaving it out of an
-    otherwise good row is not a reason to lose the row. A *named* one that isn't in the
-    catalog is a different thing and the row goes, rather than being quietly turned into a
-    bar chart the user never asked for.
+    Returns `(sub_type, problem, note)`. A blank sub-type is filled in with the visual type's
+    default - the model leaving it out of an otherwise good row is not a reason to lose the
+    row.
+
+    A *named* shape we can't draw is the interesting case. It used to drop the row. Now
+    `_SHAPE_FALLBACKS` maps most of them onto the nearest shape we can draw and the visual is
+    still built - but never silently: the swap comes back as a note the user reads, so a pie
+    where a treemap was asked for is explained rather than discovered.
     """
     allowed = sub_types_for(visual_type)
     wanted = _key(proposed.sub_type)
     if not wanted:
-        return default_sub_type(visual_type), None
+        return default_sub_type(visual_type), None, None
     for name in allowed:
         if _key(name) == wanted:
-            return name, None
-    labels = {**FILTER_LABELS, **CHART_LABELS}
+            return name, None, None
+    labels = {**FILTER_LABELS, **DASHBOARD_CHART_LABELS}
     for name in allowed:
         if _key(labels.get(name, "")) == wanted:
-            return name, None
+            return name, None, None
+
+    instead = _SHAPE_FALLBACKS.get(wanted) if visual_type == VISUAL_CHART else None
+    if instead and instead in allowed:
+        title = str(proposed.title or "").strip() or "A visual"
+        return instead, None, (
+            f"'{title}' asked for a {proposed.sub_type.strip()}. This dashboard can't draw "
+            f"one yet, so it's a {DASHBOARD_CHART_LABELS.get(instead, instead).lower()} "
+            "instead - change it in Edit if you'd rather have something else."
+        )
+
     return "", (
         f"Skipped a {VISUAL_LABELS.get(visual_type, visual_type).lower()}: "
         f"'{proposed.sub_type}' isn't one of its styles."
-    )
+    ), None
 
 
 def _resolve_aggregation(proposed: ProposedPanel) -> tuple[str, str | None]:
@@ -356,11 +437,11 @@ def _resolve_aggregation(proposed: ProposedPanel) -> tuple[str, str | None]:
     wanted = _key(proposed.aggregation)
     if not wanted:
         return AGG_SUM, None
-    if wanted in AGGREGATION_LABELS:
+    if wanted in DASHBOARD_AGGREGATIONS:
         return wanted, None
     if wanted in _AGGREGATION_SYNONYMS:
         return _AGGREGATION_SYNONYMS[wanted], None
-    for key, label in AGGREGATION_LABELS.items():
+    for key, label in DASHBOARD_AGGREGATIONS.items():
         if _key(label) == wanted:
             return key, None
     return "", f"Skipped '{proposed.title or 'a visual'}': '{proposed.aggregation}' isn't a way of totalling."
@@ -394,15 +475,19 @@ def _build_one(
 ) -> tuple[PanelSpec | None, str | None]:
     """Turns one proposal into a real, checked panel, or says why it can't be.
 
-    Returns `(panel, warning)` with exactly one of the two set. Everything that can go wrong
-    here is the model's fault rather than the user's, so each failure becomes a sentence
-    naming what was dropped - never an exception the dialog would have to catch.
+    Returns `(panel, warning)`. A warning with no panel means the row was dropped and the
+    sentence says why; a warning *with* a panel is a note about something that was changed to
+    make the row drawable - a shape swapped for the nearest one we have. Both are shown in
+    the same list, because both are things the user would rather know than discover.
+
+    Everything that can go wrong here is the model's fault rather than the user's, so each
+    failure becomes a sentence - never an exception the dialog would have to catch.
     """
     visual_type, problem = _resolve_visual_type(proposed)
     if problem:
         return None, problem
 
-    sub_type, problem = _resolve_sub_type(proposed, visual_type)
+    sub_type, problem, note = _resolve_sub_type(proposed, visual_type)
     if problem:
         return None, problem
 
@@ -430,6 +515,7 @@ def _build_one(
         source_table=table,
         source_columns=[_match(name, known_columns) for name in _split(proposed.columns)],
         measure_column=_match(proposed.measure_column, known_columns),
+        measure_column_2=_match(proposed.measure_column_2, known_columns),
         aggregation=aggregation,
         group_by=_match(proposed.group_by, known_columns),
         colour_by=_match(proposed.colour_by, known_columns),
@@ -443,18 +529,26 @@ def _build_one(
     # The same check the Add visual dialog makes, against the same columns. A panel the
     # user built themselves is *listed* with this sentence so they can fix it; one the model
     # invented over a column that isn't there is just noise, so it goes.
-    trouble = panel_problems(panel, {name: [str(c) for c in f.columns]
-                                     for name, f in tables.items()})
+    trouble = panel_problems(
+        panel,
+        {name: [str(c) for c in f.columns] for name, f in tables.items()},
+        payload.date_columns(tables),
+    )
     if trouble:
         return None, f"Skipped '{panel.display_title()}': {trouble}"
 
     # The likely model error, and an invisible one: "sales by customer" coming back with the
     # two the wrong way round. The types are already in the prompt, so this is cheap.
-    if (visual_type in (VISUAL_CARD, VISUAL_CHART) and aggregation != AGG_COUNT
+    #
+    # Counting *different* values is the exception, and an important one: "how many
+    # customers" is the usual question and customers are text. Refusing it here would refuse
+    # the most obvious use of the whole aggregation.
+    if (visual_type in (VISUAL_CARD, VISUAL_CHART)
+            and aggregation not in TEXT_FRIENDLY_AGGREGATIONS
             and panel.measure_column not in _numeric_columns(frame)):
         return None, (
             f"Skipped '{panel.display_title()}': '{panel.measure_column}' isn't a number, so "
-            "it can't be totalled. Add it by hand if you meant to count it."
+            "it can't be totalled. Count unique would work over it if you meant to count it."
         )
 
     if bad_top_n:
@@ -463,7 +557,7 @@ def _build_one(
     if bad_row:
         logger.info("A proposed panel had an unreadable row number %r - using row 1.",
                     proposed.row_number)
-    return panel, None
+    return panel, note
 
 
 def _lay_out(panels: list[PanelSpec]) -> None:
@@ -563,6 +657,9 @@ def propose_dashboard(
         if panel is None:
             warnings.append(warning or "A visual couldn't be understood.")
             continue
+        if warning:
+            # A note, not a refusal: the visual is kept and the change is explained.
+            warnings.append(warning)
         panels.append(panel)
 
     clarification = str(response.clarification or "").strip() or None
@@ -605,12 +702,22 @@ def describe_panel(panel: PanelSpec) -> str:
         return (f"**{panel.display_title()}** - table of "
                 f"{', '.join(panel.source_columns) or 'no columns yet'} - row {panel.row_number}")
 
-    total = AGGREGATION_LABELS.get(panel.aggregation, panel.aggregation)
+    total = DASHBOARD_AGGREGATIONS.get(panel.aggregation, panel.aggregation)
     what = "rows" if panel.aggregation == AGG_COUNT else panel.measure_column
     if panel.visual_type == VISUAL_CARD:
         return f"**{panel.display_title()}** - card showing {total} of {what}"
 
-    style = CHART_LABELS.get(panel.sub_type, panel.sub_type)
+    style = DASHBOARD_CHART_LABELS.get(panel.sub_type, panel.sub_type)
+    if panel.sub_type == CHART_HISTOGRAM:
+        # A histogram totals nothing - it counts how often each size of number turns up, so
+        # "Sum of Amount" would describe a chart that isn't being drawn.
+        return (f"**{panel.display_title()}** - histogram showing how {what} is spread"
+                f" - row {panel.row_number}")
+
     breakdown = f" by {panel.group_by}" if panel.group_by else ""
+    if panel.measure_column_2:
+        what = f"{what} and {panel.measure_column_2}"
+    if panel.colour_by:
+        breakdown += f", split by {panel.colour_by}"
     return (f"**{panel.display_title()}** - {style.lower()} of {total} of {what}{breakdown}"
             f" - row {panel.row_number}")

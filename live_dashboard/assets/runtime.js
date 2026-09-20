@@ -98,8 +98,37 @@
      Numbers
      -------------------------------------------------------------------------------- */
 
+  /* The value at a fraction of the way through a sorted list, interpolated between the two
+     neighbours it falls between - the same definition a spreadsheet's PERCENTILE uses, so a
+     card and the sheet the data came from agree. */
+  function quantile(sorted, fraction) {
+    if (!sorted.length) return 0;
+    var position = (sorted.length - 1) * fraction;
+    var below = Math.floor(position);
+    var above = Math.ceil(position);
+    if (below === above) return sorted[below];
+    return sorted[below] + (sorted[above] - sorted[below]) * (position - below);
+  }
+
+  /* How many different values a column holds. Counted over the raw cells rather than the
+     numbers, because "how many customers" is the usual question and customers are text. */
+  function countDistinct(rows, column) {
+    /* Object.create(null), not {}: a plain object already "has" toString and constructor,
+       so a product actually named one of those would never be counted. */
+    var seen = Object.create(null);
+    var total = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var value = rows[i][column];
+      if (value === null || value === undefined || value === "") continue;
+      var key = String(value);
+      if (!seen[key]) { seen[key] = true; total += 1; }
+    }
+    return total;
+  }
+
   function aggregate(rows, column, how) {
     if (how === "count") return rows.length;
+    if (how === "distinct") return countDistinct(rows, column);
 
     var numbers = [];
     for (var i = 0; i < rows.length; i++) {
@@ -112,13 +141,47 @@
 
     if (how === "minimum") return Math.min.apply(null, numbers);
     if (how === "maximum") return Math.max.apply(null, numbers);
+    if (how === "first") return numbers[0];
+    if (how === "last") return numbers[numbers.length - 1];
+
+    if (how === "median" || how === "q1" || how === "q3") {
+      var sorted = numbers.slice().sort(function (a, b) { return a - b; });
+      if (how === "q1") return quantile(sorted, 0.25);
+      if (how === "q3") return quantile(sorted, 0.75);
+      return quantile(sorted, 0.5);
+    }
 
     var total = numbers.reduce(function (running, next) { return running + next; }, 0);
-    return how === "average" ? total / numbers.length : total;
+    if (how === "average") return total / numbers.length;
+
+    if (how === "stdev") {
+      /* The sample standard deviation, matching Vega-Lite's "stdev" so the same column
+         reads the same on a card and in a chart. One row has no spread to measure. */
+      if (numbers.length < 2) return 0;
+      var mean = total / numbers.length;
+      var squares = numbers.reduce(function (running, next) {
+        return running + (next - mean) * (next - mean);
+      }, 0);
+      return Math.sqrt(squares / (numbers.length - 1));
+    }
+
+    return total;
   }
 
-  function formatNumber(value, how) {
+  function formatNumber(value, how, currency) {
     if (how === "currency") {
+      /* An unknown currency code makes Intl throw, so the symbol is attempted and the plain
+         grouped number is the fallback: a card showing 12,34,567.00 beats a card showing
+         nothing at all. The reader's own locale decides the grouping. */
+      if (currency) {
+        try {
+          return new Intl.NumberFormat(undefined, {
+            style: "currency", currency: currency
+          }).format(value);
+        } catch (error) {
+          console.warn("Unknown currency " + currency + " - showing the number plainly.");
+        }
+      }
       return value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 });
     }
     if (how === "percent") {
@@ -140,7 +203,7 @@
     var rows = filteredRows(panel.source_table, null);
     var value = aggregate(rows, panel.measure_column, panel.aggregation);
     /* textContent, not innerHTML - see rule 1 at the top of this file. */
-    target.textContent = formatNumber(value, panel.number_format || "plain");
+    target.textContent = formatNumber(value, panel.number_format || "plain", panel.currency || "");
   }
 
   function renderTable(panel) {

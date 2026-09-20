@@ -1,6 +1,19 @@
 # Phase 34 — A wider vocabulary, so the chat has something to draw with
 
-**Status: planned.**
+**Status: built. Tests written and run; see Verification below.**
+
+Two things were found by building it rather than planning it, and both are fixed:
+
+- **"Count unique customers" was refused for being text.** The old check read "anything but a
+  count needs a number", which was right when there were five aggregations and wrong the
+  moment `distinct` existed - it would have refused the most obvious use of the whole thing.
+  `TEXT_FRIENDLY_AGGREGATIONS` now names the two that read a cell rather than a number.
+- **A histogram described itself as "Sum of Amount"**, a chart it isn't drawing. It now says
+  "how Amount is spread" in both the spec table and the AI's own summary.
+
+One extra test file was added that the plan did not call for: `tests/test_live_dashboard_runtime.py`
+lifts the card-maths functions out of `runtime.js` and **runs them in Node**. Asserting the
+source text of a median only proves it was typed. Skipped where Node isn't installed.
 
 ## Context
 

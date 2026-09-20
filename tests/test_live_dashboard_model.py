@@ -296,3 +296,105 @@ def test_an_empty_payload_reads_as_an_empty_dashboard():
     spec = m.from_json("{}")
     assert spec.panels == []
     assert spec.display_title() == m.UNTITLED_DASHBOARD
+
+
+# ------------------------------------------------- phase 34: the wider vocabulary
+
+#: The same tables, with one column known to hold dates - what a running total needs.
+DATES = frozenset({"TxnDate"})
+DATED_COLUMNS = {"main": ["Amount", "Category", "Customer - Name", "Region2", "TxnDate"]}
+
+
+def test_a_percentage_of_total_on_a_card_is_refused_with_a_reason():
+    """There is nothing on a card for the percentage to be *of* - the honest answer would
+    always be 100%. On a chart the other bars are the total, which is why it works there."""
+    card = chart(visual_type=m.VISUAL_CARD, aggregation=m.AGG_PERCENT_OF_TOTAL, group_by="")
+    problem = m.panel_problems(card, COLUMNS)
+
+    assert "percentage of total" in problem.lower()
+    assert "chart" in problem
+
+
+def test_a_percentage_of_total_on_a_chart_is_fine():
+    assert m.panel_problems(chart(aggregation=m.AGG_PERCENT_OF_TOTAL), COLUMNS) == ""
+
+
+def test_a_running_total_over_something_with_no_order_is_refused():
+    """A running total adds each category to the ones before it, so the order has to mean
+    something. Over unordered labels the climbing line is an accident of sorting."""
+    panel = chart(aggregation=m.AGG_RUNNING_TOTAL, group_by="Category")
+    problem = m.panel_problems(panel, DATED_COLUMNS, DATES)
+
+    assert "date" in problem.lower()
+
+
+def test_a_running_total_over_a_date_is_accepted():
+    panel = chart(aggregation=m.AGG_RUNNING_TOTAL, group_by="TxnDate")
+    assert m.panel_problems(panel, DATED_COLUMNS, DATES) == ""
+
+
+def test_a_running_total_is_left_alone_when_the_dates_are_not_known():
+    """`None` means "not known here" rather than "nothing is a date" - the check is skipped
+    rather than guessed at, or a preview with no type information would refuse everything."""
+    panel = chart(aggregation=m.AGG_RUNNING_TOTAL, group_by="Category")
+    assert m.panel_problems(panel, COLUMNS) == ""
+
+
+def test_a_histogram_needs_no_breakdown():
+    """The one chart with no group-by, and the assumption this phase had to unpick."""
+    panel = chart(sub_type=m.CHART_HISTOGRAM, group_by="")
+    assert m.panel_problems(panel, COLUMNS) == ""
+
+
+def test_a_histogram_still_needs_the_number_it_bins():
+    panel = chart(sub_type=m.CHART_HISTOGRAM, group_by="", measure_column="",
+                  aggregation=m.AGG_COUNT)
+    assert "spread" in m.panel_problems(panel, COLUMNS)
+
+
+def test_a_stacked_bar_asks_for_the_second_breakdown_it_needs():
+    problem = m.panel_problems(chart(sub_type=m.CHART_BAR_STACKED), COLUMNS)
+    assert "colour it by" in problem
+
+    fixed = chart(sub_type=m.CHART_BAR_STACKED, colour_by="Region2")
+    assert m.panel_problems(fixed, COLUMNS) == ""
+
+
+def test_a_combo_chart_asks_for_its_second_number():
+    problem = m.panel_problems(chart(sub_type=m.CHART_COMBO), COLUMNS)
+    assert "second number" in problem
+
+    unreachable = chart(sub_type=m.CHART_COMBO, measure_column_2="Nowhere")
+    assert "isn't reachable" in m.panel_problems(unreachable, COLUMNS)
+
+    fixed = chart(sub_type=m.CHART_COMBO, measure_column_2="Region2")
+    assert m.panel_problems(fixed, COLUMNS) == ""
+
+
+def test_clean_properties_keeps_a_real_currency_and_drops_an_invented_one():
+    """The same discipline every other property follows: the code goes straight into the
+    reader's browser, so only the nine on the list get there."""
+    assert m.clean_properties("format:currency, currency:inr")["currency"] == "INR"
+    assert "currency" not in m.clean_properties("format:currency, currency:BITCOIN")
+
+
+def test_properties_text_round_trips_the_currency():
+    cleaned = m.clean_properties("format:currency, currency:USD")
+    assert m.properties_text(cleaned) == "format:currency, currency:USD"
+    assert m.clean_properties(m.properties_text(cleaned)) == cleaned
+
+
+def test_a_second_measure_survives_being_saved_and_read_back():
+    spec = m.DashboardSpec(panels=[chart(sub_type=m.CHART_COMBO, measure_column_2="Quantity")])
+    read_back = m.from_json(m.to_json(spec))
+    assert read_back.panels[0].measure_column_2 == "Quantity"
+
+
+def test_a_dashboard_saved_before_this_phase_still_loads():
+    """Every addition is a new field with a default, which is why `SCHEMA_VERSION` stays 1."""
+    older = json.loads(m.to_json(m.DashboardSpec(panels=[chart()])))
+    for panel in older["panels"]:
+        panel.pop("measure_column_2")
+
+    read_back = m.from_json(json.dumps(older))
+    assert read_back.panels[0].measure_column_2 == ""

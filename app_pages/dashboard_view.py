@@ -22,8 +22,6 @@ import pandas as pd
 import streamlit as st
 
 from analyst.charts import (
-    AGGREGATION_LABELS,
-    CHART_LABELS,
     PALETTE_LABELS,
     SORT_LABELS,
 )
@@ -129,18 +127,23 @@ def _numeric_columns(data: dashboard_session.BuiltData, table: str) -> list[str]
 
 
 def _spec_frame(spec: model.DashboardSpec,
-                available: dict[str, list[str]]) -> tuple[pd.DataFrame, list[str]]:
+                available: dict[str, list[str]],
+                dates: frozenset[str] | None = None) -> tuple[pd.DataFrame, list[str]]:
     """The spec as rows for display, and the panel ids in the same order.
 
     Filters come first under a heading row of their own, then the visuals grouped by row
     number with the number blanked on repeats - so a shared row number reads as one block and
     the table looks like the page it describes.
+
+    `dates` is which columns hold dates, so a running total over something with no order is
+    reported here rather than drawn as an accident of sorting. `None` means "not known", in
+    which case that one check is skipped rather than guessed at.
     """
     records: list[dict] = []
     ids: list[str] = []
 
     for panel in spec.filters():
-        problem = model.panel_problems(panel, available)
+        problem = model.panel_problems(panel, available, dates)
         records.append({
             "Row": f"Filters ({spec.filter_position})",
             "Visual": model.VISUAL_LABELS[panel.visual_type],
@@ -155,12 +158,14 @@ def _spec_frame(spec: model.DashboardSpec,
 
     for row in model.group_into_rows(spec.panels):
         for position, panel in enumerate(row):
-            problem = model.panel_problems(panel, available)
+            problem = model.panel_problems(panel, available, dates)
             depends = model.depends_on_filters(spec, panel)
             records.append({
                 "Row": str(panel.row_number) if position == 0 else "",
                 "Visual": model.VISUAL_LABELS[panel.visual_type],
-                "Type": CHART_LABELS.get(panel.sub_type, panel.sub_type.replace("_", " ").title()),
+                "Type": model.DASHBOARD_CHART_LABELS.get(
+                    panel.sub_type, panel.sub_type.replace("_", " ").title()
+                ),
                 "Data source": _panel_source(panel),
                 "What it shows": _panel_logic(panel),
                 "Title": panel.display_title(),
@@ -183,11 +188,16 @@ def _panel_logic(panel: model.PanelSpec) -> str:
     """Column 5 in words - what this visual actually computes."""
     if panel.visual_type == model.VISUAL_TABLE:
         return f"{len(panel.source_columns)} column(s)"
-    measure = AGGREGATION_LABELS.get(panel.aggregation, panel.aggregation)
+    if panel.sub_type == model.CHART_HISTOGRAM:
+        # Nothing is totalled: the bars count how often each size of number turns up.
+        return f"How {panel.measure_column or '?'} is spread"
+    measure = model.DASHBOARD_AGGREGATIONS.get(panel.aggregation, panel.aggregation)
     if panel.aggregation == "count":
         shown = "Count of rows"
     else:
         shown = f"{measure} of {panel.measure_column or '?'}"
+    if panel.measure_column_2:
+        shown += f" and {panel.measure_column_2}"
     if panel.group_by:
         shown += f" by {panel.group_by}"
     if panel.colour_by:
@@ -221,7 +231,8 @@ def _panel_form(panel: model.PanelSpec, data: dashboard_session.BuiltData,
         panel.sub_type = model.default_sub_type(visual_type)
 
     sub_types = model.sub_types_for(visual_type)
-    labels = model.FILTER_LABELS if visual_type == model.VISUAL_FILTER else CHART_LABELS
+    labels = (model.FILTER_LABELS if visual_type == model.VISUAL_FILTER
+              else model.DASHBOARD_CHART_LABELS)
     panel.sub_type = st.selectbox(
         "Which style",
         options=sub_types,
@@ -266,14 +277,15 @@ def _panel_form(panel: model.PanelSpec, data: dashboard_session.BuiltData,
         )
 
     else:
-        aggregations = list(AGGREGATION_LABELS)
+        aggregations = list(model.DASHBOARD_AGGREGATIONS)
         panel.aggregation = st.selectbox(
             "What to do with the number",
             options=aggregations,
             index=aggregations.index(panel.aggregation) if panel.aggregation in aggregations else 0,
-            format_func=lambda value: AGGREGATION_LABELS[value],
+            format_func=lambda value: model.DASHBOARD_AGGREGATIONS[value],
             key=f"{key_prefix}_aggregation",
-            help="Count needs no column - it counts the rows that survive the filters.",
+            help="Count needs no column - it counts the rows that survive the filters. "
+                 "Percentage of total and Running total need a chart, not a card.",
         )
         if panel.aggregation != "count":
             panel.measure_column = st.selectbox(
@@ -287,6 +299,19 @@ def _panel_form(panel: model.PanelSpec, data: dashboard_session.BuiltData,
             ) if (numeric or columns) else ""
 
         if visual_type == model.VISUAL_CHART:
+            if panel.sub_type in model.CHARTS_NEEDING_SECOND_MEASURE:
+                second = numeric or columns
+                panel.measure_column_2 = st.selectbox(
+                    "The second number (drawn as a line)",
+                    options=second,
+                    index=second.index(panel.measure_column_2)
+                    if panel.measure_column_2 in second else 0,
+                    format_func=_source_label,
+                    key=f"{key_prefix}_measure_2",
+                    help="A combo chart draws bars for the first number and a line for this "
+                         "one, each on its own scale.",
+                ) if second else ""
+
             options = [""] + columns
             panel.group_by = st.selectbox(
                 "Break it down by",
@@ -344,6 +369,19 @@ def _panel_form(panel: model.PanelSpec, data: dashboard_session.BuiltData,
              "else is ignored.",
     ))
 
+    if panel.properties.get("number_format") == model.FORMAT_CURRENCY:
+        # Only asked once the format says money, so the form stays short for everyone else.
+        codes = list(model.CURRENCY_CODES)
+        current = panel.properties.get("currency", model.DEFAULT_CURRENCY)
+        panel.properties["currency"] = st.selectbox(
+            "Which currency",
+            options=codes,
+            index=codes.index(current) if current in codes else 0,
+            key=f"{key_prefix}_currency",
+            help="The symbol shown on the number. The reader's own device decides the "
+                 "grouping, so INR shows 12,34,567 in India.",
+        )
+
 
 @st.dialog("Add a visual", width="large")
 def _add_panel_dialog(data: dashboard_session.BuiltData) -> None:
@@ -358,7 +396,7 @@ def _add_panel_dialog(data: dashboard_session.BuiltData) -> None:
 
     _panel_form(draft, data, spec, "ld_add")
 
-    problem = model.panel_problems(draft, data.available_columns())
+    problem = model.panel_problems(draft, data.available_columns(), data.date_columns())
     if problem:
         st.caption(f":red[{problem}]")
 
@@ -389,7 +427,7 @@ def _edit_panel_dialog(data: dashboard_session.BuiltData, panel_id: str) -> None
 
     _panel_form(panel, data, spec, f"ld_edit_{panel_id}")
 
-    problem = model.panel_problems(panel, data.available_columns())
+    problem = model.panel_problems(panel, data.available_columns(), data.date_columns())
     if problem:
         st.caption(f":red[{problem}]")
 
@@ -787,7 +825,7 @@ def render_dashboard(user_id: int) -> None:
             st.rerun(scope="app")
 
     available = data.available_columns()
-    frame, panel_ids = _spec_frame(spec, available)
+    frame, panel_ids = _spec_frame(spec, available, data.date_columns())
 
     dashboard_session.consume_table_reset()
 

@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 import pandas as pd
 import streamlit as st
 
+from live_dashboard import payload
 from live_dashboard.model import DashboardSpec, find_panel, remove_panel
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,11 @@ class BuiltData:
         """Each table's real columns - what `model.panel_problems` checks a panel against."""
         return {name: [str(column) for column in frame.columns]
                 for name, frame in self.tables.items()}
+
+    def date_columns(self) -> frozenset[str]:
+        """Which of those columns hold dates - what `model.panel_problems` checks a running
+        total against, and what the export uses to space a line by elapsed time."""
+        return payload.date_columns(self.tables)
 
     def main_row_count(self, main_table: str) -> int:
         frame = self.tables.get(main_table)

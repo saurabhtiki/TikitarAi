@@ -33,11 +33,14 @@ import uuid
 from dataclasses import dataclass, field
 
 from analyst.charts import (
+    AGGREGATION_LABELS,
     AGG_COUNT,
     AGG_SUM,
     CHART_AREA,
     CHART_BAR,
     CHART_BAR_HORIZONTAL,
+    CHART_COMBO,
+    CHART_LABELS,
     CHART_LINE,
     CHART_PIE,
     CHART_SCATTER,
@@ -77,18 +80,58 @@ FILTER_LABELS: dict[str, str] = {
     FILTER_DATE_RANGE: "Date range",
 }
 
-# Chart sub-types. Phase 32's list; imported from `analyst.charts` so the exported dashboard
-# and the app's own charts never drift into two vocabularies.
+# Chart shapes the dashboard can draw but the app's own charts have no name for. Declared
+# here rather than pushed back into `analyst.charts`, because that module draws with Plotly
+# for one reader on screen and these exist only in the exported Vega-Lite page.
+CHART_BAR_STACKED = "bar_stacked"
+CHART_BAR_GROUPED = "bar_grouped"
+CHART_DONUT = "donut"
+CHART_HISTOGRAM = "histogram"
+CHART_HEATMAP = "heatmap"
+CHART_BOXPLOT = "boxplot"
+
+# Chart sub-types. The shared ones are imported from `analyst.charts` so the exported
+# dashboard and the app's own charts never drift into two vocabularies; the rest are the
+# constants above. Ordered as the picker should list them: bars together, then the
+# time-shaped ones, then the distribution and comparison shapes.
 CHART_SUB_TYPES = (
     CHART_BAR,
     CHART_BAR_HORIZONTAL,
+    CHART_BAR_STACKED,
+    CHART_BAR_GROUPED,
     CHART_LINE,
     CHART_AREA,
+    CHART_COMBO,
     CHART_PIE,
+    CHART_DONUT,
     CHART_SCATTER,
+    CHART_HISTOGRAM,
+    CHART_HEATMAP,
+    CHART_BOXPLOT,
 )
 
-# Drilldown and Pivot are phase 33 - offering them now would be a control that refuses.
+# What each shape is called on screen. The app's labels plus this module's own, in one dict
+# so the picker, the spec table and the AI's catalog all read from the same place.
+DASHBOARD_CHART_LABELS: dict[str, str] = {
+    **CHART_LABELS,
+    CHART_BAR_STACKED: "Bar — stacked",
+    CHART_BAR_GROUPED: "Bar — grouped",
+    CHART_DONUT: "Donut",
+    CHART_HISTOGRAM: "Histogram (distribution)",
+    CHART_HEATMAP: "Heatmap",
+    CHART_BOXPLOT: "Box plot (spread)",
+}
+
+# Charts that need a second breakdown or measure on top of the usual one, so
+# `panel_problems` can ask for it rather than letting a half-filled panel draw blank.
+CHARTS_NEEDING_COLOUR = frozenset({CHART_BAR_STACKED, CHART_BAR_GROUPED, CHART_HEATMAP})
+CHARTS_NEEDING_SECOND_MEASURE = frozenset({CHART_COMBO})
+
+# A histogram bins one column by itself: asking what to break it down by has no answer.
+CHARTS_WITHOUT_GROUP_BY = frozenset({CHART_HISTOGRAM})
+
+# Drilldown and Pivot are a later phase - they are new widgets in the exported page rather
+# than new chart specs, so offering them now would be a control that refuses.
 TABLE_FLAT = "flat"
 TABLE_SUB_TYPES = (TABLE_FLAT,)
 
@@ -96,6 +139,46 @@ TABLE_SUB_TYPES = (TABLE_FLAT,)
 # answer for every visual type without a special case.
 CARD_SINGLE = "single"
 CARD_SUB_TYPES = (CARD_SINGLE,)
+
+# Ways of totalling a number that the app's own charts have no name for. `analyst.charts`'s
+# five are shared with Chat with Data and report items and must keep meaning exactly what
+# they mean there; the dashboard needs more, because the browser can compute more.
+AGG_MEDIAN = "median"
+AGG_DISTINCT = "distinct"
+AGG_STDEV = "stdev"
+AGG_Q1 = "q1"
+AGG_Q3 = "q3"
+AGG_FIRST = "first"
+AGG_LAST = "last"
+AGG_PERCENT_OF_TOTAL = "percent_of_total"
+AGG_RUNNING_TOTAL = "running_total"
+
+# Everything a dashboard visual may do with a number. Starts with the app's five, so the two
+# vocabularies stay identical where they overlap and a panel built in Chat with Data reads
+# back here unchanged.
+DASHBOARD_AGGREGATIONS: dict[str, str] = {
+    **AGGREGATION_LABELS,
+    AGG_MEDIAN: "Median (middle value)",
+    AGG_DISTINCT: "Count unique",
+    AGG_STDEV: "Standard deviation",
+    AGG_Q1: "Lower quarter (25%)",
+    AGG_Q3: "Upper quarter (75%)",
+    AGG_FIRST: "First value",
+    AGG_LAST: "Last value",
+    AGG_PERCENT_OF_TOTAL: "Percentage of total",
+    AGG_RUNNING_TOTAL: "Running total",
+}
+
+# Counting rows and counting different values are meaningful for text and dates as well as
+# numbers - "how many customers" is the usual question, and customers are text. Everything
+# else here reads the cell as a number, on a card as well as in a chart, so asking for it
+# over a name would quietly answer zero.
+TEXT_FRIENDLY_AGGREGATIONS = frozenset({AGG_COUNT, AGG_DISTINCT})
+
+# The last two are not aggregations at all: they are a total compared against, or added to,
+# the totals beside them. Vega-Lite computes them as transforms, and each only makes sense in
+# some places - see `panel_problems`, which is where the refusals are worded.
+TRANSFORM_AGGREGATIONS = frozenset({AGG_PERCENT_OF_TOTAL, AGG_RUNNING_TOTAL})
 
 THEME_LIGHT = "light"
 THEME_DARK = "dark"
@@ -112,6 +195,13 @@ FORMAT_THOUSANDS = "thousands"
 FORMAT_CURRENCY = "currency"
 FORMAT_PERCENT = "percent"
 NUMBER_FORMATS = (FORMAT_PLAIN, FORMAT_THOUSANDS, FORMAT_CURRENCY, FORMAT_PERCENT)
+
+# Which currency `format:currency` writes. A short printable whitelist for the same reason
+# every other property is one: the code goes straight into the reader's browser, and a list
+# of nine ISO codes cannot carry anything but a currency. The reader's own locale decides the
+# grouping, so `INR` gives the lakh-crore grouping to someone in India.
+CURRENCY_CODES = ("INR", "USD", "GBP", "EUR", "AED", "JPY", "AUD", "CAD", "SGD")
+DEFAULT_CURRENCY = "INR"
 
 UNTITLED_PANEL = "Untitled visual"
 UNTITLED_DASHBOARD = "Untitled dashboard"
@@ -168,6 +258,10 @@ class PanelSpec:
         measure_column / aggregation: column 5's "what to show" - the number, and what to do
             with it. A count needs no measure column, which is why the two are separate
             fields rather than one sentence to be parsed.
+        measure_column_2: the second number, for the one shape that draws two at once - a
+            combo chart's line over its bars. A field rather than a second panel because the
+            two share an axis; if a third shape ever wants three numbers this should become
+            a list before it becomes `measure_column_3`.
         group_by: what the measure is broken down by - the category axis, or the slices.
         colour_by: the optional second breakdown that becomes a legend.
         sort / top_n: how categories are ordered and how many survive. `top_n` of 0 means
@@ -185,6 +279,7 @@ class PanelSpec:
     source_table: str = ""
     source_columns: list[str] = field(default_factory=list)
     measure_column: str = ""
+    measure_column_2: str = ""
     aggregation: str = AGG_SUM
     group_by: str = ""
     colour_by: str = ""
@@ -314,6 +409,12 @@ def clean_properties(raw: str | dict | None) -> dict:
                 cleaned["number_format"] = text.lower()
             else:
                 logger.info("Ignoring an unknown number format %r in a panel's properties.", text)
+        elif name == "currency":
+            code = text.upper()
+            if code in CURRENCY_CODES:
+                cleaned["currency"] = code
+            else:
+                logger.info("Ignoring an unknown currency %r in a panel's properties.", text)
         elif name == "height":
             try:
                 cleaned["height"] = max(MIN_PANEL_HEIGHT, min(int(float(text)), MAX_PANEL_HEIGHT))
@@ -337,6 +438,8 @@ def properties_text(properties: dict) -> str:
         parts.append(f"radius:{properties['radius']:g}")
     if "number_format" in properties:
         parts.append(f"format:{properties['number_format']}")
+    if "currency" in properties:
+        parts.append(f"currency:{properties['currency']}")
     if "height" in properties:
         parts.append(f"height:{properties['height']}")
     return ", ".join(parts)
@@ -478,13 +581,21 @@ def depends_on_filters(spec: DashboardSpec, panel: PanelSpec) -> list[PanelSpec]
     ]
 
 
-def panel_problems(panel: PanelSpec, available_columns: dict[str, list[str]]) -> str:
+def panel_problems(
+    panel: PanelSpec,
+    available_columns: dict[str, list[str]],
+    date_columns: frozenset[str] | None = None,
+) -> str:
     """Why this panel can't be drawn, or an empty string when it can.
 
     `available_columns` maps each embedded table name to the columns it actually carries -
     the flattened main table plus any side tables. A column that is not there is the
     requirement's warning case: the panel names a combination the confirmed relationships do
     not reach, and the honest answer is to say so rather than to guess a join.
+
+    `date_columns` is which of those columns hold dates, from `payload.date_columns`. Only a
+    running total needs it - it has to run *along* something - and `None` means "not known
+    here", which lets the check be skipped rather than guessed at.
 
     Returns a sentence the user can act on, because that is the whole value of the warning.
     """
@@ -522,13 +633,51 @@ def panel_problems(panel: PanelSpec, available_columns: dict[str, list[str]]) ->
     if missing(panel.measure_column):
         return _unreachable(panel.measure_column, panel.source_table)
 
+    if panel.visual_type == VISUAL_CARD and panel.aggregation == AGG_PERCENT_OF_TOTAL:
+        # There is nothing on a card for the percentage to be *of*. On a chart the other
+        # bars are the total; alone, the honest answer is always 100%.
+        return (
+            "A percentage of total needs something to compare against. Use it on a chart "
+            "that is broken down, or switch this card to a sum."
+        )
+
     if panel.visual_type == VISUAL_CHART:
-        if not panel.group_by:
+        if panel.sub_type == CHART_HISTOGRAM and not panel.measure_column:
+            # A count with no column is a legal card but an empty histogram: the bins are
+            # made *from* a number, so there is nothing to bin without one.
+            return "Pick the number whose spread this histogram should show."
+
+        needs_group_by = panel.sub_type not in CHARTS_WITHOUT_GROUP_BY
+        if needs_group_by and not panel.group_by:
             return "Pick what to break this chart down by."
         if missing(panel.group_by):
             return _unreachable(panel.group_by, panel.source_table)
         if missing(panel.colour_by):
             return _unreachable(panel.colour_by, panel.source_table)
+
+        if panel.sub_type in CHARTS_NEEDING_COLOUR and not panel.colour_by:
+            return (
+                f"A {DASHBOARD_CHART_LABELS.get(panel.sub_type, panel.sub_type).lower()} "
+                "needs a second breakdown. Pick a column to colour it by."
+            )
+
+        if panel.sub_type in CHARTS_NEEDING_SECOND_MEASURE:
+            if not panel.measure_column_2:
+                return "A combo chart draws a line over its bars. Pick the second number."
+            if missing(panel.measure_column_2):
+                return _unreachable(panel.measure_column_2, panel.source_table)
+
+        if panel.aggregation == AGG_RUNNING_TOTAL and date_columns is not None:
+            if panel.group_by not in date_columns:
+                # A running total adds each category to the ones before it, so the order has
+                # to mean something. Over unordered labels the line is an accident of sorting.
+                return (
+                    "A running total needs a date to run along. Break this chart down by a "
+                    "date column, or switch it to a sum."
+                )
+
+    elif panel.aggregation == AGG_RUNNING_TOTAL:
+        return "A running total needs a date to run along, so it only works on a chart."
 
     return ""
 
@@ -553,6 +702,7 @@ def _panel_to_dict(panel: PanelSpec) -> dict:
         "source_table": panel.source_table,
         "source_columns": list(panel.source_columns),
         "measure_column": panel.measure_column,
+        "measure_column_2": panel.measure_column_2,
         "aggregation": panel.aggregation,
         "group_by": panel.group_by,
         "colour_by": panel.colour_by,
@@ -611,6 +761,7 @@ def _panel_from_dict(raw: dict) -> PanelSpec:
         source_table=str(raw.get("source_table") or ""),
         source_columns=[str(name) for name in raw.get("source_columns") or []],
         measure_column=str(raw.get("measure_column") or ""),
+        measure_column_2=str(raw.get("measure_column_2") or ""),
         aggregation=str(raw.get("aggregation") or AGG_SUM),
         group_by=str(raw.get("group_by") or ""),
         colour_by=str(raw.get("colour_by") or ""),

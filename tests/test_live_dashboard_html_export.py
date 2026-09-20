@@ -260,3 +260,52 @@ def test_every_filter_widget_says_how_to_clear_itself():
 def test_the_page_ships_the_tick_box_styling():
     html = html_export.build_dashboard_html(dashboard(chart()), {"main": FRAME})
     assert ".choice-list {" in html
+
+
+# ------------------------------------------------- phase 34: the wider vocabulary
+
+
+def test_every_shape_and_every_total_survives_a_real_export():
+    """The end-to-end guard for this phase.
+
+    A shape that builds a spec in isolation can still fall over on the way into the file -
+    and the cost of finding that out later is a blank box in a reader's inbox, discovered
+    after the file has been emailed.
+    """
+    panels = [
+        chart(sub_type=sub_type, colour_by="Customer - Name", measure_column_2="Amount",
+              group_by="" if sub_type == m.CHART_HISTOGRAM else "Category",
+              title=f"A {sub_type}", row_number=index + 1)
+        for index, sub_type in enumerate(m.CHART_SUB_TYPES)
+    ]
+    panels += [
+        chart(aggregation=aggregation, group_by="When", title=f"Totalled by {aggregation}",
+              row_number=99)
+        for aggregation in m.DASHBOARD_AGGREGATIONS
+    ]
+
+    html = html_export.build_dashboard_html(dashboard(*panels), {"main": FRAME})
+    drawn = payload_of(html)["panels"]
+
+    assert len(drawn) == len(panels), "a visual was dropped on the way into the file"
+    for entry in drawn:
+        assert entry["spec"], entry["panel_id"]
+
+
+def test_a_card_carries_its_currency_into_the_page():
+    """Without this the UI's own example - "always show currency in INR" - cannot work:
+    format:currency printed 1,234.00 with no symbol at all."""
+    card = chart(visual_type=m.VISUAL_CARD, group_by="", sub_type=m.CARD_SINGLE,
+                 properties=m.clean_properties("format:currency, currency:INR"))
+    entry = payload_of(html_export.build_dashboard_html(dashboard(card), {"main": FRAME}))
+
+    assert entry["panels"][0]["currency"] == "INR"
+    assert entry["panels"][0]["number_format"] == "currency"
+
+
+def test_a_histogram_offers_no_cross_filter_field():
+    """Its bars are bins rather than values, so there is nothing a reader would filter by -
+    and wiring one to a field that isn't in the spec would do nothing visible but confusing."""
+    built = chart(sub_type=m.CHART_HISTOGRAM, group_by="")
+    entry = payload_of(html_export.build_dashboard_html(dashboard(built), {"main": FRAME}))
+    assert entry["panels"][0]["select_field"] == ""

@@ -31,10 +31,19 @@ def panel(**overrides) -> m.PanelSpec:
 # ------------------------------------------------------------------ marks
 
 
-def test_every_chart_type_produces_a_spec_with_a_mark():
+def test_every_chart_type_produces_something_drawable():
+    """Every shape the catalog offers has drawing code behind it.
+
+    The loop matters more than any single case: a sub-type added to the list without being
+    encoded would fail here, rather than in a file already sitting in a reader's inbox.
+    """
     for sub_type in m.CHART_SUB_TYPES:
-        built = vs.build_vega_spec(panel(sub_type=sub_type))
-        assert built["mark"]["type"], sub_type
+        built = vs.build_vega_spec(panel(sub_type=sub_type, measure_column_2="Quantity",
+                                         colour_by="Region"))
+        if "layer" in built:
+            assert all(layer["mark"]["type"] for layer in built["layer"]), sub_type
+        else:
+            assert built["mark"]["type"], sub_type
 
 
 def test_a_bar_puts_the_category_on_x_and_the_measure_on_y():
@@ -216,3 +225,134 @@ def test_an_unknown_chart_type_is_drawn_plainly_rather_than_left_as_a_hole():
 def test_a_panels_height_is_honoured():
     built = vs.build_vega_spec(panel(properties={"height": 500}))
     assert built["height"] == 500 - vs.CHART_CHROME_HEIGHT
+
+
+# ------------------------------------------------- phase 34: the wider vocabulary
+
+
+def test_a_stacked_and_a_grouped_bar_differ_only_by_the_offset():
+    """The single line between them, and worth pinning: they are the same encoding, and a
+    grouped bar that lost its `xOffset` would silently come back stacked."""
+    stacked = vs.build_vega_spec(panel(sub_type=m.CHART_BAR_STACKED, colour_by="Region"))
+    grouped = vs.build_vega_spec(panel(sub_type=m.CHART_BAR_GROUPED, colour_by="Region"))
+
+    assert "xOffset" not in stacked["encoding"]
+    assert grouped["encoding"]["xOffset"]["field"] == "Region"
+    assert stacked["encoding"]["color"]["field"] == "Region"
+
+    without_offset = dict(grouped["encoding"])
+    without_offset.pop("xOffset")
+    assert without_offset == stacked["encoding"]
+
+
+def test_a_donut_is_a_pie_with_a_hole():
+    pie = vs.build_vega_spec(panel(sub_type=m.CHART_PIE))
+    donut = vs.build_vega_spec(panel(sub_type=m.CHART_DONUT))
+
+    assert pie["mark"]["innerRadius"] == 0
+    assert donut["mark"]["innerRadius"] > 0
+    assert donut["encoding"]["theta"]["aggregate"] == "sum"
+
+
+def test_a_histogram_bins_one_number_and_needs_no_breakdown():
+    """The first chart with no group-by: the bars *are* the breakdown."""
+    built = vs.build_vega_spec(panel(sub_type=m.CHART_HISTOGRAM, group_by=""))
+
+    assert built["encoding"]["x"]["bin"] is True
+    assert built["encoding"]["x"]["field"] == "Amount"
+    assert built["encoding"]["y"]["aggregate"] == "count"
+    assert "params" not in built  # a bin is not something anyone filters by
+
+
+def test_a_heatmap_puts_two_categories_on_the_axes_and_the_number_in_the_colour():
+    built = vs.build_vega_spec(panel(sub_type=m.CHART_HEATMAP, colour_by="Region"))
+
+    assert built["mark"]["type"] == "rect"
+    assert built["encoding"]["x"]["type"] == "nominal"
+    assert built["encoding"]["y"]["field"] == "Region"
+    assert built["encoding"]["color"]["aggregate"] == "sum"
+    assert built["encoding"]["color"]["scale"]["scheme"] == vs.HEATMAP_SCHEME
+
+
+def test_a_box_plot_is_drawn_from_the_rows_rather_than_from_totals():
+    """Aggregating first would hand the mark one number per category to draw a box around."""
+    built = vs.build_vega_spec(panel(sub_type=m.CHART_BOXPLOT))
+
+    assert built["mark"]["type"] == "boxplot"
+    assert "aggregate" not in built["encoding"]["y"]
+    assert built["encoding"]["y"]["field"] == "Amount"
+
+
+def test_a_combo_chart_layers_a_line_over_its_bars_on_its_own_scale():
+    built = vs.build_vega_spec(panel(sub_type=m.CHART_COMBO, measure_column_2="Quantity"))
+
+    assert "mark" not in built and "encoding" not in built
+    bars, line = built["layer"]
+    assert bars["mark"]["type"] == "bar"
+    assert line["mark"]["type"] == "line"
+    assert bars["encoding"]["y"]["field"] == "Amount"
+    assert line["encoding"]["y"]["field"] == "Quantity"
+    # Two numbers in different units: one axis would flatten the smaller into the baseline.
+    assert built["resolve"]["scale"]["y"] == "independent"
+    # A layered spec takes its selection on the layer the reader actually clicks.
+    assert bars["params"][0]["name"] == vs.SELECTION_NAME
+
+
+def test_a_percentage_of_total_is_a_join_then_a_division():
+    built = vs.build_vega_spec(panel(aggregation=m.AGG_PERCENT_OF_TOTAL))
+    kinds = [list(step)[0] for step in built["transform"]]
+
+    assert kinds == ["aggregate", "joinaggregate", "calculate"]
+    assert built["encoding"]["y"]["field"] == vs.TRANSFORM_FIELD
+    assert "aggregate" not in built["encoding"]["y"]  # already totalled by the transform
+
+
+def test_a_percentage_of_total_survives_a_month_with_nothing_in_it():
+    """A zero grand total is a real dataset, not a rare one. Without the guard every bar
+    comes back null and the chart draws empty with nothing to explain it."""
+    calculation = vs.build_vega_spec(panel(aggregation=m.AGG_PERCENT_OF_TOTAL))["transform"][-1]
+    assert "_grand_total ?" in calculation["calculate"]
+
+
+def test_a_running_total_adds_up_along_the_breakdown():
+    built = vs.build_vega_spec(panel(aggregation=m.AGG_RUNNING_TOTAL, group_by="TxnDate"))
+    window = [step for step in built["transform"] if "window" in step][0]
+
+    assert window["window"][0]["op"] == "sum"
+    assert window["sort"] == [{"field": "TxnDate", "order": "ascending"}]
+    assert window["frame"] == [None, 0]  # everything up to here, not the whole column
+
+
+def test_first_and_last_are_built_out_of_a_window_because_vega_lite_has_no_such_total():
+    for aggregation, operation in [(m.AGG_FIRST, "first_value"), (m.AGG_LAST, "last_value")]:
+        built = vs.build_vega_spec(panel(aggregation=aggregation))
+        assert built["transform"][0]["window"][0]["op"] == operation
+
+
+def test_a_top_n_is_left_off_a_total_that_is_already_computed():
+    """Ranking the totals again would total the totals. Left alone rather than half-applied:
+    a Top 10 that quietly changed what "% of total" meant would be worse than no Top 10."""
+    built = vs.build_vega_spec(panel(aggregation=m.AGG_PERCENT_OF_TOTAL, top_n=5))
+    assert not any("filter" in step for step in built["transform"])
+
+
+def test_every_aggregation_on_offer_reaches_vega_one_way_or_the_other():
+    """The loop that makes this phase safe to extend.
+
+    A fourteenth aggregation added to the catalog without being wired up fails here, in
+    pytest, rather than in a dashboard already downloaded.
+    """
+    for aggregation in m.DASHBOARD_AGGREGATIONS:
+        built = vs.build_vega_spec(panel(aggregation=aggregation, group_by="TxnDate"))
+        measure = built["encoding"]["y"]
+        if aggregation in m.TRANSFORM_AGGREGATIONS or aggregation in {m.AGG_FIRST, m.AGG_LAST}:
+            assert built.get("transform"), aggregation
+            assert measure["field"] == vs.TRANSFORM_FIELD, aggregation
+        else:
+            assert measure["aggregate"] in vs._VEGA_AGGREGATES.values(), aggregation
+
+
+def test_the_measure_title_names_what_was_done_to_the_number():
+    assert vs.measure_title(panel(aggregation=m.AGG_MEDIAN)) == "Median of Amount"
+    assert vs.measure_title(panel(aggregation=m.AGG_PERCENT_OF_TOTAL)) == "% of total Amount"
+    assert vs.measure_title(panel(aggregation=m.AGG_RUNNING_TOTAL)).startswith("Running total")

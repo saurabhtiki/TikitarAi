@@ -178,6 +178,7 @@ def _panel_for_payload(panel: PanelSpec, spec: DashboardSpec,
         "measure_column": panel.measure_column,
         "aggregation": panel.aggregation,
         "number_format": panel.properties.get("number_format", "plain"),
+        "currency": panel.properties.get("currency", ""),
     }
 
     if panel.visual_type == VISUAL_CHART:
@@ -190,7 +191,9 @@ def _panel_for_payload(panel: PanelSpec, spec: DashboardSpec,
         entry["dark_config"] = vega_spec.build_vega_spec(
             panel, spec.palette, THEME_DARK, date_columns
         )["config"]
-        entry["select_field"] = panel.group_by
+        entry["select_field"] = (
+            "" if panel.sub_type in vega_spec.UNCLICKABLE_KINDS else panel.group_by
+        )
 
     return entry
 
@@ -198,16 +201,10 @@ def _panel_for_payload(panel: PanelSpec, spec: DashboardSpec,
 def _date_columns(tables: dict[str, pd.DataFrame]) -> frozenset[str]:
     """Every column across the embedded tables that holds dates.
 
-    Names only, not per-table: a panel names one table, and two tables sharing a column name
-    almost always share its meaning. The cost of being wrong is a nominal axis where a time
-    axis was wanted, which is visible and harmless.
+    Kept as a name here, delegating to `payload.date_columns`, because `panel_problems` now
+    needs the same answer and two copies of it could disagree about one column.
     """
-    found = set()
-    for frame in tables.values():
-        for name in frame.columns:
-            if pd.api.types.is_datetime64_any_dtype(frame[name]):
-                found.add(str(name))
-    return frozenset(found)
+    return payload_module.date_columns(tables)
 
 
 def build_dashboard_html(spec: DashboardSpec, tables: dict[str, pd.DataFrame]) -> str:
