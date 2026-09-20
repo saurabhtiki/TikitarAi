@@ -1,0 +1,97 @@
+{#
+  The exported dashboard's page skeleton (phase 32).
+
+  Autoescaping is on. Exactly six values are rendered `| safe`, and every one of them is
+  repo-owned or already hardened - see `html_export.py`'s module docstring, which accounts for
+  each in turn:
+
+    css, runtime_js, vega_js, vega_lite_js,
+    vega_embed_js                                repo-owned files, no interpolation
+    payload_json                                 hardened by `payload.dumps_for_script`
+
+  Every other value on this page - titles, panel headings, filter labels, warnings - is user
+  text and is escaped by Jinja. Table cells and filter options are not here at all: the
+  runtime writes them with textContent.
+#}
+<!DOCTYPE html>
+<html lang="en" data-theme="{{ theme }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<style>{{ css | safe }}</style>
+</head>
+<body>
+
+<header class="dash-header">
+  {% if logo %}
+  <img src="{{ logo }}" alt="">
+  {% endif %}
+  <div class="dash-header-text">
+    <h1 class="dash-title">{{ title }}</h1>
+    {% if subtitle %}
+    <p class="dash-subtitle">{{ subtitle }}</p>
+    {% endif %}
+  </div>
+  <button id="theme-toggle" type="button">Dark mode</button>
+</header>
+
+<div class="dash-body {{ 'filters-left' if filter_position == 'left' else '' }}">
+
+  {% if filters %}
+  <div class="filter-bar">
+    {% for filter in filters %}
+    <div class="filter">
+      <label for="filter-{{ filter.panel_id }}">{{ filter.title }}</label>
+      <div id="filter-{{ filter.panel_id }}"></div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <main class="dash-main">
+    <div id="active-filters" hidden></div>
+
+    {% for row in rows %}
+    <div class="panel-row">
+      {% for panel in row %}
+      <section class="panel" style="{{ panel.style }}">
+        <h2>{{ panel.title }}</h2>
+
+        {% if panel.problem %}
+        <p class="panel-warning">{{ panel.problem }}</p>
+
+        {% elif panel.visual_type == 'card' %}
+        <div class="card-value" id="value-{{ panel.panel_id }}">&mdash;</div>
+        <div class="card-label">{{ panel.measure_label }}</div>
+
+        {% elif panel.visual_type == 'table' %}
+        <input class="table-search" id="search-{{ panel.panel_id }}" type="search"
+               placeholder="Search this table">
+        <div class="table-scroll" id="table-{{ panel.panel_id }}"></div>
+        <p class="panel-note" id="note-{{ panel.panel_id }}"></p>
+
+        {% else %}
+        <div class="chart-host" id="chart-{{ panel.panel_id }}"></div>
+        {% endif %}
+      </section>
+      {% endfor %}
+    </div>
+    {% endfor %}
+
+    {% if not rows %}
+    <p class="panel-warning">This dashboard has no visuals yet.</p>
+    {% endif %}
+  </main>
+</div>
+
+<footer class="dash-footer">{{ generated_at }}</footer>
+
+<script id="dashboard-payload" type="application/json">{{ payload_json | safe }}</script>
+<script>{{ vega_js | safe }}</script>
+<script>{{ vega_lite_js | safe }}</script>
+<script>{{ vega_embed_js | safe }}</script>
+<script>{{ runtime_js | safe }}</script>
+
+</body>
+</html>

@@ -53,7 +53,7 @@ import logging
 import streamlit as st
 
 from analyst import session as chat_session
-from app_pages import report_items_view, report_view, saved_picker, setup_view
+from app_pages import dashboard_view, report_items_view, report_view, saved_picker, setup_view
 from app_pages.checks_view import render_checks
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
@@ -72,7 +72,7 @@ from tasks.model import UNTITLED_TASK
 
 logger = logging.getLogger(__name__)
 
-VIEWS = ["Setup", "Report-Items", "Checks", "Report"]
+VIEWS = ["Setup", "Report-Items", "Checks", "Report", "Dashboard"]
 
 VIEW_KEY = "tb_view"
 # A view change asked for by something *inside* a view, queued rather than written: the
@@ -747,7 +747,8 @@ if profile is not None:
             persist_state="session",
             help=(
                 "Setup: files, links and column meanings. Report-Items: what the report shows. "
-                "Checks: business rules and their exceptions. Report: arrange and download it."
+                "Checks: business rules and their exceptions. Report: arrange and download it. "
+                "Dashboard: build an interactive page to download."
             ),
             width="stretch",
         )
@@ -836,3 +837,13 @@ if profile is not None:
             report_view.render_report_workspace(
                 dashboard_session.get_report(), empty_pool=EMPTY_POOL
             )
+
+        elif view == "Dashboard":
+            if not loaded_tables:
+                _render_no_data(
+                    "Upload your data in Setup first — a dashboard is built from the columns "
+                    "you load.",
+                    "tb_dashboard_go_to_setup_button",
+                )
+            else:
+                dashboard_view.render_dashboard(user_id)

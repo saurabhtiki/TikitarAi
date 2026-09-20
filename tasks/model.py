@@ -12,6 +12,7 @@ by the stage that built it, and this module assembles them rather than restating
 | expected schema, links, column meanings | `chat_types.model` — the same signature §7.4 asks for |
 | calculated columns | `engine.session.get_statements()`, an ordered list of statements |
 | report items and column steps | `report_items.model` |
+| the interactive dashboard | `live_dashboard.model` |
 | criteria | `checks.model` — embedded unchanged, as its docstring promised |
 | report structure | `dashboard.skeleton` |
 
@@ -43,6 +44,9 @@ from dashboard.exceptions import ReportSkeletonError
 from dashboard.model import Report
 from engine.dictionary import ColumnEntry
 from engine.relationships import Relationship
+from live_dashboard import model as live_dashboard_model
+from live_dashboard.exceptions import DashboardStorageError
+from live_dashboard.model import DashboardSpec
 from report_items import model as report_items_model
 from report_items.exceptions import ReportItemStorageError
 from report_items.model import ReportItem
@@ -75,6 +79,8 @@ class Task:
         calculated_columns: the `ALTER`/`UPDATE` statements the session executed, in order.
             Requirement 8.2 replays these; the order is the whole content of the field.
         report_items: the ordered list of report items and column steps.
+        dashboard_spec: the interactive dashboard's panels and look. A recipe like the
+            rest - no rows, so it describes next month's data as readily as this month's.
         checks: the criteria set.
         report: the report's structure with no data in it.
     """
@@ -86,6 +92,7 @@ class Task:
     schema: ChatType = field(default_factory=ChatType)
     calculated_columns: list[str] = field(default_factory=list)
     report_items: list[ReportItem] = field(default_factory=list)
+    dashboard_spec: DashboardSpec = field(default_factory=DashboardSpec)
     checks: CheckSet = field(default_factory=CheckSet)
     report: Report = field(default_factory=Report)
 
@@ -117,6 +124,7 @@ def capture(
     report_items: list[ReportItem],
     checks: CheckSet,
     report: Report,
+    dashboard_spec: DashboardSpec | None = None,
     task_id: int | None = None,
 ) -> Task:
     """Builds a Task from the session state currently on screen.
@@ -142,6 +150,7 @@ def capture(
         report_items=list(report_items),
         checks=checks,
         report=report,
+        dashboard_spec=dashboard_spec or DashboardSpec(),
     )
 
 
@@ -166,9 +175,11 @@ def to_json(task: Task) -> str:
             "report_items": json.loads(report_items_model.to_json(task.report_items)),
             "checks": json.loads(checks_model.to_json(task.checks)),
             "report": skeleton.to_dict(task.report),
+            "dashboard": json.loads(live_dashboard_model.to_json(task.dashboard_spec)),
         }
         return json.dumps(payload, indent=2)
-    except (ChecksStorageError, ChatTypeStorageError, ReportItemStorageError, ReportSkeletonError) as error:
+    except (ChecksStorageError, ChatTypeStorageError, DashboardStorageError, ReportItemStorageError,
+            ReportSkeletonError) as error:
         logger.exception("Could not serialise task '%s'.", task.display_name())
         raise TaskStorageError(f"This task couldn't be saved ({error}).") from error
     except (TypeError, ValueError) as error:
@@ -199,9 +210,11 @@ def recipe_fingerprint(task: Task) -> str:
             "report_items": json.loads(report_items_model.to_json(task.report_items)),
             "checks": json.loads(checks_model.to_json(task.checks)),
             "report": skeleton.to_dict(task.report),
+            "dashboard": json.loads(live_dashboard_model.to_json(task.dashboard_spec)),
         }
         return json.dumps(payload, sort_keys=True)
-    except (ChecksStorageError, ReportItemStorageError, ReportSkeletonError, TypeError, ValueError) as error:
+    except (ChecksStorageError, DashboardStorageError, ReportItemStorageError, ReportSkeletonError,
+            TypeError, ValueError) as error:
         logger.exception("Could not fingerprint task '%s'.", task.display_name())
         raise TaskStorageError(f"This task's contents couldn't be compared ({error}).") from error
 
@@ -241,7 +254,9 @@ def from_json(text: str, *, task_id: int | None = None, name: str = "", descript
         items = report_items_model.from_json(json.dumps(payload.get("report_items") or {}))
         checks = checks_model.from_json(json.dumps(payload.get("checks") or {}), name=name)
         report = skeleton.from_dict(payload.get("report") or {})
-    except (ChecksStorageError, ChatTypeStorageError, ReportItemStorageError, ReportSkeletonError) as error:
+        dashboard_spec = live_dashboard_model.from_json(json.dumps(payload.get("dashboard") or {}))
+    except (ChecksStorageError, ChatTypeStorageError, DashboardStorageError, ReportItemStorageError,
+            ReportSkeletonError) as error:
         logger.exception("Stored task %s has a part that could not be read.", task_id)
         raise TaskStorageError(f"This saved task couldn't be read ({error}).") from error
 
@@ -257,4 +272,5 @@ def from_json(text: str, *, task_id: int | None = None, name: str = "", descript
         report_items=items,
         checks=checks,
         report=report,
+        dashboard_spec=dashboard_spec,
     )

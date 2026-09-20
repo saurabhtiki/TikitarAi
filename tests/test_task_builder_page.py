@@ -154,6 +154,7 @@ class TestAccess:
             "Report-Items",
             "Checks",
             "Report",
+            "Dashboard",
         ]
 
     def test_a_superuser_gets_the_page(self, tmp_path, monkeypatch):

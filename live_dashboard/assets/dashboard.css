@@ -1,0 +1,263 @@
+/*
+ * The exported dashboard's stylesheet (phase 32). Inlined verbatim into the download.
+ *
+ * Every colour is a custom property defined twice - once on :root for light, once under
+ * [data-theme="dark"] - so the theme toggle is a single attribute flip rather than a
+ * restyle. The charts are the one thing this file cannot reach: Vega-Lite paints its own
+ * axes, so `vega_spec` carries a matching pair of configs.
+ *
+ * Nothing the user types reaches this file. Panel properties are whitelisted into a handful
+ * of values by `model.clean_properties` and applied as inline width/height/border, never as
+ * author CSS.
+ */
+
+:root {
+  --page-bg: #f6f7f9;
+  --panel-bg: #ffffff;
+  --panel-border: #e2e8f0;
+  --text: #1e293b;
+  --text-muted: #64748b;
+  --accent: #2563eb;
+  --chip-bg: #e0e7ff;
+  --chip-text: #1e3a8a;
+  --table-stripe: #f8fafc;
+  --table-hover: #eef2ff;
+  --shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+
+[data-theme="dark"] {
+  --page-bg: #0f172a;
+  --panel-bg: #1e293b;
+  --panel-border: #334155;
+  --text: #e2e8f0;
+  --text-muted: #94a3b8;
+  --accent: #60a5fa;
+  --chip-bg: #1e3a8a;
+  --chip-text: #dbeafe;
+  --table-stripe: #172033;
+  --table-hover: #243049;
+  --shadow: none;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--page-bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* ---------------------------------------------------------------- header */
+
+.dash-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 24px;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.dash-header img { max-height: 44px; width: auto; }
+.dash-title { margin: 0; font-size: 20px; font-weight: 600; }
+.dash-subtitle { margin: 2px 0 0; color: var(--text-muted); font-size: 13px; }
+.dash-header-text { flex: 1; min-width: 0; }
+
+#theme-toggle {
+  border: 1px solid var(--panel-border);
+  background: var(--page-bg);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 7px 14px;
+  cursor: pointer;
+  font-size: 13px;
+}
+#theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ---------------------------------------------------------------- layout */
+
+.dash-body { display: flex; flex-direction: column; }
+.dash-body.filters-left { flex-direction: row; align-items: flex-start; }
+
+.filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 18px;
+  padding: 16px 24px;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.filters-left .filter { width: 100%; }
+.filters-left .filter-bar {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  width: 250px;
+  flex: 0 0 250px;
+  gap: 16px;
+  border-bottom: none;
+  border-right: 1px solid var(--panel-border);
+  min-height: calc(100vh - 78px);
+}
+
+.filter { display: flex; flex-direction: column; gap: 6px; width: 210px; }
+.filter > label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.filter select, .filter input[type="date"] {
+  font: inherit;
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--page-bg);
+  color: var(--text);
+}
+.filter input[type="range"] { width: 100%; }
+
+/* The tick-box list that replaced `<select multiple>`. A fixed height rather than one that
+   grows with the data: three values and three hundred must leave the filter row the same
+   shape, or a long lookup pushes the whole dashboard down the page. */
+.choice-list {
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--page-bg);
+  max-height: 132px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  /* Long customer names wrap rather than widening the box and the row it sits in. */
+  overflow-wrap: anywhere;
+}
+.choice:hover { background: var(--panel-bg); }
+.choice input { margin: 0; flex: 0 0 auto; accent-color: var(--accent); }
+.choice-all {
+  font-weight: 600;
+  border-bottom: 1px solid var(--panel-border);
+  border-radius: 4px 4px 0 0;
+  margin-bottom: 2px;
+}
+.choice-count, .range-readout { font-size: 11px; color: var(--text-muted); }
+
+.dash-main { flex: 1; padding: 16px 24px 32px; min-width: 0; }
+
+#active-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.chip {
+  background: var(--chip-bg);
+  color: var(--chip-text);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+.chip-clear { border: none; cursor: pointer; font: inherit; font-size: 12px; }
+
+/* ---------------------------------------------------------------- panels */
+
+.panel-row { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; }
+
+.panel {
+  flex: 1 1 320px;
+  min-width: 0;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 14px 16px;
+}
+
+/* Vega-Lite's `width: "container"` asks the element vega-embed wraps the chart in how wide
+   it is - but vega-embed's own stylesheet makes that element `display: inline-block`, which
+   takes its width *from its contents*. Each then waits on the other, the width resolves to
+   zero, and the chart draws nothing at all: no error, just an empty panel. Giving the
+   wrapper a real block width breaks the circle.
+
+   Two classes deep on purpose. vega-embed injects its stylesheet into <head> when it embeds,
+   which is after this file, so a single-class selector would tie on specificity and lose. */
+.panel .chart-host { width: 100%; }
+.panel .vega-embed { display: block; width: 100%; }
+
+.panel h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+.panel-note { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
+
+.card-value { font-size: 30px; font-weight: 600; line-height: 1.2; }
+.card-label { font-size: 12px; color: var(--text-muted); }
+
+.panel-warning {
+  color: #b45309;
+  font-size: 13px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+[data-theme="dark"] .panel-warning { background: #3f2d12; border-color: #78500f; color: #fcd34d; }
+
+/* ---------------------------------------------------------------- tables */
+
+.table-scroll { overflow-x: auto; max-height: 420px; overflow-y: auto; }
+.panel table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.panel th, .panel td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--panel-border);
+  white-space: nowrap;
+}
+.panel th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-bg);
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+}
+.panel th:hover { color: var(--accent); }
+.panel tbody tr:nth-child(even) { background: var(--table-stripe); }
+.panel tbody tr:hover { background: var(--table-hover); cursor: pointer; }
+.panel td.numeric { text-align: right; font-variant-numeric: tabular-nums; }
+
+.table-search {
+  font: inherit;
+  padding: 5px 9px;
+  margin-bottom: 8px;
+  width: 100%;
+  max-width: 260px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--page-bg);
+  color: var(--text);
+}
+
+.dash-footer {
+  padding: 12px 24px 24px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+@media (max-width: 760px) {
+  .dash-body.filters-left { flex-direction: column; }
+  .filters-left .filter-bar {
+    width: auto;
+    flex: none;
+    min-height: 0;
+    border-right: none;
+    border-bottom: 1px solid var(--panel-border);
+  }
+}

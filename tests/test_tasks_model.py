@@ -331,3 +331,51 @@ class TestRecipeFingerprint:
 class TestSummaryLine:
     def test_it_counts_what_the_picker_needs_to_tell_two_tasks_apart(self, task):
         assert task.summary_line() == "2 table(s) · 2 report item(s) · 1 criteria"
+
+
+class TestDashboardSpec:
+    """The interactive dashboard travels inside a Task like every other embedded part.
+
+    The test that matters most is the last one: a Task saved before phase 32 has no dashboard
+    key at all, and must still open rather than failing with no explanation.
+    """
+
+    def test_a_dashboard_survives_the_round_trip(self, task):
+        from live_dashboard.model import VISUAL_CHART, add_panel
+
+        panel = add_panel(task.dashboard_spec, VISUAL_CHART, "Sales by category")
+        panel.measure_column = "basic"
+        panel.group_by = "department"
+        task.dashboard_spec.title = "Payroll dashboard"
+
+        back = model.from_json(model.to_json(task), name=task.name)
+
+        assert back.dashboard_spec.title == "Payroll dashboard"
+        assert [item.panel_id for item in back.dashboard_spec.panels] == [panel.panel_id]
+        assert back.dashboard_spec.panels[0].group_by == "department"
+
+    def test_the_dashboard_is_a_recipe_with_no_rows_in_it(self, task):
+        """Same promise the report items make: it describes next month's data too."""
+        from live_dashboard.model import VISUAL_TABLE, add_panel
+
+        add_panel(task.dashboard_spec, VISUAL_TABLE, "Detail")
+        payload = json.loads(model.to_json(task))
+
+        assert "rows" not in json.dumps(payload["dashboard"])
+
+    def test_editing_the_dashboard_changes_the_fingerprint(self, task):
+        """Otherwise a dashboard edit would not count as an unsaved change."""
+        from live_dashboard.model import add_panel
+
+        before = model.recipe_fingerprint(task)
+        add_panel(task.dashboard_spec, title="New visual")
+
+        assert model.recipe_fingerprint(task) != before
+
+    def test_a_task_saved_before_this_phase_still_opens(self, task):
+        payload = json.loads(model.to_json(task))
+        del payload["dashboard"]
+
+        back = model.from_json(json.dumps(payload), name=task.name)
+
+        assert back.dashboard_spec.panels == []

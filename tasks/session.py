@@ -21,6 +21,7 @@ import streamlit as st
 from checks import session as checks_session
 from dashboard import session as dashboard_session
 from engine import session as engine_session
+from live_dashboard import session as live_dashboard_session
 from report_items import session as report_items_session
 from tasks.exceptions import TaskStorageError
 from tasks.model import Task, capture, recipe_fingerprint
@@ -119,6 +120,7 @@ def start_new_task(name: str) -> None:
     report_items_session.reset_report_items()
     checks_session.reset_checks()
     dashboard_session.reset_dashboard()
+    live_dashboard_session.reset_dashboard_spec()
 
     # Queued rather than written for `load_task`'s reason: the persona and description are
     # widgets, and this can run on a run where they already exist.
@@ -153,6 +155,7 @@ def _recipe_only_task() -> Task:
         report_items=report_items_session.get_items(),
         checks=checks_session.get_set(),
         report=dashboard_session.get_report(),
+        dashboard_spec=live_dashboard_session.get_spec(),
     )
 
 
@@ -215,6 +218,7 @@ def capture_task() -> Task:
         report_items=report_items_session.get_items(),
         checks=checks_session.get_set(),
         report=dashboard_session.get_report(),
+        dashboard_spec=live_dashboard_session.get_spec(),
         task_id=task_id(),
     )
 
@@ -244,6 +248,7 @@ def load_task(task: Task) -> None:
     report_items_session.replace_items(task.report_items)
     checks_session.replace_set(task.checks)
     dashboard_session.set_report(task.report)
+    live_dashboard_session.replace_spec(task.dashboard_spec)
 
     # Fingerprinted from the Task itself rather than from `capture_task()`, which cannot run
     # yet: the three fields above are still queued. It is the same value capture will produce
