@@ -185,7 +185,12 @@ def _panel_source(panel: model.PanelSpec) -> str:
 
 
 def _panel_logic(panel: model.PanelSpec) -> str:
-    """Column 5 in words - what this visual actually computes."""
+    """Column 5 in words - what this visual actually computes.
+
+    Terse, because it is one cell of a table the user is scanning. `ai_spec.describe_panel`
+    says the same thing as a sentence, for a proposal read before anything exists to scan -
+    a new chart shape usually needs a line in both.
+    """
     if panel.visual_type == model.VISUAL_TABLE:
         return f"{len(panel.source_columns)} column(s)"
     if panel.sub_type == model.CHART_HISTOGRAM:
@@ -313,22 +318,35 @@ def _panel_form(panel: model.PanelSpec, data: dashboard_session.BuiltData,
                 ) if second else ""
 
             options = [""] + columns
-            panel.group_by = st.selectbox(
-                "Break it down by",
-                options=options,
-                index=options.index(panel.group_by) if panel.group_by in options else 0,
-                format_func=lambda value: "Pick a column" if not value else _source_label(value),
-                key=f"{key_prefix}_group_by",
-                help="The category axis, or the slices of a pie. Clicking one filters every "
-                     "other visual.",
-            )
+            # Asked only where the answer is used, and worded from the same rules
+            # `model.panel_problems` refuses by - the form promising "optional" and the
+            # warning underneath calling it required is the kind of disagreement nobody
+            # reads twice.
+            if panel.sub_type not in model.CHARTS_WITHOUT_GROUP_BY:
+                panel.group_by = st.selectbox(
+                    "Break it down by",
+                    options=options,
+                    index=options.index(panel.group_by) if panel.group_by in options else 0,
+                    format_func=lambda value: (
+                        "Pick a column" if not value else _source_label(value)
+                    ),
+                    key=f"{key_prefix}_group_by",
+                    help="The category axis, or the slices of a pie. Clicking one filters "
+                         "every other visual.",
+                )
+            else:
+                panel.group_by = ""
+
+            needs_colour = panel.sub_type in model.CHARTS_NEEDING_COLOUR
             panel.colour_by = st.selectbox(
-                "Split into a legend by (optional)",
+                "Split into a legend by" if needs_colour
+                else "Split into a legend by (optional)",
                 options=options,
                 index=options.index(panel.colour_by) if panel.colour_by in options else 0,
                 format_func=lambda value: "No split" if not value else _source_label(value),
                 key=f"{key_prefix}_colour_by",
-                help="Leave as No split for a single series.",
+                help="The second breakdown this style is built around."
+                     if needs_colour else "Leave as No split for a single series.",
             )
             sorts = list(SORT_LABELS)
             panel.sort = st.selectbox(

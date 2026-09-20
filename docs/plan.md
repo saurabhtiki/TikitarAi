@@ -237,6 +237,33 @@ Recorded so nothing here makes it harder. Not built in this phase.
 
 ---
 
+## Carried into phase 35 — found by the cleanup review, deliberately not done here
+
+Three findings were real but too big to fold into a cleanup pass. Each is cheapest to do at
+the start of phase 35, because phase 35 is what adds the consumers that justify them.
+
+1. **One record per chart shape.** Shape knowledge sits in ~13 declarations across four files
+   (`model.py`'s five sets, `vega_spec.py`'s six, `ai_spec.py`'s fallbacks and prompt prose,
+   the form). Shape #14 means editing four files. A `ChartShape` record - label, vega mark,
+   needs_colour, needs_second_measure, takes_group_by, raw_rows, clickable, stands_in_for -
+   with every set derived from it makes that one row. The cost is already visible: this pass
+   had to fix the form asking a histogram for a breakdown it ignores. Phase 35's design skill
+   is a fifth reader of the same facts, and prose in `_INSTRUCTIONS` that no test ties to the
+   sets is exactly what `describe_catalog_for_prompt` was written to avoid.
+2. **Separate refusals from notes.** `_build_one` returns `(panel, warning)` where a warning
+   means "dropped" or "changed, FYI" depending on whether the panel is None, and
+   `propose_dashboard` flattens both into one list. A one-shot Generate can live with that; a
+   chat round reporting "changed 2 things, dropped 1" cannot, and every round after the first
+   inherits whatever shape that list has. A small `PanelOutcome(panel, refusal, notes)` before
+   the rounds are built is much cheaper than after.
+3. **One type map instead of two projections.** `available_columns()` throws each column's
+   type away and `date_columns()` recovers one bit of it. `payload.column_type` already knows
+   the whole answer. A single `{table: {column: type}}` built once would replace both
+   arguments, remove `panel_problems`' optional "maybe you know the dates" parameter, and give
+   `ai_spec._numeric_columns` - the same knowledge in a fourth place - somewhere to live.
+
+---
+
 ## Judgement calls to flag during the build
 
 1. **Combo adds a field to `PanelSpec` for one chart type.** Acceptable — but if a second

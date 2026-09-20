@@ -386,14 +386,13 @@ def _resolve_visual_type(proposed: ProposedPanel) -> tuple[str, str | None]:
     )
 
 
-def _resolve_sub_type(
-    proposed: ProposedPanel, visual_type: str
-) -> tuple[str, str | None, str | None]:
-    """The sub-type, plus either a reason the row was dropped or a note about a swap.
+def _resolve_sub_type(proposed: ProposedPanel, visual_type: str) -> tuple[str, str | None]:
+    """The sub-type, plus a sentence about it when there is one.
 
-    Returns `(sub_type, problem, note)`. A blank sub-type is filled in with the visual type's
-    default - the model leaving it out of an otherwise good row is not a reason to lose the
-    row.
+    Returns `(sub_type, message)` - the same convention `_build_one` uses, so the two agree:
+    a blank sub-type means the message is a refusal, and a filled one means it is a note the
+    user should read anyway. A blank *proposal* is filled in with the visual type's default;
+    the model leaving a field out of an otherwise good row is not a reason to lose the row.
 
     A *named* shape we can't draw is the interesting case. It used to drop the row. Now
     `_SHAPE_FALLBACKS` maps most of them onto the nearest shape we can draw and the visual is
@@ -403,19 +402,19 @@ def _resolve_sub_type(
     allowed = sub_types_for(visual_type)
     wanted = _key(proposed.sub_type)
     if not wanted:
-        return default_sub_type(visual_type), None, None
+        return default_sub_type(visual_type), None
     for name in allowed:
         if _key(name) == wanted:
-            return name, None, None
+            return name, None
     labels = {**FILTER_LABELS, **DASHBOARD_CHART_LABELS}
     for name in allowed:
         if _key(labels.get(name, "")) == wanted:
-            return name, None, None
+            return name, None
 
     instead = _SHAPE_FALLBACKS.get(wanted) if visual_type == VISUAL_CHART else None
     if instead and instead in allowed:
         title = str(proposed.title or "").strip() or "A visual"
-        return instead, None, (
+        return instead, (
             f"'{title}' asked for a {proposed.sub_type.strip()}. This dashboard can't draw "
             f"one yet, so it's a {DASHBOARD_CHART_LABELS.get(instead, instead).lower()} "
             "instead - change it in Edit if you'd rather have something else."
@@ -424,7 +423,7 @@ def _resolve_sub_type(
     return "", (
         f"Skipped a {VISUAL_LABELS.get(visual_type, visual_type).lower()}: "
         f"'{proposed.sub_type}' isn't one of its styles."
-    ), None
+    )
 
 
 def _resolve_aggregation(proposed: ProposedPanel) -> tuple[str, str | None]:
@@ -472,6 +471,8 @@ def _build_one(
     proposed: ProposedPanel,
     tables: dict[str, pd.DataFrame],
     main_table: str,
+    available_columns: dict[str, list[str]],
+    date_columns: frozenset[str],
 ) -> tuple[PanelSpec | None, str | None]:
     """Turns one proposal into a real, checked panel, or says why it can't be.
 
@@ -480,6 +481,9 @@ def _build_one(
     make the row drawable - a shape swapped for the nearest one we have. Both are shown in
     the same list, because both are things the user would rather know than discover.
 
+    `available_columns` and `date_columns` are passed in rather than derived from `tables`
+    here: they are the same for every proposal in one answer, and this runs once per visual.
+
     Everything that can go wrong here is the model's fault rather than the user's, so each
     failure becomes a sentence - never an exception the dialog would have to catch.
     """
@@ -487,9 +491,9 @@ def _build_one(
     if problem:
         return None, problem
 
-    sub_type, problem, note = _resolve_sub_type(proposed, visual_type)
-    if problem:
-        return None, problem
+    sub_type, note = _resolve_sub_type(proposed, visual_type)
+    if not sub_type:
+        return None, note
 
     known_tables = {_key(name): name for name in tables}
     table = _match(proposed.source_table, known_tables) or main_table
@@ -529,11 +533,7 @@ def _build_one(
     # The same check the Add visual dialog makes, against the same columns. A panel the
     # user built themselves is *listed* with this sentence so they can fix it; one the model
     # invented over a column that isn't there is just noise, so it goes.
-    trouble = panel_problems(
-        panel,
-        {name: [str(c) for c in f.columns] for name, f in tables.items()},
-        payload.date_columns(tables),
-    )
+    trouble = panel_problems(panel, available_columns, date_columns)
     if trouble:
         return None, f"Skipped '{panel.display_title()}': {trouble}"
 
@@ -647,13 +647,21 @@ def propose_dashboard(
     warnings: list[str] = []
     panels: list[PanelSpec] = []
 
+    # Both depend only on `tables`, which nothing in the loop changes - so they are read
+    # once rather than rebuilt for each of the ten proposals.
+    available_columns = {name: [str(column) for column in frame.columns]
+                         for name, frame in tables.items()}
+    date_columns = payload.date_columns(tables)
+
     for proposed in response.panels:
         if len(panels) >= MAX_PANELS:
             warnings.append(
                 f"Only the first {MAX_PANELS} visuals were kept. Ask again for the rest."
             )
             break
-        panel, warning = _build_one(proposed, tables, main_table)
+        panel, warning = _build_one(
+            proposed, tables, main_table, available_columns, date_columns
+        )
         if panel is None:
             warnings.append(warning or "A visual couldn't be understood.")
             continue
@@ -691,7 +699,8 @@ def describe_panel(panel: PanelSpec) -> str:
 
     Its own sentence rather than the spec table's columns, because this is read *before*
     anything exists to select - "Bar chart: Sum of Amount by Customer - row 2" has to stand
-    on its own.
+    on its own. `dashboard_view._panel_logic` is the terse form for that table; a new chart
+    shape usually needs a line in both.
     """
     kind = VISUAL_LABELS.get(panel.visual_type, panel.visual_type)
     if panel.is_filter():

@@ -309,3 +309,26 @@ def test_a_histogram_offers_no_cross_filter_field():
     built = chart(sub_type=m.CHART_HISTOGRAM, group_by="")
     entry = payload_of(html_export.build_dashboard_html(dashboard(built), {"main": FRAME}))
     assert entry["panels"][0]["select_field"] == ""
+
+
+def test_a_running_total_over_labels_is_refused_by_the_exporter_too():
+    """The app refuses this in the Add dialog and in the spec table; the file has to agree.
+
+    It nearly didn't: the exporter worked out which columns held dates and then checked the
+    panels without telling `panel_problems` about them, so the one rule that needs those
+    dates was skipped in the only place a reader ever sees.
+    """
+    climbing = chart(aggregation=m.AGG_RUNNING_TOTAL, group_by="Category",
+                     title="Running total by category")
+    html = html_export.build_dashboard_html(dashboard(climbing), {"main": FRAME})
+
+    assert "needs a date to run along" in html
+    assert payload_of(html)["panels"] == []  # not handed to the runtime to draw anyway
+
+
+def test_a_running_total_over_a_date_still_exports():
+    dated = chart(aggregation=m.AGG_RUNNING_TOTAL, group_by="When", title="Running total")
+    html = html_export.build_dashboard_html(dashboard(dated), {"main": FRAME})
+
+    assert "needs a date to run along" not in html
+    assert len(payload_of(html)["panels"]) == 1

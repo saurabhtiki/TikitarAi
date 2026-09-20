@@ -57,6 +57,7 @@ from live_dashboard.model import (
     AGG_RUNNING_TOTAL,
     AGG_STDEV,
     CHART_BAR_GROUPED,
+    DASHBOARD_AGGREGATIONS,
     CHART_BAR_STACKED,
     CHART_BOXPLOT,
     CHART_DONUT,
@@ -64,6 +65,7 @@ from live_dashboard.model import (
     CHART_HISTOGRAM,
     PanelSpec,
     THEME_DARK,
+    TRANSFORM_AGGREGATIONS,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,16 +111,19 @@ _VEGA_AGGREGATES: dict[str, str] = {
     AGG_Q3: "q3",
 }
 
-#: Ways of totalling that Vega-Lite has no aggregate operation for, and so are built out of
-#: transforms instead. Each writes its answer into one of the columns below and the encoding
-#: then reads that column plainly, with no `aggregate` of its own.
-#:
-#: `first` and `last` are here for a reason worth knowing: Vega-Lite's aggregate vocabulary
-#: genuinely has no first or last (its `window` transform does), so the only honest choices
-#: were to build them this way or to refuse them on charts.
-_TRANSFORM_AGGREGATIONS = frozenset(
-    {AGG_PERCENT_OF_TOTAL, AGG_RUNNING_TOTAL, AGG_FIRST, AGG_LAST}
-)
+#: Where an axis title needs different grammar from the picker's label. "Spread of Amount"
+#: reads; "Standard deviation of Amount" is a mouthful on an axis. Anything not named here
+#: uses `DASHBOARD_AGGREGATIONS`' own label, so a new aggregation gets a usable title without
+#: being added to a second map.
+_AXIS_WORDS: dict[str, str] = {
+    AGG_MINIMUM: "Smallest",
+    AGG_MAXIMUM: "Largest",
+    AGG_STDEV: "Spread of",
+    AGG_Q1: "Lower quarter of",
+    AGG_Q3: "Upper quarter of",
+    AGG_DISTINCT: "Unique",
+    AGG_MEDIAN: "Median",
+}
 
 #: The column a transform aggregation leaves its answer in. Leading underscore so it cannot
 #: collide with a real column: `flatten` prefixes its own names with the table they came from.
@@ -164,8 +169,9 @@ _ROUND_KINDS = frozenset({CHART_PIE, CHART_DONUT})
 _SELF_COLOURING_MARKS = frozenset({"arc", "rect", "boxplot"})
 
 #: Charts with no category to click, so no cross-filter to offer. A scatter plots two numbers
-#: and a histogram's bars are bins rather than values anyone filters by.
-UNCLICKABLE_KINDS = frozenset({CHART_SCATTER, CHART_HISTOGRAM})
+#: and a histogram's bars are bins rather than values anyone filters by. Private: callers ask
+#: `selection_field` rather than re-deriving the answer from this.
+_UNCLICKABLE_KINDS = frozenset({CHART_SCATTER, CHART_HISTOGRAM})
 
 #: Charts whose category axis is a real ordering rather than a set of labels. Sorting these
 #: biggest-first would scramble time, so `SORT_AUTOMATIC` leaves them alone.
@@ -215,11 +221,24 @@ def measure_title(panel: PanelSpec) -> str:
         return f"% of total {panel.measure_column}"
     if panel.aggregation == AGG_RUNNING_TOTAL:
         return f"Running total of {panel.measure_column}"
-    word = {AGG_SUM: "Sum", AGG_AVERAGE: "Average", AGG_MINIMUM: "Smallest",
-            AGG_MAXIMUM: "Largest", AGG_MEDIAN: "Median", AGG_DISTINCT: "Unique",
-            AGG_STDEV: "Spread of", AGG_Q1: "Lower quarter of", AGG_Q3: "Upper quarter of",
-            AGG_FIRST: "First", AGG_LAST: "Last"}.get(panel.aggregation, "Sum")
+    word = _AXIS_WORDS.get(panel.aggregation) or DASHBOARD_AGGREGATIONS.get(
+        panel.aggregation, "Sum"
+    )
     return f"{word} of {panel.measure_column}"
+
+
+def _chart_transforms(panel: PanelSpec) -> list[dict]:
+    """Every transform this chart needs, decided in one place rather than per shape.
+
+    Asked once by `build_vega_spec` instead of at each of `_encode_chart`'s return sites,
+    because getting it wrong produces a wrong chart with no exception - and a new shape
+    should not have to answer the question again to be drawn correctly.
+    """
+    if panel.sub_type in _RAW_ROW_KINDS or panel.sub_type == CHART_HISTOGRAM:
+        return []  # drawn from the rows themselves, so there is nothing to total first
+    if panel.sub_type in _ROUND_KINDS:
+        return _transform_aggregation(panel)  # no axis to rank along, so no Top N
+    return _transform_aggregation(panel) or _top_n_transform(panel)
 
 
 def _measure_field(panel: PanelSpec) -> dict:
@@ -230,7 +249,7 @@ def _measure_field(panel: PanelSpec) -> dict:
     is a different and usually wrong answer.
     """
     encoding: dict = {"type": "quantitative", "title": measure_title(panel)}
-    if panel.aggregation in _TRANSFORM_AGGREGATIONS:
+    if panel.aggregation in TRANSFORM_AGGREGATIONS:
         # `_transform_aggregation` has already written the answer into one column, so this
         # channel reads it plainly - aggregating an aggregate would total it twice.
         encoding["field"] = TRANSFORM_FIELD
@@ -254,7 +273,7 @@ def _transform_aggregation(panel: PanelSpec) -> list[dict]:
     Each ends with one row per category carrying `TRANSFORM_FIELD`, so `_measure_field` can
     read it as an ordinary column. Empty for every other aggregation.
     """
-    if panel.aggregation not in _TRANSFORM_AGGREGATIONS:
+    if panel.aggregation not in TRANSFORM_AGGREGATIONS:
         return []
 
     measure = panel.measure_column
@@ -344,7 +363,7 @@ def _top_n_transform(panel: PanelSpec) -> list[dict]:
     if not panel.top_n:
         return []
 
-    if panel.aggregation in _TRANSFORM_AGGREGATIONS:
+    if panel.aggregation in TRANSFORM_AGGREGATIONS:
         # The transform has already collapsed the rows to one per category, and ranking them
         # again would total the totals. Left alone rather than half-applied, because a Top 10
         # that quietly changed what "% of total" meant would be worse than no Top 10.
@@ -392,8 +411,13 @@ def _colour_encoding(panel: PanelSpec, palette: list[str]) -> dict:
 
 def _encode_chart(
     panel: PanelSpec, palette: list[str], date_columns: frozenset[str]
-) -> tuple[dict, list[dict]]:
-    """The encoding block and any transforms for one chart, by sub-type."""
+) -> dict:
+    """The encoding block for one chart, by sub-type.
+
+    Encodings only. What has to be totalled first is `_chart_transforms`' question, asked
+    once by `build_vega_spec` - so a new shape added here cannot get it wrong by forgetting
+    to answer it on the way out.
+    """
     measure = _measure_field(panel)
     category = {
         "field": panel.group_by,
@@ -414,8 +438,7 @@ def _encode_chart(
                     "title": panel.group_by,
                     "scale": {"range": list(palette)},
                 },
-            },
-            _transform_aggregation(panel),
+            }
         )
 
     if panel.sub_type == CHART_HISTOGRAM:
@@ -428,8 +451,7 @@ def _encode_chart(
                       "bin": True, "title": panel.measure_column},
                 "y": {"aggregate": "count", "type": "quantitative", "title": "How many rows"},
                 "color": {"value": palette[0]},
-            },
-            [],
+            }
         )
 
     if panel.sub_type == CHART_HEATMAP:
@@ -441,8 +463,7 @@ def _encode_chart(
                 "x": {"field": panel.group_by, "type": "nominal", "title": panel.group_by},
                 "y": {"field": panel.colour_by, "type": "nominal", "title": panel.colour_by},
                 "color": measure,
-            },
-            _transform_aggregation(panel),
+            }
         )
 
     if panel.sub_type == CHART_BOXPLOT:
@@ -454,8 +475,7 @@ def _encode_chart(
                       "axis": {"labelAngle": LABEL_ANGLE_EXPRESSION}},
                 "y": measure,
                 "color": {"value": palette[0]},
-            },
-            [],
+            }
         )
 
     if panel.sub_type == CHART_SCATTER:
@@ -467,7 +487,7 @@ def _encode_chart(
                   "title": panel.measure_column},
         }
         encoding.update(_colour_encoding(panel, palette))
-        return encoding, []
+        return encoding
 
     if panel.sub_type == CHART_BAR_HORIZONTAL:
         # The categories already run flat down the side, so there is no angle to decide.
@@ -485,8 +505,7 @@ def _encode_chart(
         # slot inside the category instead of a segment on top of the one below.
         encoding["xOffset"] = {"field": panel.colour_by, "type": "nominal"}
 
-    transforms = _transform_aggregation(panel) or _top_n_transform(panel)
-    return encoding, transforms
+    return encoding
 
 
 def _second_measure_field(panel: PanelSpec) -> dict:
@@ -496,7 +515,7 @@ def _second_measure_field(panel: PanelSpec) -> dict:
         "type": "quantitative",
         "title": panel.measure_column_2,
     }
-    if panel.aggregation not in _TRANSFORM_AGGREGATIONS and panel.aggregation != AGG_COUNT:
+    if panel.aggregation not in TRANSFORM_AGGREGATIONS and panel.aggregation != AGG_COUNT:
         encoding["aggregate"] = vega_aggregate(panel.aggregation)
     return encoding
 
@@ -519,6 +538,19 @@ def _combo_layers(panel: PanelSpec, encoding: dict, palette: list[str]) -> list[
                   "color": palette[1 % len(palette)]},
          "encoding": line_encoding},
     ]
+
+
+def selection_field(panel: PanelSpec) -> str:
+    """The column a click on this chart filters by, or "" when clicking it means nothing.
+
+    One answer, asked by both the spec builder and the exporter. They used to decide it
+    separately with slightly different rules, which held only because every non-histogram
+    chart happens to have a breakdown - so the runtime could have been told to filter on a
+    field the spec never offered.
+    """
+    if panel.sub_type in _UNCLICKABLE_KINDS:
+        return ""
+    return panel.group_by
 
 
 def build_vega_spec(
@@ -554,7 +586,8 @@ def build_vega_spec(
         logger.warning("Unknown chart type '%s' in a panel - drawing it as a bar.", panel.sub_type)
         mark = "bar"
 
-    encoding, transforms = _encode_chart(panel, palette, date_columns)
+    encoding = _encode_chart(panel, palette, date_columns)
+    transforms = _chart_transforms(panel)
 
     spec: dict = {
         "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
@@ -589,18 +622,17 @@ def build_vega_spec(
 
     # What makes the chart clickable. The runtime listens for this parameter and turns it
     # into the cross-filter; a chart with no category to pick has nothing to select.
-    if panel.sub_type not in UNCLICKABLE_KINDS:
-        select_field = panel.group_by
-        if select_field:
-            selection = {
-                "name": SELECTION_NAME,
-                "select": {"type": "point", "fields": [select_field], "toggle": False},
-            }
-            if "layer" in spec:
-                # Vega-Lite only takes a selection inside a unit spec, so a layered chart
-                # puts it on the layer the reader actually clicks: the bars.
-                spec["layer"][0]["params"] = [selection]
-            else:
-                spec["params"] = [selection]
+    select_field = selection_field(panel)
+    if select_field:
+        selection = {
+            "name": SELECTION_NAME,
+            "select": {"type": "point", "fields": [select_field], "toggle": False},
+        }
+        if "layer" in spec:
+            # Vega-Lite only takes a selection inside a unit spec, so a layered chart puts
+            # it on the layer the reader actually clicks: the bars.
+            spec["layer"][0]["params"] = [selection]
+        else:
+            spec["params"] = [selection]
 
     return spec

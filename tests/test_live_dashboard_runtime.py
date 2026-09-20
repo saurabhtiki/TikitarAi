@@ -23,7 +23,7 @@ from live_dashboard import html_export
 #: The card-maths functions, lifted out of the runtime by name. They are plain declarations
 #: at one level of indentation inside the module's closure, which is what makes this
 #: possible; a rewrite that nests them differently fails loudly here rather than silently.
-LIFTED = ("quantile", "countDistinct", "aggregate", "formatNumber")
+LIFTED = ("quantile", "uniqueValues", "aggregate", "formatNumber")
 
 
 def _function_source(runtime: str, name: str) -> str:
@@ -39,7 +39,10 @@ def _run(script: str) -> dict:
         pytest.skip("Node isn't installed, so the page's own JavaScript can't be run here.")
 
     runtime = html_export._asset("runtime.js")
-    source = "".join(_function_source(runtime, name) for name in LIFTED) + script
+    fractions = re.search(r"\n  var QUANTILE_FRACTIONS = .*?;\n", runtime, re.DOTALL)
+    assert fractions, "QUANTILE_FRACTIONS is no longer a plain declaration in runtime.js"
+    source = (fractions.group(0)
+              + "".join(_function_source(runtime, name) for name in LIFTED) + script)
     try:
         finished = subprocess.run(
             [node, "--input-type=module", "-e", source],

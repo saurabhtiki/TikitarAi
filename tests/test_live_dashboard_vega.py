@@ -345,7 +345,7 @@ def test_every_aggregation_on_offer_reaches_vega_one_way_or_the_other():
     for aggregation in m.DASHBOARD_AGGREGATIONS:
         built = vs.build_vega_spec(panel(aggregation=aggregation, group_by="TxnDate"))
         measure = built["encoding"]["y"]
-        if aggregation in m.TRANSFORM_AGGREGATIONS or aggregation in {m.AGG_FIRST, m.AGG_LAST}:
+        if aggregation in m.TRANSFORM_AGGREGATIONS:
             assert built.get("transform"), aggregation
             assert measure["field"] == vs.TRANSFORM_FIELD, aggregation
         else:

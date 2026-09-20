@@ -191,20 +191,9 @@ def _panel_for_payload(panel: PanelSpec, spec: DashboardSpec,
         entry["dark_config"] = vega_spec.build_vega_spec(
             panel, spec.palette, THEME_DARK, date_columns
         )["config"]
-        entry["select_field"] = (
-            "" if panel.sub_type in vega_spec.UNCLICKABLE_KINDS else panel.group_by
-        )
+        entry["select_field"] = vega_spec.selection_field(panel)
 
     return entry
-
-
-def _date_columns(tables: dict[str, pd.DataFrame]) -> frozenset[str]:
-    """Every column across the embedded tables that holds dates.
-
-    Kept as a name here, delegating to `payload.date_columns`, because `panel_problems` now
-    needs the same answer and two copies of it could disagree about one column.
-    """
-    return payload_module.date_columns(tables)
 
 
 def build_dashboard_html(spec: DashboardSpec, tables: dict[str, pd.DataFrame]) -> str:
@@ -225,9 +214,10 @@ def build_dashboard_html(spec: DashboardSpec, tables: dict[str, pd.DataFrame]) -
             the download and nothing else.
     """
     available = {name: [str(column) for column in frame.columns] for name, frame in tables.items()}
-    date_columns = _date_columns(tables)
+    date_columns = payload_module.date_columns(tables)
 
-    problems = {panel.panel_id: panel_problems(panel, available) for panel in spec.panels}
+    problems = {panel.panel_id: panel_problems(panel, available, date_columns)
+                for panel in spec.panels}
 
     template_rows = [
         [_panel_for_template(panel, problems[panel.panel_id]) for panel in row]

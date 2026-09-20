@@ -175,10 +175,17 @@ DASHBOARD_AGGREGATIONS: dict[str, str] = {
 # over a name would quietly answer zero.
 TEXT_FRIENDLY_AGGREGATIONS = frozenset({AGG_COUNT, AGG_DISTINCT})
 
+# Totals Vega-Lite has no aggregate operation for, so the exported chart builds them out of
+# transforms instead (see `vega_spec._transform_aggregation`).
+#
 # The last two are not aggregations at all: they are a total compared against, or added to,
-# the totals beside them. Vega-Lite computes them as transforms, and each only makes sense in
-# some places - see `panel_problems`, which is where the refusals are worded.
-TRANSFORM_AGGREGATIONS = frozenset({AGG_PERCENT_OF_TOTAL, AGG_RUNNING_TOTAL})
+# the totals beside them, and each only makes sense in some places - see `panel_problems`,
+# which is where the refusals are worded. The first two are here for a duller reason:
+# Vega-Lite's aggregate vocabulary genuinely has no first or last, only its `window`
+# transform does.
+TRANSFORM_AGGREGATIONS = frozenset(
+    {AGG_FIRST, AGG_LAST, AGG_PERCENT_OF_TOTAL, AGG_RUNNING_TOTAL}
+)
 
 THEME_LIGHT = "light"
 THEME_DARK = "dark"
@@ -641,6 +648,11 @@ def panel_problems(
             "that is broken down, or switch this card to a sum."
         )
 
+    if panel.visual_type != VISUAL_CHART and panel.aggregation == AGG_RUNNING_TOTAL:
+        # Beside its sibling above rather than as an `elif` forty lines below, so the two
+        # "wrong place for this total" refusals read as the pair they are.
+        return "A running total needs a date to run along, so it only works on a chart."
+
     if panel.visual_type == VISUAL_CHART:
         if panel.sub_type == CHART_HISTOGRAM and not panel.measure_column:
             # A count with no column is a legal card but an empty histogram: the bins are
@@ -667,17 +679,14 @@ def panel_problems(
             if missing(panel.measure_column_2):
                 return _unreachable(panel.measure_column_2, panel.source_table)
 
-        if panel.aggregation == AGG_RUNNING_TOTAL and date_columns is not None:
-            if panel.group_by not in date_columns:
-                # A running total adds each category to the ones before it, so the order has
-                # to mean something. Over unordered labels the line is an accident of sorting.
-                return (
-                    "A running total needs a date to run along. Break this chart down by a "
-                    "date column, or switch it to a sum."
-                )
-
-    elif panel.aggregation == AGG_RUNNING_TOTAL:
-        return "A running total needs a date to run along, so it only works on a chart."
+        # A running total adds each category to the ones before it, so the order has to mean
+        # something. Over unordered labels the climbing line is an accident of sorting.
+        if (panel.aggregation == AGG_RUNNING_TOTAL and date_columns is not None
+                and panel.group_by not in date_columns):
+            return (
+                "A running total needs a date to run along. Break this chart down by a "
+                "date column, or switch it to a sum."
+            )
 
     return ""
 

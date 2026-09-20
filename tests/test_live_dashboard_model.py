@@ -302,7 +302,7 @@ def test_an_empty_payload_reads_as_an_empty_dashboard():
 
 #: The same tables, with one column known to hold dates - what a running total needs.
 DATES = frozenset({"TxnDate"})
-DATED_COLUMNS = {"main": ["Amount", "Category", "Customer - Name", "Region2", "TxnDate"]}
+DATED_COLUMNS = {"main": COLUMNS["main"] + ["TxnDate"]}
 
 
 def test_a_percentage_of_total_on_a_card_is_refused_with_a_reason():
