@@ -1,13 +1,13 @@
 import logging
-from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
 
 from auth.exceptions import PhotoProcessingError
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-PHOTOS_DIR = Path("data") / "photos"
+PHOTOS_DIR = get_data_dir() / "photos"
 PHOTO_SIZE = 256
 
 

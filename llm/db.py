@@ -6,10 +6,11 @@ from pathlib import Path
 from llm.crypto import encrypt_api_key
 from llm.exceptions import LLMDatabaseError
 from llm.models import profile_label
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
+DEFAULT_DB_PATH = get_data_dir() / "tikitarai.db"
 
 _CREATE_LLM_PROFILES_TABLE = """
 CREATE TABLE IF NOT EXISTS llm_profiles (

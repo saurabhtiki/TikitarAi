@@ -25,10 +25,11 @@ import re
 from pathlib import Path
 
 from meetings.exceptions import MeetingStorageError
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STORAGE_ROOT = Path("data") / "meeting_storage"
+DEFAULT_STORAGE_ROOT = get_data_dir() / "meeting_storage"
 
 REF_DOCS_FOLDER = "ref_docs"
 

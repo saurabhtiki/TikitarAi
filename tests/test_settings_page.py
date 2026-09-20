@@ -4,6 +4,7 @@ from streamlit.testing.v1 import AppTest
 
 from auth.db import create_user, init_db, seed_default_admin
 from llm.db import create_profile, init_llm_table, list_profiles
+from utils.env import get_data_dir
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SETTINGS_PAGE_PATH = str(PROJECT_ROOT / "app_pages" / "settings.py")
@@ -51,7 +52,7 @@ def test_switching_to_password_section_shows_password_fields(tmp_path, monkeypat
 
 def test_llm_section_lists_only_own_profiles(tmp_path, monkeypatch):
     at = _make_app(tmp_path, monkeypatch)
-    db_path = Path("data") / "tikitarai.db"
+    db_path = get_data_dir() / "tikitarai.db"
     create_user("someone@example.com", "Someone", "password123", "normal_user", db_path)
     create_profile(1, "My profile", "local", "http://localhost:1234", None, "llama-3", db_path=db_path)
     create_profile(2, "Someone else's profile", "local", "http://localhost:5678", None, "phi-3", db_path=db_path)
@@ -72,7 +73,7 @@ def test_set_light_model_button_does_not_crash(tmp_path, monkeypatch):
     same run. The fix queues the reset and applies it before the widget is (re)created
     on the next run."""
     at = _make_app(tmp_path, monkeypatch)
-    db_path = Path("data") / "tikitarai.db"
+    db_path = get_data_dir() / "tikitarai.db"
     created = create_profile(1, "Local LM Studio", "local", "http://localhost:1234", None, "llama-3", db_path=db_path)
 
     at.segmented_control(key="settings_section").set_value("LLM providers")
@@ -96,7 +97,7 @@ def test_set_light_model_button_does_not_crash(tmp_path, monkeypatch):
 
 def test_set_default_model_button_does_not_crash(tmp_path, monkeypatch):
     at = _make_app(tmp_path, monkeypatch)
-    db_path = Path("data") / "tikitarai.db"
+    db_path = get_data_dir() / "tikitarai.db"
     create_profile(1, "Local LM Studio", "local", "http://localhost:1234", None, "llama-3", db_path=db_path)
 
     at.segmented_control(key="settings_section").set_value("LLM providers")

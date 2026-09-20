@@ -31,6 +31,7 @@ from reports.model import ReportSetup, StoredTable
 from reports.store import open_store, write_tables
 from tasks.db import init_tasks_table, save_task
 from tasks.model import Task
+from utils.env import get_data_dir
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PAGE_PATH = str(PROJECT_ROOT / "app_pages" / "chat_with_reports.py")
@@ -199,7 +200,7 @@ def test_the_shared_data_is_untouched_by_a_refused_change(tmp_path, monkeypatch)
     _open_report(app, task_id)
     app.chat_input(key="cr_chat_input").set_value("Delete the blank rows").run()
 
-    columns = [row[0] for row in duckdb.connect(str(tmp_path / "data" / "reports" / f"report_{task_id}.duckdb"))
+    columns = [row[0] for row in duckdb.connect(str(tmp_path / get_data_dir() / "reports" / f"report_{task_id}.duckdb"))
                .execute("DESCRIBE sales").fetchall()]
     assert columns == ["sale_id", "cust_id", "amount"]
 

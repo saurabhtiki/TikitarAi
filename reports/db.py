@@ -23,10 +23,11 @@ from pathlib import Path
 
 from reports.exceptions import ReportDataError
 from reports.model import ReportSetup, from_json, to_json
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
+DEFAULT_DB_PATH = get_data_dir() / "tikitarai.db"
 
 # `task_id` is the primary key, not merely a reference: a report has exactly one dataset,
 # because only the latest data is kept. The cascade means deleting the report clears this

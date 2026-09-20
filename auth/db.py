@@ -10,10 +10,11 @@ from auth.exceptions import (
     ProtectedAccountError,
 )
 from auth.passwords import hash_password, verify_password
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
+DEFAULT_DB_PATH = get_data_dir() / "tikitarai.db"
 
 SEED_ADMIN_EMAIL = "admin@admin.com"
 SEED_ADMIN_PASSWORD = "nimda"

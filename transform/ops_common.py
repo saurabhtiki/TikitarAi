@@ -14,6 +14,7 @@ a join. A step that genuinely cannot proceed raises `InvalidStepParamsError` ins
 
 import logging
 
+import numpy as np
 import pandas as pd
 
 from cleaner.profiling import blank_mask
@@ -135,6 +136,24 @@ def to_numeric(series: pd.Series, column: str) -> tuple[pd.Series, list[str]]:
     ]
 
 
+def _matching_time_unit(converted: pd.Series, second_pass: pd.Series) -> pd.Series:
+    """A copy of `converted` that the second pass's dates can be written into.
+
+    The two passes can come back at different time precisions — pandas reads a column of
+    plain numbers as whole seconds and a column of text as microseconds, for example.
+    Writing the finer one into the coarser one then raises instead of filling in the
+    blanks, so both are lifted to the finer precision first.
+    """
+    try:
+        common_unit = np.result_type(converted.dtype, second_pass.dtype)
+        return converted.astype(common_unit)
+    except (TypeError, ValueError) as error:
+        # Time zones or a column pandas gave back as plain objects: nothing to line up,
+        # so leave the first pass as it is and let the assignment below do what it can.
+        logger.debug("Could not line up date precisions for a column: %s", error)
+        return converted.copy()
+
+
 def to_datetime(series: pd.Series, column: str) -> tuple[pd.Series, list[str]]:
     """A column as dates, plus a warning naming what wouldn't convert.
 
@@ -153,10 +172,11 @@ def to_datetime(series: pd.Series, column: str) -> tuple[pd.Series, list[str]]:
     converted = pd.to_datetime(series, errors="coerce", format="ISO8601")
     still_needed = converted.isna() & series.notna() & ~blank_mask(series)
     if still_needed.any():
-        converted = converted.copy()
-        converted[still_needed] = pd.to_datetime(
+        second_pass = pd.to_datetime(
             series[still_needed], errors="coerce", dayfirst=True, format="mixed"
         )
+        converted = _matching_time_unit(converted, second_pass)
+        converted[still_needed] = second_pass
 
     failed = converted.isna() & series.notna() & ~blank_mask(series)
     if not failed.any():

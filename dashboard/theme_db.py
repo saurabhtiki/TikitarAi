@@ -22,10 +22,11 @@ from pathlib import Path
 
 from dashboard.custom_style import StyleSettings, from_json, to_json
 from dashboard.exceptions import DashboardError
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
+DEFAULT_DB_PATH = get_data_dir() / "tikitarai.db"
 
 # Enough for a shelf of themes without turning the picker into a search problem.
 MAX_THEMES_PER_USER = 30

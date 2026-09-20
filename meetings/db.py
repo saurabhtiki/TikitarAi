@@ -35,10 +35,11 @@ from meetings.model import (
     agenda_from_json,
     agenda_to_json,
 )
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
+DEFAULT_DB_PATH = get_data_dir() / "tikitarai.db"
 
 _CREATE_USER_DEFAULTS_TABLE = """
 CREATE TABLE IF NOT EXISTS meeting_user_defaults (

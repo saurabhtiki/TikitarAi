@@ -12,3 +12,6 @@ wheels/
 # Runtime SQLite database
 data/
 
+
+# Development/testing data folder
+data_testing/

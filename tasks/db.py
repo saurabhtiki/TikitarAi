@@ -20,10 +20,11 @@ from pathlib import Path
 
 from tasks.exceptions import TaskStorageError
 from tasks.model import Task, from_json, to_json
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
+DEFAULT_DB_PATH = get_data_dir() / "tikitarai.db"
 
 _CREATE_TASKS_TABLE = """
 CREATE TABLE IF NOT EXISTS tasks (

@@ -20,10 +20,11 @@ from pathlib import Path
 
 from checks.exceptions import ChecksStorageError
 from checks.model import CheckSet, from_json, to_json
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
+DEFAULT_DB_PATH = get_data_dir() / "tikitarai.db"
 
 _CREATE_CHECK_SETS_TABLE = """
 CREATE TABLE IF NOT EXISTS check_sets (

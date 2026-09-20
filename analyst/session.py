@@ -33,13 +33,14 @@ from agno.db.sqlite import SqliteDb
 from sqlalchemy.exc import SQLAlchemyError
 
 from analyst.exceptions import ChatStorageError
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
 # Agno's own file, beside `data/tikitarai.db` rather than inside it: Agno creates and
 # migrates its session schema itself, and it has no business doing that in the same file
 # as the users and LLM profile tables this app owns.
-CHAT_DB_PATH = Path("data") / "chat_sessions.db"
+CHAT_DB_PATH = get_data_dir() / "chat_sessions.db"
 
 # Agno names its tables from these, so they are part of the stored schema — changing one
 # later starts a fresh table and orphans the history already written.

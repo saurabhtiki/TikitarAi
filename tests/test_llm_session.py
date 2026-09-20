@@ -4,13 +4,13 @@ Driven through AppTest rather than called directly: llm.session reads st.session
 only exists inside a script run.
 """
 
-from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
 from auth.db import init_db, seed_default_admin
 from llm.db import create_profile, init_llm_table, set_default_model, set_light_model
 from llm.session import LLM_ACTIVE_PROFILE_KEY
+from utils.env import get_data_dir
 
 # Records what active_profile() resolved to, so the assertions can read it off session_state.
 _SCRIPT = """
@@ -34,14 +34,14 @@ def _make_app(tmp_path, monkeypatch):
 
 
 def _add(nickname, model):
-    return create_profile(1, nickname, "local", "http://localhost:1234", None, model, Path("data") / "tikitarai.db")
+    return create_profile(1, nickname, "local", "http://localhost:1234", None, model, get_data_dir() / "tikitarai.db")
 
 
 def test_active_profile_falls_back_to_the_designated_default(tmp_path, monkeypatch):
     at = _make_app(tmp_path, monkeypatch)
     _add("A first by nickname", "llama-3")
     chosen = _add("Z last by nickname", "phi-3")
-    set_default_model(chosen["profile_id"], 1, Path("data") / "tikitarai.db")
+    set_default_model(chosen["profile_id"], 1, get_data_dir() / "tikitarai.db")
 
     at.run()
 
@@ -66,7 +66,7 @@ def test_an_explicit_session_choice_beats_the_default(tmp_path, monkeypatch):
     at = _make_app(tmp_path, monkeypatch)
     picked = _add("A first by nickname", "llama-3")
     default = _add("Z last by nickname", "phi-3")
-    set_default_model(default["profile_id"], 1, Path("data") / "tikitarai.db")
+    set_default_model(default["profile_id"], 1, get_data_dir() / "tikitarai.db")
     at.session_state[LLM_ACTIVE_PROFILE_KEY] = picked["profile_id"]
 
     at.run()
@@ -79,7 +79,7 @@ def test_a_stale_selection_falls_back_to_the_default(tmp_path, monkeypatch):
     at = _make_app(tmp_path, monkeypatch)
     _add("A first by nickname", "llama-3")
     default = _add("Z last by nickname", "phi-3")
-    set_default_model(default["profile_id"], 1, Path("data") / "tikitarai.db")
+    set_default_model(default["profile_id"], 1, get_data_dir() / "tikitarai.db")
     at.session_state[LLM_ACTIVE_PROFILE_KEY] = 9999
 
     at.run()
@@ -93,7 +93,7 @@ def test_the_light_model_is_never_the_fallback(tmp_path, monkeypatch):
     still hold both — session_profiles hides the light model, so the fallback must skip it."""
     at = _make_app(tmp_path, monkeypatch)
     light = _add("A first by nickname", "llama-3")
-    set_light_model(light["profile_id"], 1, Path("data") / "tikitarai.db")
+    set_light_model(light["profile_id"], 1, get_data_dir() / "tikitarai.db")
     _add("Z last by nickname", "phi-3")
 
     at.run()

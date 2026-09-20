@@ -24,10 +24,11 @@ from pathlib import Path
 
 from chat_types.exceptions import ChatTypeStorageError
 from chat_types.model import ChatType, from_json, to_json
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
+DEFAULT_DB_PATH = get_data_dir() / "tikitarai.db"
 
 _CREATE_CHAT_TYPES_TABLE = """
 CREATE TABLE IF NOT EXISTS chat_types (

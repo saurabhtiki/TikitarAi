@@ -866,6 +866,22 @@ class TestShiftDate:
         assert pd.isna(result["due_date"].iloc[1])
         assert any("couldn't be read as a date" in warning for warning in warnings_out)
 
+    def test_a_column_of_plain_numbers_does_not_crash_the_step(self):
+        # pandas reads a column of numbers at one time precision and the day-first pass at
+        # another; the two used to collide and the whole step failed instead of answering.
+        frame = pd.DataFrame({"customer_id": [1, 1, 2]})
+        result, _ = apply_shift_date(
+            {"source": frame}, {"column": "customer_id", "days": 30, "new_column": "later"}
+        )
+        assert len(result["later"]) == 3
+
+    def test_a_mix_of_numbers_and_real_dates_still_reads_the_dates(self):
+        frame = pd.DataFrame({"invoice_date": ["01/04/2025", 7]})
+        result, _ = apply_shift_date(
+            {"source": frame}, {"column": "invoice_date", "days": 30, "new_column": "due_date"}
+        )
+        assert result["due_date"].iloc[0] == pd.Timestamp("2025-05-01")
+
     def test_a_day_count_that_isnt_a_number_is_refused(self, sales):
         with pytest.raises(InvalidStepParamsError, match="whole number"):
             apply_shift_date({"source": sales}, {"column": "sold_on", "days": "a month"})

@@ -21,10 +21,11 @@ from pathlib import Path
 
 from transform.exceptions import PipelineStorageError
 from transform.template import SavedPipeline, from_json, to_json
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
+DEFAULT_DB_PATH = get_data_dir() / "tikitarai.db"
 
 _CREATE_PIPELINES_TABLE = """
 CREATE TABLE IF NOT EXISTS transform_pipelines (

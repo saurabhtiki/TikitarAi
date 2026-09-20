@@ -21,10 +21,11 @@ from pathlib import Path
 
 from cleaner.exceptions import TemplateStorageError
 from cleaner.template import CleaningTemplate, from_json, to_json
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = Path("data") / "tikitarai.db"
+DEFAULT_DB_PATH = get_data_dir() / "tikitarai.db"
 
 _CREATE_TEMPLATES_TABLE = """
 CREATE TABLE IF NOT EXISTS cleaning_templates (

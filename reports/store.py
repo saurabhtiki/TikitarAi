@@ -32,10 +32,11 @@ import duckdb
 from engine.duckdb_session import BASE_TABLE_PREFIX, quote_identifier
 from reports.exceptions import ReportDataError
 from reports.model import StoredTable
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DATASET_ROOT = Path("data") / "reports"
+DEFAULT_DATASET_ROOT = get_data_dir() / "reports"
 
 # The name the incoming frame is registered under while a table is written. A local name,
 # so a table in the store called `frame` can't shadow the view — `register_table`'s reason.

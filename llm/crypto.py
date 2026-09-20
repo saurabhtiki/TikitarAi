@@ -4,10 +4,11 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 from llm.exceptions import LLMDatabaseError
+from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_KEY_PATH = Path("data") / "encryption.key"
+DEFAULT_KEY_PATH = get_data_dir() / "encryption.key"
 
 
 def _load_or_create_key(key_path: Path | str = DEFAULT_KEY_PATH) -> bytes:
