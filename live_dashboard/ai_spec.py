@@ -1,9 +1,24 @@
-"""Plain English in, a dashboard spec out (phase 33).
+"""Plain English in, a dashboard spec out (phase 33), one round at a time (phase 35).
 
 The user types *"total sales card, sales by customer as a bar chart and a customer filter"*
-and gets back the same rows the Add visual dialog would have built, one per visual. This is
-step 1 of `docs/html_dashboard.md`'s user flow, and it is the only place in the dashboard
-feature where a model is called at all.
+and gets back the same rows the Add visual dialog would have built, one per visual. Then they
+type *"make the region chart horizontal and add a monthly trend"*, and **that** round changes
+those two things and touches nothing else. This is the only place in the dashboard feature
+where a model is called at all.
+
+Two things make a round an edit rather than a rewrite, and neither is a matter of asking the
+model nicely:
+
+- **The dashboard is the model's only memory.** `llm.client.run_structured` is stateless, so
+  every request carries the page as it stands - `describe_spec_for_prompt`, field by field,
+  numbered. A chat transcript would drift from the page the moment the user edited a visual
+  by hand; the page cannot disagree with itself.
+- **A round returns edits, not a page.** Each proposal names an `action` and, for `update`
+  and `remove`, the number of the visual it means. A visual no proposal names is left alone,
+  so it cannot be lost to a model that simply forgot to write it out a second time.
+
+`_DESIGN_RULES` is the third piece: a written set of professional-dashboard rules sent with
+every request, which is where a page that looks designed rather than dumped comes from.
 
 Modelled on `transform/ai_parse.py`, which solved this problem once already. The same three
 rules hold, for the same reasons:
@@ -24,18 +39,17 @@ rules hold, for the same reasons:
 and downloading never call a model, which is the same promise a saved Transform pipeline
 makes.
 
-The user's own guidance (the requirement's "Extra guidance for AI" box) is appended to the
-*prompt*, never to the instructions. That is deliberate: user-typed text stays in the user's
-turn, where it reads as a preference, rather than sitting among the hard rules where it would
-read as one. It can only ever add a preference on top - the catalog and column checks below
-run afterwards either way.
+There is no separate box for standing preferences since phase 36. "Always show currency in
+INR" is a sentence, and the instruction the user types is already a sentence - a second box
+only asked them to decide which of the two a preference belonged in, and the answer never
+mattered, since both were sent in the same request anyway.
 
 Like `llm.suggestions`, `propose_dashboard` never raises: a model that is down or talking
-nonsense is a degraded result the user works around with the Add visual dialog, not a broken
-screen.
+nonsense is a degraded result the user asks again about, not a broken screen.
 """
 
 import logging
+from dataclasses import dataclass, field
 
 import pandas as pd
 from pydantic import BaseModel, Field
@@ -46,29 +60,37 @@ from analyst.charts import (
     AGG_MAXIMUM,
     AGG_MINIMUM,
     AGG_SUM,
+    CHART_AREA,
     CHART_BAR,
     CHART_BAR_HORIZONTAL,
+    CHART_LINE,
     CHART_PIE,
     CHART_SCATTER,
+    SORT_AUTOMATIC,
     SORT_LABELS,
     SORT_LARGEST,
 )
 from live_dashboard import payload
+from live_dashboard.flatten import COLUMN_SEPARATOR
 from live_dashboard.model import (
     AGG_DISTINCT,
+    VISUAL_FILTER,
     AGG_MEDIAN,
     AGG_PERCENT_OF_TOTAL,
     AGG_RUNNING_TOTAL,
     AGG_STDEV,
     CHART_BOXPLOT,
+    CHART_DONUT,
     TEXT_FRIENDLY_AGGREGATIONS,
     CHART_HISTOGRAM,
     DASHBOARD_AGGREGATIONS,
     DASHBOARD_CHART_LABELS,
+    DEFAULT_CURRENCY,
     DashboardSpec,
     FILTER_LABELS,
     FILTER_POSITIONS,
     FILTER_TOP,
+    FORMAT_CURRENCY,
     PanelSpec,
     VISUAL_CARD,
     VISUAL_CHART,
@@ -78,6 +100,7 @@ from live_dashboard.model import (
     clean_properties,
     default_sub_type,
     panel_problems,
+    properties_text,
     sub_types_for,
 )
 from llm.client import LLMConnectionError, run_structured
@@ -156,10 +179,22 @@ _SHAPE_FALLBACKS: dict[str, str] = {
     "density": CHART_HISTOGRAM,
 }
 
-_INSTRUCTIONS = """\
-You turn one plain-English request into rows of a dashboard spec. Each row is one visual.
+#: What each round may do to a visual that already exists.
+ACTION_ADD = "add"
+ACTION_UPDATE = "update"
+ACTION_REMOVE = "remove"
+ACTIONS = (ACTION_ADD, ACTION_UPDATE, ACTION_REMOVE)
 
-Hard rules:
+#: What a blank box means when there is nothing on the dashboard yet - the requirement's
+#: "leave it blank and press Generate". With visuals already there a blank box is refused
+#: instead: it is ambiguous between "add something" and "start over", and one of those is
+#: destructive.
+DEFAULT_INSTRUCTION = "Design a clear, professional dashboard for this data."
+
+#: The rules that hold whether the user is asking for a first draft or for one change to a
+#: dashboard that already exists. Kept apart from the two openings below so that the draft
+#: prompt and the round prompt cannot drift into disagreeing about what a chart needs.
+_CORE_RULES = """Hard rules:
 - Use ONLY the visual types, sub-types, aggregations and sort orders from the catalog you
   are given. Never invent one.
 - Use ONLY table and column names from the schema you are given, spelled exactly as shown.
@@ -180,15 +215,83 @@ Hard rules:
   histogram needs `measure_column` and NO `group_by` - it shows one number's spread.
 - "percent_of_total" only works on a chart, never a card. "running_total" only works on a
   chart broken down by a DATE column.
-- row_number lays the page out: visuals sharing a number sit side by side. Put cards
-  together on row 1, then charts two to a row, then tables on rows of their own. Filters
-  ignore row_number - say where they go with filter_position ("top" or "left").
-- Give every visual a short, plain title a reader would understand.
-- Propose at most 10 visuals. Choose the ones that answer the request best.
+- row_number lays the page out: visuals sharing a number sit side by side. Filters ignore
+  row_number - say where they go with filter_position ("top" or "left").
 - If the request cannot be done with this catalog and these columns, return an EMPTY panels
   list and say why in one plain sentence in `clarification`. Never return a visual that is
-  merely close - a wrong chart is worse than an honest no.\
-"""
+  merely close - a wrong chart is worse than an honest no."""
+
+#: The written design rules - the "professional dashboard" skill of phase 35.
+#:
+#: This is where a page that looks designed rather than dumped comes from, and it costs
+#: nothing but prose - provided every shape it recommends really exists, which is the whole
+#: reason phase 34 widened the catalog first. `_DESIGN_RULE_NAMES` below pins each one to
+#: the catalog so the prose cannot go on recommending a chart we stopped being able to draw.
+_DESIGN_RULES = """Design rules - follow these unless the user asks for something else:
+- Open with the headline numbers: at most 4 cards, together on row 1. A wall of cards is a
+  scoreboard, not a dashboard.
+- Where the data has a date column, give the page one trend - a line or an area chart
+  broken down by that date - on a row of its own.
+- At most 2 charts to a row. Tables go on rows of their own, near the bottom.
+- Propose at most 8 visuals unless the user asks for more.
+- Sort a bar chart "largest" so the biggest bar comes first, unless it is broken down by a
+  date, where "automatic" keeps the dates in order.
+- Use "bar_horizontal" when the breakdown is long text: customer, product and employee
+  names overlap badly on an upright bar.
+- Use "pie" or "donut" only for a breakdown with a handful of categories. For anything
+  longer a bar reads better - and set top_n to keep it short.
+- Put money columns on "format:currency" in properties, and name the currency with
+  "currency:INR" unless the user says otherwise.
+- Give every visual a title that names the number: Total sales by region, never Chart 1.
+- Add a filter for the one or two columns a reader would want to narrow by - usually a
+  date and the main category."""
+
+#: Every catalog entry `_DESIGN_RULES` recommends by name, declared beside the prose so a
+#: test can pin all of them at once. Cheaper than a record per shape, and it catches the one
+#: failure that matters: a rule that keeps recommending something the page cannot draw.
+_DESIGN_RULE_NAMES: tuple[str, ...] = (
+    CHART_LINE,
+    CHART_AREA,
+    CHART_BAR_HORIZONTAL,
+    CHART_PIE,
+    CHART_DONUT,
+    SORT_LARGEST,
+    SORT_AUTOMATIC,
+    FORMAT_CURRENCY,
+    DEFAULT_CURRENCY,
+)
+
+#: The first draft: an empty dashboard, built from one description.
+_INSTRUCTIONS = f"""You turn one plain-English request into rows of a dashboard spec. Each row is one visual,
+and every row you return is added to the page.
+
+{_CORE_RULES}
+
+{_DESIGN_RULES}"""
+
+#: One round of editing a dashboard that already exists.
+#:
+#: The difference that matters is `action`. A round returns *edits*, never the whole page
+#: again: a visual the model does not mention is left exactly as it is. That is what stops a
+#: page losing a chart to a model that simply forgot to write it out a second time - which
+#: returning the full list every round would have made a one-in-ten event.
+_ROUND_INSTRUCTIONS = f"""You are editing a dashboard that already exists. Every visual on it is listed for you,
+numbered. Return ONLY the changes the user asked for - never the whole page again.
+
+Each row you return says what to do with `action`:
+- "add": a brand new visual. Leave `target` empty.
+- "update": replace visual number `target`. Write out ALL of that visual's fields, not only
+  the ones you are changing - the listing shows you what they currently are. A field you
+  leave blank becomes blank, which is how you take away a colour split or a top_n.
+- "remove": delete visual number `target`. No other field is needed.
+
+A visual you do not mention is left alone, so do not re-send one you are not changing.
+Set `title`, `subtitle` or `filter_position` only when the user asked to change them; leave
+them blank otherwise.
+
+{_CORE_RULES}
+
+{_DESIGN_RULES}"""
 
 
 class ProposedPanel(BaseModel):
@@ -203,8 +306,18 @@ class ProposedPanel(BaseModel):
     Unlike Transform's name/value pairs, these fields are fixed and few, so an ordinary flat
     schema describes them. The awkward shape there existed because twenty-nine operations'
     worth of parameter keys cannot be declared up front; nothing like that applies here.
+
+    `action` and `target` are what make a *round* (phase 35) an edit rather than a rewrite:
+    a row says which existing visual it changes, and a visual no row names is left alone.
+    On a first draft both are ignored - everything proposed is added.
     """
 
+    action: str = Field(
+        default=ACTION_ADD, description="add, update or remove. Only rounds use it"
+    )
+    target: str = Field(
+        default="", description="For update/remove: the number of the visual to change"
+    )
     visual_type: str = Field(..., description="filter, card, chart or table")
     sub_type: str = Field(default="", description="A sub-type allowed for that visual type")
     source_table: str = Field(default="", description="The table this visual reads")
@@ -289,37 +402,210 @@ def _type_word(dtype) -> str:
     return "text"
 
 
-def describe_tables_for_prompt(tables: dict[str, pd.DataFrame]) -> str:
+def column_notes(entries, separator: str = COLUMN_SEPARATOR) -> dict[str, str]:
+    """What each column *means*, from the data dictionary the user filled in during Setup.
+
+    Requirement 5.3's descriptions and synonyms are already built for the chat agent and are
+    simply not used here today. They are worth more to a generator than any amount of extra
+    prose: `Amount` is a guess, `Amount - invoice value after discount, INR` is an
+    instruction, and `[also called: units, qty]` is what lets "how many units" find the
+    right column instead of the one that merely sounds right.
+
+    `engine.dictionary.schema_context` cannot be reused as it stands, because it renders the
+    *base* tables and this module sees the flattened ones, where `CustName` arrives as
+    `Customer - CustName`. So a note is keyed on the **bare column name** and matched against
+    either spelling by `_note_for`.
+
+    Two tables carrying the same column name with different descriptions: the first wins and
+    the clash is logged. That is the same call `payload.date_columns` makes for the same
+    reason - the cost of being wrong here is a slightly-off hint, never a wrong chart, since
+    every column the model names is checked against the real data afterwards either way.
+
+    Args:
+        entries: `engine.dictionary.ColumnEntry` records, or anything carrying the same
+            `table` / `column` / `description` / `synonyms` attributes.
+        separator: how `flatten` joins a master's name onto its column.
+
+    Returns:
+        `{bare column name: note}`, with columns carrying neither a description nor a synonym
+        left out entirely - an empty note would only lengthen the prompt.
+    """
+    notes: dict[str, str] = {}
+    for entry in entries or []:
+        column = str(getattr(entry, "column", "") or "").strip()
+        if not column:
+            continue
+        description = str(getattr(entry, "description", "") or "").strip()
+        synonyms = [str(name).strip() for name in getattr(entry, "synonyms", None) or []]
+        synonyms = [name for name in synonyms if name]
+        if not description and not synonyms:
+            continue
+
+        also = f"[also called: {', '.join(synonyms)}]" if synonyms else ""
+        note = " ".join(part for part in (description, also) if part)
+        if column in notes:
+            if notes[column] != note:
+                logger.info(
+                    "Two tables describe a column called %r differently; keeping the first.",
+                    column,
+                )
+            continue
+        notes[column] = note
+    return notes
+
+
+def _note_for(column: str, notes: dict[str, str]) -> str:
+    """One flattened column's dictionary note, or an empty string.
+
+    Tries the name as it stands first, then the part after the last separator - so both
+    `Amount` and `Customer - CustName` find their entry.
+    """
+    if not notes:
+        return ""
+    if column in notes:
+        return notes[column]
+    if COLUMN_SEPARATOR in column:
+        return notes.get(column.rsplit(COLUMN_SEPARATOR, 1)[-1].strip(), "")
+    return ""
+
+
+def describe_tables_for_prompt(tables: dict[str, pd.DataFrame],
+                               notes: dict[str, str] | None = None) -> str:
     """The tables the dashboard can draw from, their columns, and each column's type.
 
     These are the *flattened* tables, so a master's attributes already appear as columns of
     the main table - which is why the model never has to think about joins at all.
+
+    `notes` is `column_notes`' output. Left out, this renders exactly what it rendered before
+    phase 35, so a session with an empty data dictionary loses nothing.
     """
+    notes = notes or {}
     lines: list[str] = []
     for name, frame in tables.items():
         types = getattr(frame, "dtypes", {})
         columns = [str(column) for column in frame.columns]
-        described = [
-            f"{column} ({_type_word(types[column])})" if column in types else column
-            for column in columns[:PROMPT_COLUMN_LIMIT]
-        ]
-        shown = ", ".join(described)
+        described = []
+        for column in columns[:PROMPT_COLUMN_LIMIT]:
+            shown_column = (
+                f"{column} ({_type_word(types[column])})" if column in types else column
+            )
+            note = _note_for(column, notes)
+            described.append(f"{shown_column} - {note}" if note else shown_column)
+        shown = "; ".join(described)
         if len(columns) > PROMPT_COLUMN_LIMIT:
-            shown += f", ... ({len(columns) - PROMPT_COLUMN_LIMIT} more)"
+            shown += f"; ... ({len(columns) - PROMPT_COLUMN_LIMIT} more)"
         lines.append(f"- {name}: {shown or '(no columns)'}")
     return "\n".join(lines) or "(no tables available)"
 
 
-def build_prompt(instruction: str, tables: dict[str, pd.DataFrame], *,
-                 main_table: str = "", guidance: str = "") -> str:
-    """The whole ask: the schema, the catalog, the request, then the user's preferences.
+#: Every key `model._panel_to_dict` writes, mapped to the name it is shown under when the
+#: current dashboard is described back to the model - or `""` for the ones deliberately not
+#: shown. The labels match `ProposedPanel`'s own field names, so a model editing a visual can
+#: copy `label=value` straight across.
+#:
+#: A dict rather than a list of labels so that a field added to `PanelSpec` later has to be
+#: *decided about*: `tests/test_live_dashboard_ai_spec.py` asserts the keys here are exactly
+#: the keys written to JSON, and a new field silently missing from every round is the kind of
+#: bug that takes a month to notice.
+_SPEC_FIELD_LABELS: dict[str, str] = {
+    # The panel id is ours; the number in the listing is the handle the model is given.
+    "panel_id": "",
+    # Written as the "kind / style" head of each line rather than as a labelled field.
+    "visual_type": "",
+    "sub_type": "",
+    "source_table": "source_table",
+    "source_columns": "columns",
+    "measure_column": "measure_column",
+    "measure_column_2": "measure_column_2",
+    "aggregation": "aggregation",
+    "group_by": "group_by",
+    "colour_by": "colour_by",
+    "sort": "sort",
+    "top_n": "top_n",
+    "title": "title",
+    "properties": "properties",
+    "row_number": "row_number",
+}
 
-    The guidance goes last and is fenced with a line saying it may not break the rules. It
-    is appended here rather than to `_INSTRUCTIONS` so that user-typed text stays in the
-    user's own turn - see the module docstring.
+
+#: Which labelled fields each kind of visual actually uses. A card carrying `sort=largest`
+#: is noise in a prompt phase 34 already flagged as crowded - and worse, it invites a round
+#: to "fix" a field that changes nothing.
+_FIELDS_BY_KIND: dict[str, frozenset[str]] = {
+    VISUAL_FILTER: frozenset({"source_table", "columns", "title"}),
+    VISUAL_TABLE: frozenset({"source_table", "columns", "title", "row_number",
+                             "properties"}),
+    VISUAL_CARD: frozenset({"source_table", "measure_column", "aggregation", "title",
+                            "row_number", "properties"}),
+}
+
+
+def _panel_fields_for_prompt(panel: PanelSpec) -> str:
+    allowed = _FIELDS_BY_KIND.get(panel.visual_type)
+    parts: list[str] = []
+    for name, label in _SPEC_FIELD_LABELS.items():
+        if not label:
+            continue
+        if allowed is not None and label not in allowed:
+            continue
+        value = getattr(panel, name, "")
+        if name == "source_columns":
+            text = ", ".join(str(item) for item in value)
+        elif name == "properties":
+            text = properties_text(value)
+        elif name == "top_n":
+            text = str(value) if value else ""
+        else:
+            text = str(value or "")
+        if text:
+            parts.append(f"{label}={text}")
+    return " | ".join(parts)
+
+
+def describe_spec_for_prompt(spec: DashboardSpec) -> str:
+    """The dashboard as it stands, numbered, one line of fields per visual.
+
+    **This is the model's entire memory of the conversation.** `llm.client.run_structured` is
+    deliberately stateless, so each round is told what the page looks like rather than what
+    was said about it. A chat history would drift from the page the moment the user edited a
+    visual by hand; the page cannot disagree with itself.
+
+    Field-shaped rather than the prose `describe_panel` writes, and the difference is not
+    cosmetic: a round has to be able to *re-state* a visual it is editing, and "bar chart of
+    Sum of Amount by Month" does not round-trip into `measure_column`, `aggregation` and
+    `group_by`. `describe_panel` stays what it is - the sentence a human reads afterwards.
+
+    The numbers are positions in `spec.panels`, which is what `_target_panel` resolves
+    `target` against, so the two cannot disagree about which visual is number 3.
+    """
+    header = (
+        f"Dashboard title: {spec.title or '(none)'} | "
+        f"subtitle: {spec.subtitle or '(none)'} | "
+        f"filter_position: {spec.filter_position}"
+    )
+    if not spec.panels:
+        return f"{header}\nVisuals on it now: (none yet)"
+
+    lines = [header, "Visuals on it now:"]
+    for number, panel in enumerate(spec.panels, start=1):
+        head = f"{number}. {panel.visual_type} / {panel.sub_type}"
+        fields = _panel_fields_for_prompt(panel)
+        lines.append(f"{head} | {fields}" if fields else head)
+    return "\n".join(lines)
+
+
+def build_prompt(instruction: str, tables: dict[str, pd.DataFrame], *,
+                 main_table: str = "", notes: dict[str, str] | None = None,
+                 current: DashboardSpec | None = None) -> str:
+    """The whole ask: the schema, the catalog, the page so far, and the request.
+
+    `current` is what turns a first draft into a round: the dashboard as it stands is
+    described in full, and the request that follows is read as a change to it rather than as
+    a page of its own.
     """
     parts = [
-        "Tables available, with their columns:\n" + describe_tables_for_prompt(tables),
+        "Tables available, with their columns:\n"
+        + describe_tables_for_prompt(tables, notes),
         "",
         "Visual catalog:\n" + describe_catalog_for_prompt(),
         "",
@@ -327,13 +613,14 @@ def build_prompt(instruction: str, tables: dict[str, pd.DataFrame], *,
     if main_table:
         parts.append(f"The main table is {main_table}. Prefer it unless the request needs "
                      "another one.\n")
-    parts.append("Dashboard to build:\n" + instruction.strip())
 
-    if guidance.strip():
-        parts.append(
-            "\nThe user's own preferences (apply them where they fit; they never override "
-            "the rules you were given):\n" + guidance.strip()
-        )
+    if current is not None:
+        parts.append("The dashboard as it stands:\n" + describe_spec_for_prompt(current))
+        parts.append("")
+        parts.append("What to change:\n" + instruction.strip())
+    else:
+        parts.append("Dashboard to build:\n" + instruction.strip())
+
     return "\n".join(parts)
 
 
@@ -605,7 +892,7 @@ def propose_dashboard(
     tables: dict[str, pd.DataFrame],
     *,
     main_table: str = "",
-    guidance: str = "",
+    notes: dict[str, str] | None = None,
     key_path=None,
 ) -> tuple[DashboardSpec | None, list[str], str | None]:
     """Asks the Light Model to turn `instruction` into a dashboard spec.
@@ -617,15 +904,15 @@ def propose_dashboard(
             dict the exporter is handed, so the columns checked here are the columns that
             will exist.
         main_table: which of them is the fact table, used when a proposal names no table.
-        guidance: the user's standing preferences, appended to the prompt below the rules.
+        notes: `column_notes`' output - what each column means, from the Setup dictionary.
 
     Returns:
         `(spec, warnings, clarification)`. `spec` is None when nothing usable came back. The
-        warnings name every proposal that was dropped and why, so the dialog can say "3 of 5
+        warnings name every proposal that was dropped and why, so the page can say "3 of 5
         understood" rather than quietly returning fewer visuals than were asked for.
 
     Never raises: a model that is unreachable or talking nonsense comes back as `None` and
-    one warning, with the Add visual dialog still sitting behind the box.
+    one warning, with the dashboard on screen untouched.
     """
     if not instruction.strip():
         return None, ["Type what you want the dashboard to show first."], None
@@ -635,7 +922,7 @@ def propose_dashboard(
     try:
         response = run_structured(
             profile,
-            build_prompt(instruction, tables, main_table=main_table, guidance=guidance),
+            build_prompt(instruction, tables, main_table=main_table, notes=notes),
             ProposedDashboard,
             instructions=_INSTRUCTIONS,
             key_path=key_path,
@@ -688,21 +975,291 @@ def propose_dashboard(
         subtitle=str(response.subtitle or "").strip(),
         filter_position=position if position in FILTER_POSITIONS else FILTER_TOP,
         main_table=main_table,
-        ai_guidance=guidance.strip(),
         panels=panels,
     )
     return spec, warnings, clarification
 
 
+# --------------------------------------------------------------------------------------
+# Rounds (phase 35)
+# --------------------------------------------------------------------------------------
+
+
+@dataclass
+class RoundResult:
+    """What one round of editing did, in the shape the page needs to report it.
+
+    Counts and sentences together, so the view can write "Added 1 visual, changed 1" without
+    re-deriving anything from the spec - and so a test can assert what a round *did* rather
+    than diffing two dashboards.
+
+    Attributes:
+        added / updated: the panels as they ended up, for `describe_panel` to write out.
+        removed: the titles of the visuals that went, since the panels themselves are gone.
+        notes: every sentence the user should read - a shape swapped for the nearest one we
+            can draw, an edit pointing at a visual that isn't there, a proposal refused for
+            naming a column the data doesn't have. Notes are not failures; `failed` is.
+        clarification: the model's own reason the request couldn't be done, when it gave one.
+        failed: nothing was attempted at all - no model configured, no data, an unreachable
+            provider, or a blank box that needed words. The dashboard is untouched.
+    """
+
+    added: list[PanelSpec] = field(default_factory=list)
+    updated: list[PanelSpec] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    clarification: str | None = None
+    failed: bool = False
+
+    def changed(self) -> bool:
+        """Whether the dashboard is different because of this round."""
+        return bool(self.added or self.updated or self.removed)
+
+    def summary(self) -> str:
+        """The one line the page prints above the notes."""
+        parts: list[str] = []
+        if self.added:
+            parts.append(f"added {len(self.added)} visual(s)")
+        if self.updated:
+            parts.append(f"changed {len(self.updated)}")
+        if self.removed:
+            parts.append(f"removed {len(self.removed)}")
+        if not parts:
+            return "Nothing on the dashboard changed"
+        sentence = ", ".join(parts)
+        return sentence[0].upper() + sentence[1:]
+
+
+def _target_panel(target: str, panels: list[PanelSpec]) -> PanelSpec | None:
+    """The visual an edit points at, by its number in `describe_spec_for_prompt`'s listing.
+
+    None for anything that isn't a number in range - which is reported as a skipped edit
+    rather than guessed at, because guessing here edits the wrong chart.
+    """
+    raw = str(target or "").strip()
+    if not raw:
+        return None
+    try:
+        number = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    if 1 <= number <= len(panels):
+        return panels[number - 1]
+    return None
+
+
+def _apply_settings(spec: DashboardSpec, response: "ProposedDashboard",
+                    result: RoundResult) -> None:
+    """Applies the page-level settings a round asked to change, and only those.
+
+    Blank means "not asked about" here, unlike on a first draft where the model writes them
+    every time. Without that rule a round adding one chart would blank a title the user
+    typed themselves.
+    """
+    title = str(response.title or "").strip()
+    if title and title != spec.title:
+        spec.title = title
+        result.notes.append(f"Renamed the dashboard to '{title}'.")
+
+    subtitle = str(response.subtitle or "").strip()
+    if subtitle and subtitle != spec.subtitle:
+        spec.subtitle = subtitle
+
+    position = _key(response.filter_position)
+    if position in FILTER_POSITIONS and position != spec.filter_position:
+        spec.filter_position = position
+        result.notes.append(f"Moved the filters to the {position}.")
+
+
+def _first_draft(profile: dict, instruction: str, tables: dict[str, pd.DataFrame],
+                 spec: DashboardSpec, *, notes: dict[str, str] | None,
+                 key_path) -> RoundResult:
+    """The opening round, on a dashboard with nothing on it yet.
+
+    `propose_dashboard` is reused unchanged rather than reimplemented: with no visuals there
+    is nothing to edit, so "everything proposed is added" is exactly right, and `_lay_out`
+    needs to run - which it must not do on any later round.
+    """
+    proposed, warnings_out, clarification = propose_dashboard(
+        profile, instruction, tables, main_table=spec.main_table,
+        notes=notes, key_path=key_path,
+    )
+    result = RoundResult(notes=list(warnings_out), clarification=clarification)
+    if proposed is None or not proposed.panels:
+        result.failed = True
+        return result
+
+    spec.panels = list(proposed.panels)
+    spec.title = proposed.title or spec.title
+    spec.subtitle = proposed.subtitle or spec.subtitle
+    spec.filter_position = proposed.filter_position
+    result.added = list(proposed.panels)
+    return result
+
+
+def revise_dashboard(
+    profile: dict,
+    instruction: str,
+    tables: dict[str, pd.DataFrame],
+    spec: DashboardSpec,
+    *,
+    notes: dict[str, str] | None = None,
+    key_path=None,
+) -> RoundResult:
+    """One round of the conversation: reads the instruction and edits `spec` in place.
+
+    This is the whole of phase 35's user flow - type, see it, say what to change, see it
+    again. The dashboard is the only memory: `describe_spec_for_prompt` sends the page as it
+    stands with every request, so there is no transcript to drift out of step with it.
+
+    What makes this an *edit* rather than a rewrite is mechanical, not a matter of asking the
+    model nicely: a proposal names an `action` and, for `update` and `remove`, the number of
+    the visual it means. A visual no proposal names is not touched, so it cannot be lost to a
+    model that simply forgot to write it out again.
+
+    Args:
+        profile: the Light Model profile to call.
+        instruction: what the user typed. Blank is allowed **only** on an empty dashboard,
+            where it means `DEFAULT_INSTRUCTION`; with visuals already there it is refused,
+            because "add something" and "start over" are not the same request.
+        tables: the embedded tables, keyed as panels refer to them.
+        spec: the dashboard being edited. Mutated only once a round has produced a change,
+            so a failed or empty round leaves the page exactly as the user left it.
+        notes: `column_notes`' output, so the model knows what the columns mean.
+
+    Returns:
+        A `RoundResult`. Never raises: an unreachable model is a `failed` result carrying one
+        sentence, with the dashboard and its download still on screen.
+    """
+    text = str(instruction or "").strip()
+
+    if not tables:
+        return RoundResult(
+            failed=True,
+            notes=["There's no data loaded to build a dashboard from yet."],
+        )
+
+    if not spec.panels:
+        return _first_draft(
+            profile, text or DEFAULT_INSTRUCTION, tables, spec,
+            notes=notes, key_path=key_path,
+        )
+
+    if not text:
+        return RoundResult(
+            failed=True,
+            notes=["Say what you'd like changed - for example 'make the region chart "
+                   "horizontal' or 'add a monthly trend'."],
+        )
+
+    try:
+        response = run_structured(
+            profile,
+            build_prompt(text, tables, main_table=spec.main_table, notes=notes,
+                         current=spec),
+            ProposedDashboard,
+            instructions=_ROUND_INSTRUCTIONS,
+            key_path=key_path,
+        )
+    except LLMConnectionError as error:
+        logger.warning("The dashboard could not be changed: %s", error)
+        return RoundResult(failed=True, notes=[f"We couldn't make that change: {error}"])
+
+    result = RoundResult(clarification=str(response.clarification or "").strip() or None)
+
+    # Both depend only on `tables`, which nothing in the loop changes.
+    available_columns = {name: [str(column) for column in frame.columns]
+                         for name, frame in tables.items()}
+    date_columns = payload.date_columns(tables)
+
+    # Edited on a copy, and swapped in at the end. A round that produces nothing usable must
+    # leave the page alone rather than half-apply itself.
+    working = list(spec.panels)
+
+    for proposed in response.panels:
+        action = _key(proposed.action) or ACTION_ADD
+        if action not in ACTIONS:
+            result.notes.append(
+                f"Skipped an edit: '{proposed.action}' isn't something that can be done to "
+                "a visual."
+            )
+            continue
+
+        target = None
+        if action in (ACTION_UPDATE, ACTION_REMOVE):
+            target = _target_panel(proposed.target, spec.panels)
+            if target is None:
+                result.notes.append(
+                    f"Skipped an edit: there's no visual number '{proposed.target}' on this "
+                    "dashboard."
+                )
+                continue
+
+        if action == ACTION_REMOVE:
+            if target in working:
+                working.remove(target)
+                result.removed.append(target.display_title())
+            continue
+
+        if action == ACTION_ADD and len(working) >= MAX_PANELS:
+            result.notes.append(
+                f"This dashboard already has {MAX_PANELS} visuals. Remove one before adding "
+                "another."
+            )
+            continue
+
+        panel, warning = _build_one(
+            proposed, tables, spec.main_table, available_columns, date_columns
+        )
+        if panel is None:
+            result.notes.append(warning or "A change couldn't be understood.")
+            continue
+        if warning:
+            # A note, not a refusal: the visual is kept and the change is explained.
+            result.notes.append(warning)
+
+        if action == ACTION_UPDATE and target is not None:
+            # The id stays the target's. It is the element id in the exported page and the
+            # key of every widget in the edit dialog, so churning it each round would reset
+            # the user's selection and break a link a reader had already bookmarked.
+            panel.panel_id = target.panel_id
+            if not str(proposed.row_number or "").strip():
+                # Nothing was said about where it sits, so it stays where it was rather than
+                # jumping to row 1 on the strength of a field the model left out.
+                panel.row_number = target.row_number
+            working[working.index(target)] = panel
+            result.updated.append(panel)
+        else:
+            working.append(panel)
+            result.added.append(panel)
+
+    if not result.changed():
+        if not result.notes and not result.clarification:
+            result.notes.append(
+                "Nothing on the dashboard changed. Try naming the visual you mean by the "
+                "title shown above it on the dashboard."
+            )
+        return result
+
+    # `_lay_out` is deliberately not re-run. It exists to rescue a first draft where every
+    # visual came back on row 1; re-running it would shuffle a page the user has accepted.
+    spec.panels = working
+    _apply_settings(spec, response, result)
+
+    logger.info(
+        "A dashboard round added %d, changed %d, removed %d visual(s), %d note(s).",
+        len(result.added), len(result.updated), len(result.removed), len(result.notes),
+    )
+    return result
+
+
 def describe_panel(panel: PanelSpec) -> str:
     """One proposed visual in the words the user reads before accepting it.
 
-    Its own sentence rather than the spec table's columns, because this is read *before*
-    anything exists to select - "Bar chart: Sum of Amount by Customer - row 2" has to stand
-    on its own. `dashboard_view._panel_logic` is the terse form for that table; a new chart
-    shape usually needs a line in both.
+    A whole sentence, because since phase 36 this is the only description of a visual the
+    user gets: the spec table that used to list them column by column is gone, and what is
+    left is the round's own account of what it changed.
     """
-    kind = VISUAL_LABELS.get(panel.visual_type, panel.visual_type)
     if panel.is_filter():
         style = FILTER_LABELS.get(panel.sub_type, panel.sub_type)
         return f"**{panel.display_title()}** - {style} on {panel.filter_column()}"

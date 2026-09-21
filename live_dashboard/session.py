@@ -28,23 +28,30 @@ import pandas as pd
 import streamlit as st
 
 from live_dashboard import payload
-from live_dashboard.model import DashboardSpec, find_panel, remove_panel
+from live_dashboard.exceptions import DashboardStorageError
+from live_dashboard.model import DashboardSpec, from_json, to_json
 
 logger = logging.getLogger(__name__)
 
 LD_SPEC_KEY = "ld_spec"
-LD_DIALOG_KEY = "ld_open_dialog"
 LD_DATA_KEY = "ld_built_data"
-LD_TABLE_KEY = "ld_spec_table"
 
-#: What the last plain-English generation came back with, held between the press of "Read
-#: it" and the press of "Replace"/"Add to it" - two reruns apart, so it cannot live in a
-#: local. Cleared the moment either is pressed, or the dialog is closed.
-LD_PROPOSAL_KEY = "ld_ai_proposal"
+#: What each round of the conversation did, newest first - the instruction, the one-line
+#: summary and the sentences the user should read. Session-only: it describes changes to a
+#: dashboard, and the dashboard itself is what gets saved.
+LD_ROUNDS_KEY = "ld_ai_rounds"
 
-#: The user's standing guidance for the generator, mirrored here so the text area keeps what
-#: was typed while the dialog is open. The spec is the copy that is saved.
-LD_GUIDANCE_KEY = "ld_ai_guidance"
+#: The dashboard as JSON, taken immediately *before* the last round, for Undo. One step only
+#: - see `stash_for_undo`.
+#:
+#: Deliberately not "ld_ai_undo": that is the Undo *button's* widget key, and Streamlit
+#: refuses to let a widget's key be written from session state. Sharing the two names throws
+#: on every render, which is why the two are spelled apart.
+LD_UNDO_KEY = "ld_ai_undo_spec"
+
+#: How many rounds are listed back. Older ones are dropped rather than scrolled past: the
+#: dashboard is the record of what was built, and this is only the story of getting there.
+MAX_ROUNDS_SHOWN = 10
 
 
 @dataclass
@@ -100,7 +107,6 @@ def replace_spec(spec: DashboardSpec) -> None:
     """
     st.session_state[LD_SPEC_KEY] = spec
     st.session_state.pop(LD_DATA_KEY, None)
-    queue_table_reset()
 
 
 def get_built_data() -> BuiltData | None:
@@ -118,111 +124,95 @@ def clear_built_data() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# The plain-English proposal (phase 33)
+# The conversation (phase 35)
 # --------------------------------------------------------------------------------------
 
 
-def set_ai_proposal(spec: DashboardSpec | None, warnings: list[str],
-                    clarification: str | None) -> None:
-    """Remembers what the generator came back with, for the next rerun to show."""
-    st.session_state[LD_PROPOSAL_KEY] = (spec, list(warnings), clarification)
+@dataclass
+class Round:
+    """One exchange: what was asked, what changed, and what the user should know.
+
+    The panels are kept as sentences rather than as `PanelSpec` objects, because a panel the
+    user has since edited or removed would make the history describe a page that no longer
+    exists. A round says what it did at the time, and stays true.
+    """
+
+    instruction: str = ""
+    summary: str = ""
+    details: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    clarification: str = ""
+    failed: bool = False
 
 
-def ai_proposal() -> tuple[DashboardSpec | None, list[str], str | None]:
-    """The last generation, or an empty result when there has not been one."""
-    stored = st.session_state.get(LD_PROPOSAL_KEY)
-    if not isinstance(stored, tuple) or len(stored) != 3:
-        return None, [], None
-    return stored
+def record_round(entry: Round) -> None:
+    """Puts one round at the top of the history, keeping the last `MAX_ROUNDS_SHOWN`."""
+    history = [entry, *rounds()][:MAX_ROUNDS_SHOWN]
+    st.session_state[LD_ROUNDS_KEY] = history
 
 
-def clear_ai_proposal() -> None:
-    st.session_state.pop(LD_PROPOSAL_KEY, None)
+def rounds() -> list[Round]:
+    """The conversation so far, newest first."""
+    stored = st.session_state.get(LD_ROUNDS_KEY)
+    return [entry for entry in stored if isinstance(entry, Round)] if isinstance(stored, list) else []
 
 
-def delete_panel(panel_id: str) -> bool:
-    """Removes a panel from the spec and clears any selection pointing at it."""
-    spec = get_spec()
-    if find_panel(spec, panel_id) is None:
+def clear_rounds() -> None:
+    st.session_state.pop(LD_ROUNDS_KEY, None)
+
+
+def stash_for_undo(spec: DashboardSpec) -> None:
+    """Remembers the dashboard as it is *now*, so the round about to run can be undone.
+
+    JSON rather than a copy of the object, because `model.to_json` / `from_json` is the one
+    conversion already trusted to round-trip a dashboard - a `deepcopy` would be a second
+    answer to the same question, and the one that silently stops matching.
+
+    **One step only.** A second round overwrites this. An unlimited history held in session
+    state is not free when a dashboard carries a logo, and the round people want back is
+    almost always the one they just ran.
+    """
+    try:
+        st.session_state[LD_UNDO_KEY] = to_json(spec)
+    except (TypeError, ValueError):
+        # Losing Undo costs a button; failing the round would cost the user's instruction.
+        logger.exception("Could not stash the dashboard for Undo - the round still runs.")
+        st.session_state.pop(LD_UNDO_KEY, None)
+
+
+def can_undo() -> bool:
+    return bool(st.session_state.get(LD_UNDO_KEY))
+
+
+def discard_undo() -> None:
+    """Forgets the stash, for a round that turned out to change nothing.
+
+    Without this, a round the model declined would leave Undo lit up offering to restore the
+    dashboard to exactly what it already is - a button that does nothing is worse than no
+    button, because the user presses it and learns to distrust the next one.
+    """
+    st.session_state.pop(LD_UNDO_KEY, None)
+
+
+def undo_last_round() -> bool:
+    """Puts the dashboard back as it was before the last round. Returns whether it worked."""
+    stored = st.session_state.pop(LD_UNDO_KEY, None)
+    if not stored:
         return False
-    removed = remove_panel(spec, panel_id)
-    if removed:
-        queue_table_reset()
-    return removed
-
-
-# --------------------------------------------------------------------------------------
-# The spec table's selection
-# --------------------------------------------------------------------------------------
-
-
-def queue_table_reset() -> None:
-    """Asks for the spec table's row selection to be cleared on the next run.
-
-    Deferred rather than done here, for the reason `app_pages/user_management.py` documents:
-    a selection cannot be cleared during the run that reads it, so the request is parked and
-    `consume_table_reset` acts on it at the top of the next one. Without this, deleting a row
-    leaves the *next* row selected at the same index - so the buttons underneath silently
-    point at a panel the user never chose.
-    """
-    st.session_state["ld_table_reset_pending"] = True
-
-
-def consume_table_reset() -> None:
-    """Clears the selection if one was queued. Called once, before the table is drawn."""
-    if st.session_state.pop("ld_table_reset_pending", False):
-        st.session_state[LD_TABLE_KEY] = {"selection": {"rows": [], "columns": []}}
-
-
-def selected_panel_id(row_ids: list[str]) -> str:
-    """Which panel the spec table has selected, or an empty string.
-
-    Takes the ids in display order rather than reading the spec itself, because the table is
-    drawn grouped by row number and its row order is not the spec's list order.
-    """
-    state = st.session_state.get(LD_TABLE_KEY)
-    if not isinstance(state, dict):
-        return ""
-    rows = state.get("selection", {}).get("rows", [])
-    if not rows:
-        return ""
-    position = rows[0]
-    return row_ids[position] if 0 <= position < len(row_ids) else ""
-
-
-# --------------------------------------------------------------------------------------
-# Dialogs
-# --------------------------------------------------------------------------------------
-
-
-def open_dialog(action: str, payload: dict | None = None) -> None:
-    """Asks for a dialog to be shown on the next run.
-
-    The same deferred shape `report_items/session.py` uses: a dialog opened from inside a
-    button press would be drawn before the rest of the page had caught up with what the press
-    changed.
-    """
-    st.session_state[LD_DIALOG_KEY] = (action, payload or {})
-
-
-def close_dialog() -> None:
-    st.session_state.pop(LD_DIALOG_KEY, None)
-
-
-def pending_dialog() -> tuple[str, dict] | None:
-    pending = st.session_state.get(LD_DIALOG_KEY)
-    if not isinstance(pending, tuple) or len(pending) != 2:
-        return None
-    return pending
+    try:
+        replace_spec(from_json(stored))
+    except DashboardStorageError:
+        logger.exception("The stashed dashboard could not be read back.")
+        return False
+    return True
 
 
 def reset_dashboard_spec() -> None:
     """Clears the dashboard entirely - a new Task, or Start over.
 
-    Everything in the `ld_*` namespace goes, including the built data and the table's
-    selection: a leftover selection index pointing into a list that no longer exists is
-    exactly the kind of state that produces an edit dialog for a panel nobody can see.
+    Everything in the `ld_*` namespace goes, the built data and the conversation included:
+    rounds describing a dashboard that no longer exists would be read as the story of the
+    new one.
     """
-    for key in (LD_SPEC_KEY, LD_DIALOG_KEY, LD_DATA_KEY, LD_TABLE_KEY, LD_PROPOSAL_KEY,
-                LD_GUIDANCE_KEY, "ld_table_reset_pending"):
+    for key in (LD_SPEC_KEY, LD_DATA_KEY, LD_ROUNDS_KEY, LD_UNDO_KEY):
         st.session_state.pop(key, None)

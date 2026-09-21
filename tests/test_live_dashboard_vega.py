@@ -154,8 +154,29 @@ def test_top_n_becomes_a_transform_rather_than_trimming_the_data():
     """The rows are shared, so one panel's Top 10 must not take them from the others."""
     built = vs.build_vega_spec(panel(top_n=10))
     operations = [list(step)[0] for step in built["transform"]]
-    assert operations == ["aggregate", "window", "filter"]
+    assert operations == ["joinaggregate", "window", "filter"]
     assert "10" in built["transform"][2]["filter"]
+
+
+def test_top_n_adds_its_ranking_total_without_replacing_the_rows():
+    """`joinaggregate`, never `aggregate`. `aggregate` replaces its input with the group keys
+    and the totals, so the measure column stops existing before the encoding can read it -
+    and the chart draws a labelled axis with no bars. Asserted here as well as in
+    `test_live_dashboard_vega_render.py`, because this is the line that decides it."""
+    built = vs.build_vega_spec(panel(top_n=5))
+
+    assert "aggregate" not in built["transform"][0]
+    assert built["transform"][0]["joinaggregate"][0]["as"] == "_rank_measure"
+    # The encoding still does its own totalling, over a column that is still there.
+    assert built["encoding"]["y"]["field"] == "Amount"
+    assert built["encoding"]["y"]["aggregate"] == "sum"
+
+
+def test_top_n_ranks_categories_rather_than_rows():
+    """A plain `rank` numbers the rows, so one category's many rows get many ranks and a
+    "top 5" keeps five rows. `dense_rank` gives every row of a category the same place."""
+    built = vs.build_vega_spec(panel(top_n=5))
+    assert built["transform"][1]["window"][0]["op"] == "dense_rank"
 
 
 def test_no_top_n_means_no_transform_at_all():

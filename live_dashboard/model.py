@@ -332,12 +332,6 @@ class DashboardSpec:
         filter_position: top strip or left rail.
         logo_bytes / logo_mime: the picture for the header, validated on the way in. Bytes
             rather than a path, because the exported file has to carry it.
-        ai_guidance: the user's own standing preferences for plain-English generation
-            ("always show currency in INR", "prefer horizontal bars"). Stored with the
-            dashboard rather than with the session, because it is the kind of thing a user
-            writes once and expects to still apply next month. It is *added to* the
-            generator's fixed rules and can never replace them - see
-            `live_dashboard/ai_spec.py`.
     """
 
     title: str = ""
@@ -348,7 +342,6 @@ class DashboardSpec:
     filter_position: str = FILTER_TOP
     main_table: str = ""
     palette: str = PALETTE_DEFAULT
-    ai_guidance: str = ""
     panels: list[PanelSpec] = field(default_factory=list)
 
     def display_title(self) -> str:
@@ -495,36 +488,6 @@ def remove_panel(spec: DashboardSpec, panel_id: str) -> bool:
         return False
     spec.panels.remove(panel)
     return True
-
-
-def duplicate_panel(spec: DashboardSpec, panel_id: str) -> PanelSpec | None:
-    """Copies a panel, placing the copy directly after the original.
-
-    A new `panel_id` and a copied `properties` dict, so the two share no mutable state - the
-    bug this would otherwise have is invisible until the user edits one and watches the
-    other change.
-    """
-    panel = find_panel(spec, panel_id)
-    if panel is None:
-        return None
-
-    copy = PanelSpec(
-        visual_type=panel.visual_type,
-        sub_type=panel.sub_type,
-        source_table=panel.source_table,
-        source_columns=list(panel.source_columns),
-        measure_column=panel.measure_column,
-        aggregation=panel.aggregation,
-        group_by=panel.group_by,
-        colour_by=panel.colour_by,
-        sort=panel.sort,
-        top_n=panel.top_n,
-        title=f"{panel.display_title()} (copy)",
-        properties=dict(panel.properties),
-        row_number=panel.row_number,
-    )
-    spec.panels.insert(spec.panels.index(panel) + 1, copy)
-    return copy
 
 
 def move_panel(spec: DashboardSpec, panel_id: str, offset: int) -> bool:
@@ -805,7 +768,6 @@ def to_json(spec: DashboardSpec) -> str:
             ),
             "main_table": spec.main_table,
             "palette": spec.palette,
-            "ai_guidance": spec.ai_guidance,
         },
         "panels": [_panel_to_dict(panel) for panel in spec.panels],
     }
@@ -868,8 +830,8 @@ def from_json(text: str) -> DashboardSpec:
         filter_position=position if position in FILTER_POSITIONS else FILTER_TOP,
         main_table=str(settings.get("main_table") or ""),
         palette=str(settings.get("palette") or PALETTE_DEFAULT),
-        # Absent from anything saved before phase 33, which is why it reads as "" rather
-        # than failing the load - an older dashboard simply has no preferences yet.
-        ai_guidance=str(settings.get("ai_guidance") or ""),
+        # Anything saved between phases 33 and 35 carries an "ai_guidance" setting. It is
+        # read past rather than restored: phase 36 took the box away, and silently applying
+        # a preference with nowhere on the page to see or change it is worse than losing it.
         panels=[_panel_from_dict(raw) for raw in raw_panels if isinstance(raw, dict)],
     )

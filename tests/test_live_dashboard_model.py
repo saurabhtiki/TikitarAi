@@ -67,22 +67,6 @@ def test_remove_panel_reports_a_panel_that_is_already_gone():
     assert m.remove_panel(spec, panel.panel_id) is False
 
 
-def test_duplicate_panel_shares_no_mutable_state_with_the_original():
-    spec = m.DashboardSpec()
-    panel = m.add_panel(spec)
-    panel.properties = {"border": True}
-
-    copy = m.duplicate_panel(spec, panel.panel_id)
-    copy.properties["border"] = False
-    copy.source_columns.append("Amount")
-
-    assert panel.properties == {"border": True}
-    assert panel.source_columns == []
-    assert copy.panel_id != panel.panel_id
-    # The copy sits directly after the original, not at the end.
-    assert spec.panels.index(copy) == spec.panels.index(panel) + 1
-
-
 def test_move_panel_refuses_to_walk_off_either_end():
     spec = m.DashboardSpec()
     first = m.add_panel(spec)
@@ -228,18 +212,17 @@ def test_a_dashboard_survives_a_round_trip():
     assert back.panels[0].properties == {"number_format": "currency"}
 
 
-def test_the_ai_guidance_survives_a_round_trip():
-    """The user writes it once and expects it to still apply next month, so it is stored
-    with the dashboard rather than left in the session."""
-    spec = m.DashboardSpec(ai_guidance="always show currency in INR")
-    assert m.from_json(m.to_json(spec)).ai_guidance == "always show currency in INR"
-
-
-def test_a_dashboard_saved_before_the_guidance_existed_still_opens():
-    raw = json.dumps({"version": 1, "dashboard": {"title": "Older"}, "panels": []})
+def test_a_dashboard_saved_with_the_old_guidance_setting_still_opens():
+    """Phase 36 took the guidance box away. A Task saved while it existed carries the
+    setting, and must open rather than fail on a key the spec no longer has."""
+    raw = json.dumps({
+        "version": 1,
+        "dashboard": {"title": "Older", "ai_guidance": "always show currency in INR"},
+        "panels": [],
+    })
     back = m.from_json(raw)
     assert back.title == "Older"
-    assert back.ai_guidance == ""
+    assert not hasattr(back, "ai_guidance")
 
 
 def test_a_logo_survives_a_round_trip():

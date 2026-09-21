@@ -270,14 +270,21 @@ def _measure_field(panel: PanelSpec) -> dict:
 def _transform_aggregation(panel: PanelSpec) -> list[dict]:
     """The transforms behind the four totals Vega-Lite has no aggregate operation for.
 
-    Each ends with one row per category carrying `TRANSFORM_FIELD`, so `_measure_field` can
-    read it as an ordinary column. Empty for every other aggregation.
+    Each ends with one row per group carrying `TRANSFORM_FIELD`, so `_measure_field` can read
+    it as an ordinary column. Empty for every other aggregation.
+
+    "Group" is the breakdown *and the colour column*, which is the correction phase 36 made
+    here. An `aggregate` replaces its input with the group keys and the totals it computed,
+    so a colour column left out of `groupby` simply stops existing: the chart still drew, in
+    one colour, with a legend reading "null" - a wrong answer that looked like a right one.
+    Grouping by both keeps a stack a stack, and each segment is totalled in its own right.
     """
     if panel.aggregation not in TRANSFORM_AGGREGATIONS:
         return []
 
     measure = panel.measure_column
     group_by = panel.group_by
+    groups = [group_by] + ([panel.colour_by] if panel.colour_by else [])
 
     if panel.aggregation in {AGG_FIRST, AGG_LAST}:
         operation = "first_value" if panel.aggregation == AGG_FIRST else "last_value"
@@ -285,24 +292,30 @@ def _transform_aggregation(panel: PanelSpec) -> list[dict]:
             # The whole partition, not the rows so far: `first_value` over a growing frame
             # would give every row its own answer.
             {"window": [{"op": operation, "field": measure, "as": TRANSFORM_FIELD}],
-             "groupby": [group_by],
+             "groupby": groups,
              "frame": [None, None]},
             {"aggregate": [{"op": "max", "field": TRANSFORM_FIELD, "as": TRANSFORM_FIELD}],
-             "groupby": [group_by]},
+             "groupby": groups},
         ]
 
     totals = [
         {"aggregate": [{"op": "sum", "field": measure, "as": TRANSFORM_FIELD}],
-         "groupby": [group_by]},
+         "groupby": groups},
     ]
 
     if panel.aggregation == AGG_RUNNING_TOTAL:
         # Into a new column and then copied back, rather than summed onto itself: a window
         # reading the column it is writing is the kind of thing that works until it doesn't.
+        #
+        # Partitioned by colour where there is one: a running total across the colours would
+        # add one line's rise onto the next, which is not what either line claims to show.
+        running = {"window": [{"op": "sum", "field": TRANSFORM_FIELD, "as": "_running"}],
+                   "sort": [{"field": group_by, "order": "ascending"}],
+                   "frame": [None, 0]}
+        if panel.colour_by:
+            running["groupby"] = [panel.colour_by]
         return totals + [
-            {"window": [{"op": "sum", "field": TRANSFORM_FIELD, "as": "_running"}],
-             "sort": [{"field": group_by, "order": "ascending"}],
-             "frame": [None, 0]},
+            running,
             {"calculate": "datum._running", "as": TRANSFORM_FIELD},
         ]
 
@@ -354,11 +367,24 @@ def _category_type(panel: PanelSpec, date_columns: frozenset[str]) -> str:
 
 
 def _top_n_transform(panel: PanelSpec) -> list[dict]:
-    """The window-plus-filter pair that keeps only the biggest N categories.
+    """The transforms that keep only the biggest N categories, and nothing else.
 
     Done as a transform rather than by trimming the data, because the data is shared: the
     same rows feed every panel, and one panel's Top 10 must not take the other panels' rows
     away with it.
+
+    `joinaggregate` rather than `aggregate`, which is the whole of this function's history:
+    `aggregate` *replaces* its input with the group keys and the totals it computed, so the
+    measure column - and any colour column - stopped existing before the encoding could read
+    it. The chart then drew a titled, empty axis and no bars at all. `joinaggregate` adds the
+    category's total to each row and leaves every column where it was, so the encoding does
+    its own totalling afterwards exactly as it does on a chart with no Top N.
+
+    `dense_rank` rather than `rank` for the same reason the rows are kept: the rank runs over
+    rows, not categories, and only a dense rank gives every row of one category the same
+    number. Two categories with the same total therefore share a place and both are kept, so
+    a "top 5" over a tie can show six bars - the honest answer to an actual tie, and better
+    than dropping one of two equals on row order.
     """
     if not panel.top_n:
         return []
@@ -383,8 +409,8 @@ def _top_n_transform(panel: PanelSpec) -> list[dict]:
         }
 
     return [
-        {"aggregate": [measure_expression], "groupby": [panel.group_by]},
-        {"window": [{"op": "rank", "as": "_rank"}],
+        {"joinaggregate": [measure_expression], "groupby": [panel.group_by]},
+        {"window": [{"op": "dense_rank", "as": "_rank"}],
          "sort": [{"field": "_rank_measure", "order": "descending"}]},
         {"filter": f"datum._rank <= {int(panel.top_n)}"},
     ]

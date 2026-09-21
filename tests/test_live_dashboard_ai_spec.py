@@ -1,4 +1,4 @@
-"""Turning a plain-English description into dashboard rows (phase 33).
+"""Turning plain English into dashboard rows (phase 33), one round at a time (phase 35).
 
 Fully monkeypatched - no model is ever called. What matters here is not that the generation
 is clever but that it is *safe*: the catalog and the real columns are the only vocabulary,
@@ -8,11 +8,26 @@ as a chart that looks right and isn't.
 The two failures worth the most tests are the invisible ones: a column that merely resembles
 a real one, and a measure and a group-by the wrong way round. Both produce a picture; neither
 produces an error.
+
+Phase 35's rounds bring a third of the same kind, and it is the one most likely to regress:
+**a round must change what was asked for and nothing else.** A round that quietly rebuilt the
+page each time would look right in every screenshot and lose a visual the user had edited by
+hand, so `test_a_round_changes_only_what_it_names` checks the untouched panels are the same
+objects, ids included.
 """
 
 import pandas as pd
 
-from analyst.charts import AGG_AVERAGE, AGG_COUNT, AGG_SUM, CHART_BAR, CHART_LINE, CHART_PIE
+from analyst.charts import (
+    AGG_AVERAGE,
+    AGG_COUNT,
+    AGG_SUM,
+    CHART_BAR,
+    CHART_LINE,
+    CHART_PIE,
+    SORT_LABELS,
+)
+from engine.dictionary import ColumnEntry
 from live_dashboard import ai_spec
 from live_dashboard import model as m
 from live_dashboard.ai_spec import ProposedDashboard, ProposedPanel
@@ -391,31 +406,6 @@ def test_the_catalog_is_rendered_from_the_model_constants():
         assert sub_type in catalog
 
 
-def test_guidance_reaches_the_prompt_fenced_as_a_preference(monkeypatch):
-    """It is appended to the user's own turn rather than to the hard rules, so it reads as a
-    preference. Either way the catalog and column checks still run afterwards."""
-    recorder: list = []
-    _answer(monkeypatch, ProposedDashboard(panels=[_chart()]), recorder)
-
-    ai_spec.propose_dashboard(
-        PROFILE, "sales by customer", _tables(), main_table=MAIN,
-        guidance="prefer horizontal bar charts",
-    )
-
-    prompt, kwargs = recorder[0]
-    assert "prefer horizontal bar charts" in prompt
-    assert "never override" in prompt
-    assert prompt.index("Dashboard to build:") < prompt.index("prefer horizontal bar charts")
-    # The rules stay the app's own text, with nothing of the user's in among them.
-    assert "prefer horizontal bar charts" not in kwargs["instructions"]
-
-
-def test_the_guidance_is_kept_on_the_spec_so_it_is_there_next_month(monkeypatch):
-    spec, _, _ = _generate(monkeypatch, ProposedDashboard(panels=[_chart()]),
-                           guidance=" always show currency in INR ")
-    assert spec.ai_guidance == "always show currency in INR"
-
-
 # ------------------------------------------------------------------ the summary line
 
 
@@ -464,3 +454,381 @@ def test_a_histogram_is_described_as_a_spread_rather_than_a_total(monkeypatch):
     assert warnings == []
     sentence = ai_spec.describe_panel(spec.panels[0])
     assert "spread" in sentence and "Sum" not in sentence
+
+
+# ------------------------------------------------------------------ phase 35: rounds
+
+
+def _dashboard(*titles: str) -> m.DashboardSpec:
+    """A dashboard already on screen, for a round to edit."""
+    return m.DashboardSpec(
+        title="Sales review",
+        main_table=MAIN,
+        panels=[
+            m.PanelSpec(
+                visual_type=m.VISUAL_CHART, sub_type=CHART_BAR, source_table=MAIN,
+                measure_column="Amount", aggregation=AGG_SUM,
+                group_by="Customer - CustName", title=title, row_number=position,
+            )
+            for position, title in enumerate(titles, start=1)
+        ],
+    )
+
+
+def _round(monkeypatch, spec: m.DashboardSpec, response: ProposedDashboard,
+           instruction: str = "change it", recorder: list | None = None, **kwargs):
+    _answer(monkeypatch, response, recorder)
+    return ai_spec.revise_dashboard(PROFILE, instruction, _tables(), spec, **kwargs)
+
+
+def test_a_round_changes_only_what_it_names(monkeypatch):
+    """The headline behaviour of the whole phase.
+
+    Checked on identity rather than on values: a round that rebuilt every panel from the
+    listing would pass a comparison of titles and still throw away the ids the exported page
+    and the edit dialog are keyed on.
+    """
+    spec = _dashboard("First", "Second", "Third")
+    untouched = [spec.panels[0], spec.panels[2]]
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="2", title="Renamed", sub_type="bar_horizontal",
+               row_number="2"),
+    ]))
+
+    assert [panel.title for panel in spec.panels] == ["First", "Renamed", "Third"]
+    assert spec.panels[0] is untouched[0] and spec.panels[2] is untouched[1]
+    assert spec.panels[1].sub_type == m.CHART_BAR_HORIZONTAL
+    assert len(result.updated) == 1 and not result.added and not result.removed
+
+
+def test_an_updated_visual_keeps_its_id(monkeypatch):
+    """It is the element id in the exported page and the key of every widget in the edit
+    dialog - churning it each round would reset the user's selection."""
+    spec = _dashboard("First")
+    original = spec.panels[0].panel_id
+
+    _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="1", title="Renamed", row_number="1"),
+    ]))
+
+    assert spec.panels[0].panel_id == original
+
+
+def test_an_update_that_says_nothing_about_the_row_stays_where_it_was(monkeypatch):
+    spec = _dashboard("First", "Second")
+    spec.panels[1].row_number = 7
+
+    _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="2", title="Renamed", row_number=""),
+    ]))
+
+    assert spec.panels[1].row_number == 7
+
+
+def test_a_round_can_remove_one_visual(monkeypatch):
+    spec = _dashboard("First", "Second", "Third")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        ProposedPanel(action="remove", target="2", visual_type="chart"),
+    ]))
+
+    assert [panel.title for panel in spec.panels] == ["First", "Third"]
+    assert result.removed == ["Second"]
+
+
+def test_a_round_can_add_one_visual_without_disturbing_the_rest(monkeypatch):
+    spec = _dashboard("First")
+    first = spec.panels[0]
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="add", title="Added", row_number="2"),
+    ]))
+
+    assert [panel.title for panel in spec.panels] == ["First", "Added"]
+    assert spec.panels[0] is first
+    assert len(result.added) == 1
+
+
+def test_an_edit_pointing_at_nothing_is_a_sentence_not_a_guess(monkeypatch):
+    """Guessing here edits the wrong chart, which is the one failure the user cannot see."""
+    spec = _dashboard("First")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="9", title="Renamed"),
+    ]))
+
+    assert [panel.title for panel in spec.panels] == ["First"]
+    assert not result.changed()
+    assert any("no visual number '9'" in note for note in result.notes)
+
+
+def test_an_action_we_do_not_have_is_a_sentence(monkeypatch):
+    spec = _dashboard("First")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="rotate", target="1"),
+    ]))
+
+    assert not result.changed()
+    assert any("rotate" in note for note in result.notes)
+
+
+def test_a_round_that_changes_nothing_leaves_the_dashboard_exactly_as_it_was(monkeypatch):
+    spec = _dashboard("First", "Second")
+    before = list(spec.panels)
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[]))
+
+    assert spec.panels == before
+    assert not result.changed()
+    assert result.notes
+
+
+def test_a_round_is_fenced_by_the_real_columns_just_like_a_first_draft(monkeypatch):
+    """The catalog and the column checks are not relaxed because the page already exists."""
+    spec = _dashboard("First")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="add", measure_column="Amt", title="Invented column"),
+        _chart(action="add", measure_column="Customer - CustName", title="Summed a name"),
+        _chart(action="add", aggregation="frobnicate", title="Invented total"),
+    ]))
+
+    assert len(spec.panels) == 1
+    assert not result.added
+    assert len(result.notes) == 3
+
+
+def test_a_shape_we_cannot_draw_still_falls_back_out_loud_in_a_round(monkeypatch):
+    """The fallback path has to survive the new entry point, not only the first draft."""
+    spec = _dashboard("First")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="add", sub_type="treemap", title="Share by customer"),
+    ]))
+
+    assert spec.panels[1].sub_type == CHART_PIE
+    assert any("treemap" in note and "pie" in note.lower() for note in result.notes)
+
+
+def test_a_blank_instruction_on_a_dashboard_with_visuals_is_refused(monkeypatch):
+    """"Add something" and "start over" are not one request, and one of them is destructive."""
+    spec = _dashboard("First")
+    called: list = []
+    monkeypatch.setattr(ai_spec, "run_structured",
+                        lambda *args, **kwargs: called.append(args))
+
+    result = ai_spec.revise_dashboard(PROFILE, "   ", _tables(), spec)
+
+    assert called == []
+    assert result.failed and len(spec.panels) == 1
+
+
+def test_a_blank_instruction_on_an_empty_dashboard_designs_one(monkeypatch):
+    """The requirement's "leave it blank and press Generate"."""
+    spec = m.DashboardSpec(main_table=MAIN)
+    recorder: list = []
+    result = _round(monkeypatch, spec, ProposedDashboard(
+        title="Sales", panels=[_chart(title="Sales by customer")],
+    ), instruction="", recorder=recorder)
+
+    assert ai_spec.DEFAULT_INSTRUCTION in recorder[0][0]
+    assert [panel.title for panel in spec.panels] == ["Sales by customer"]
+    assert len(result.added) == 1
+
+
+def test_a_model_that_is_down_leaves_the_dashboard_on_screen(monkeypatch):
+    spec = _dashboard("First")
+
+    def fail(*args, **kwargs):
+        raise LLMConnectionError("the provider is unreachable")
+
+    monkeypatch.setattr(ai_spec, "run_structured", fail)
+    result = ai_spec.revise_dashboard(PROFILE, "add a chart", _tables(), spec)
+
+    assert result.failed
+    assert [panel.title for panel in spec.panels] == ["First"]
+    assert any("unreachable" in note for note in result.notes)
+
+
+def test_a_round_only_renames_the_dashboard_when_it_was_asked_to(monkeypatch):
+    """Blank means "not asked about" on a round, unlike on a first draft where the model
+    writes the title every time."""
+    spec = _dashboard("First")
+
+    _round(monkeypatch, spec, ProposedDashboard(title="", panels=[
+        _chart(action="add", title="Added", row_number="2"),
+    ]))
+    assert spec.title == "Sales review"
+
+    _round(monkeypatch, spec, ProposedDashboard(title="Renamed page", panels=[
+        _chart(action="add", title="Another", row_number="3"),
+    ]))
+    assert spec.title == "Renamed page"
+
+
+def test_the_round_counts_say_what_actually_happened(monkeypatch):
+    spec = _dashboard("First", "Second", "Third")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="add", title="Added", row_number="4"),
+        _chart(action="update", target="1", title="Renamed", row_number="1"),
+        ProposedPanel(action="remove", target="3", visual_type="chart"),
+    ]))
+
+    assert (len(result.added), len(result.updated), result.removed) == (1, 1, ["Third"])
+    assert result.summary() == "Added 1 visual(s), changed 1, removed 1"
+    assert result.changed()
+
+
+# --------------------------------------------------- phase 35: the dashboard as memory
+
+
+def test_the_listing_decides_about_every_field_that_is_stored():
+    """A field added to `PanelSpec` later must be either shown to a round or deliberately
+    left out. Silently missing from every round is the kind of bug that takes a month to
+    notice, because the page still draws."""
+    stored = m._panel_to_dict(m.PanelSpec())
+    assert set(ai_spec._SPEC_FIELD_LABELS) == set(stored)
+
+
+def test_the_current_dashboard_is_described_field_by_field():
+    """Prose does not round-trip: a round has to be able to re-state the visual it edits."""
+    spec = _dashboard("Sales by customer")
+    spec.panels[0].properties = m.clean_properties("format:currency, currency:INR")
+
+    described = ai_spec.describe_spec_for_prompt(spec)
+
+    assert "1. chart / bar" in described
+    assert "measure_column=Amount" in described
+    assert "group_by=Customer - CustName" in described
+    assert "properties=format:currency, currency:INR" in described
+    assert "Sales review" in described
+
+
+def test_an_empty_dashboard_says_so_rather_than_listing_nothing():
+    described = ai_spec.describe_spec_for_prompt(m.DashboardSpec())
+    assert "(none yet)" in described
+
+
+def test_a_visual_is_not_shown_fields_its_own_kind_ignores():
+    """A card carrying `sort=largest` is noise in a crowded prompt - and worse, it invites a
+    round to "fix" a field that changes nothing."""
+    spec = m.DashboardSpec(panels=[m.PanelSpec(
+        visual_type=m.VISUAL_CARD, sub_type=m.CARD_SINGLE, source_table=MAIN,
+        measure_column="Amount", sort="largest", title="Total",
+    )])
+
+    described = ai_spec.describe_spec_for_prompt(spec)
+
+    assert "measure_column=Amount" in described
+    assert "sort=" not in described
+
+
+def test_a_round_is_told_what_the_page_looks_like_now(monkeypatch):
+    spec = _dashboard("Sales by customer")
+    recorder: list = []
+
+    _round(monkeypatch, spec, ProposedDashboard(panels=[]), recorder=recorder)
+
+    prompt = recorder[0][0]
+    assert "The dashboard as it stands:" in prompt
+    assert "Sales by customer" in prompt
+    assert "What to change:" in prompt
+
+
+# ----------------------------------------------------- phase 35: what the columns mean
+
+
+def _entries() -> list[ColumnEntry]:
+    return [
+        ColumnEntry(table=MAIN, column="Amount", sql_type="DOUBLE", semantic_type="numeric",
+                    description="invoice value after discount, INR",
+                    synonyms=["value", "total"]),
+        ColumnEntry(table="Customer", column="CustName", sql_type="VARCHAR",
+                    semantic_type="text", description="the customer's trading name"),
+        ColumnEntry(table=MAIN, column="TxnID", sql_type="INTEGER", semantic_type="id"),
+    ]
+
+
+def test_a_columns_meaning_is_read_from_the_setup_dictionary():
+    notes = ai_spec.column_notes(_entries())
+
+    assert notes["Amount"] == "invoice value after discount, INR [also called: value, total]"
+    assert notes["CustName"] == "the customer's trading name"
+    # Nothing was written about it, so it would only lengthen the prompt.
+    assert "TxnID" not in notes
+
+
+def test_a_joined_columns_meaning_is_found_under_its_flattened_name():
+    """`flatten` renames `CustName` to `Customer - CustName`, so matching on the whole name
+    would quietly find nothing for every master column - which is most of them."""
+    notes = ai_spec.column_notes(_entries())
+    described = ai_spec.describe_tables_for_prompt(_tables(), notes)
+
+    assert "Customer - CustName (text) - the customer's trading name" in described
+    assert "Amount (number) - invoice value after discount, INR" in described
+
+
+def test_two_tables_describing_the_same_column_keep_the_first():
+    notes = ai_spec.column_notes([
+        ColumnEntry(table="A", column="Name", sql_type="VARCHAR", semantic_type="text",
+                    description="the first one"),
+        ColumnEntry(table="B", column="Name", sql_type="VARCHAR", semantic_type="text",
+                    description="the second one"),
+    ])
+
+    assert notes["Name"] == "the first one"
+
+
+def test_an_empty_dictionary_changes_nothing():
+    """The ordinary case on a fresh session: the prompt reads exactly as it did in phase 34."""
+    assert (ai_spec.describe_tables_for_prompt(_tables(), {})
+            == ai_spec.describe_tables_for_prompt(_tables()))
+
+
+def test_the_column_meanings_reach_the_prompt(monkeypatch):
+    recorder: list = []
+    _answer(monkeypatch, ProposedDashboard(panels=[_chart()]), recorder)
+
+    ai_spec.propose_dashboard(PROFILE, "sales by customer", _tables(), main_table=MAIN,
+                              notes=ai_spec.column_notes(_entries()))
+
+    assert "invoice value after discount, INR" in recorder[0][0]
+
+
+# --------------------------------------------------------- phase 35: the design skill
+
+
+def test_every_shape_the_design_rules_recommend_is_one_we_can_draw():
+    """The cheap stand-in for a record per chart shape: prose that no test ties to the
+    catalog is exactly how a rule ends up recommending a chart the exported file cannot
+    draw - which is a blank box found after the file has been emailed."""
+    known = (set(m.CHART_SUB_TYPES) | set(m.DASHBOARD_AGGREGATIONS) | set(SORT_LABELS)
+             | set(m.NUMBER_FORMATS) | set(m.CURRENCY_CODES))
+
+    for name in ai_spec._DESIGN_RULE_NAMES:
+        assert name in known, name
+        assert name in ai_spec._DESIGN_RULES, name
+
+
+def test_the_design_rules_are_sent_with_every_request():
+    """Both entry points, because a round is where most of the dashboard is actually built."""
+    assert ai_spec._DESIGN_RULES in ai_spec._INSTRUCTIONS
+    assert ai_spec._DESIGN_RULES in ai_spec._ROUND_INSTRUCTIONS
+
+
+def test_both_prompts_carry_the_same_hard_rules():
+    """A draft and a round disagreeing about what a chart needs would show up as a visual
+    that can be created one way and not the other."""
+    assert ai_spec._CORE_RULES in ai_spec._INSTRUCTIONS
+    assert ai_spec._CORE_RULES in ai_spec._ROUND_INSTRUCTIONS
+
+
+def test_a_round_is_told_it_is_editing_rather_than_rebuilding(monkeypatch):
+    spec = _dashboard("First")
+    recorder: list = []
+    _round(monkeypatch, spec, ProposedDashboard(panels=[]), recorder=recorder)
+
+    assert recorder[0][1]["instructions"] == ai_spec._ROUND_INSTRUCTIONS

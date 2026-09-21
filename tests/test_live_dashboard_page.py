@@ -8,10 +8,18 @@ DuckDB connection behind it is genuine, so the flattening, the spec building and
 export all run for real; only the "where did these tables come from" question is answered by
 the test.
 
-The behaviours worth the most here are the ones that stay invisible until someone has done
-real work: **the selection reset** (delete a row and the buttons underneath must not silently
-point at whatever slid into that index), **a panel with a problem still listed rather than
-dropped**, and **the download and the preview coming from one string**.
+Since phase 36 the conversation is the whole page: the spec table, the edit form and the
+Add / Duplicate / Remove buttons are gone, so every change to a dashboard is a round. The
+behaviours worth the most here are the ones that stay invisible until someone has done real
+work: **a visual that cannot be drawn named in words** (with no table, nothing else says
+so), **a round changing only what it names**, and **the download and the preview coming
+from one string**.
+
+`ai_spec.revise_dashboard` is stubbed with a small script read from session state, because
+what these tests are about is what the *page* does with a round - how a round is built is
+`test_live_dashboard_ai_spec.py`'s job. With no script set the stub calls the real thing,
+which is how the "a blank box with visuals on the page asks for words" case is tested
+without a provider.
 """
 
 import pytest
@@ -43,14 +51,18 @@ def leave_the_engine_session_as_it_was_found():
     from engine import session as engine_session
     from llm import session as llm_session
 
+    from live_dashboard import ai_spec
+
     saved = {name: getattr(engine_session, name) for name in STUBBED}
     saved_light = llm_session.light_profile
+    saved_revise = ai_spec.revise_dashboard
     try:
         yield
     finally:
         for name, value in saved.items():
             setattr(engine_session, name, value)
         llm_session.light_profile = saved_light
+        ai_spec.revise_dashboard = saved_revise
 
 
 def _scenario():
@@ -83,6 +95,49 @@ def _scenario():
         "default_model": "small-model",
         "provider_type": "local",
     }
+
+    # One round, replaced by whatever `test_round_plan` says it did. Inline rather than a
+    # helper for the reason this function's docstring gives - only its own source is
+    # re-executed - and installed once, so a rerun does not wrap the stub in itself.
+    #
+    # With no plan in session state the real `revise_dashboard` runs. That is not laziness:
+    # the "blank box with visuals already there" refusal happens before any model is
+    # reached, so the honest way to test it is to let the real function answer.
+    import streamlit as st
+
+    from live_dashboard import ai_spec
+    from live_dashboard import model as ld_model
+
+    if not getattr(ai_spec.revise_dashboard, "is_test_stub", False):
+        real_revise = ai_spec.revise_dashboard
+
+        def scripted(profile, instruction, tables, spec, **kwargs):
+            if "test_round_plan" not in st.session_state:
+                return real_revise(profile, instruction, tables, spec, **kwargs)
+
+            plan = st.session_state["test_round_plan"] or {}
+            result = ai_spec.RoundResult(notes=list(plan.get("notes") or []))
+            if plan.get("fail"):
+                result.failed = True
+                return result
+
+            for index in sorted(plan.get("remove") or [], reverse=True):
+                result.removed.append(spec.panels.pop(index).display_title())
+            for index, title in (plan.get("retitle") or {}).items():
+                spec.panels[index].title = title
+                result.updated.append(spec.panels[index])
+            for title in plan.get("add") or []:
+                panel = ld_model.PanelSpec(
+                    visual_type=ld_model.VISUAL_CHART, sub_type=ld_model.CHART_BAR,
+                    source_table="Transactions", measure_column="Amount",
+                    group_by="Customer - CustName", title=title, row_number=1,
+                )
+                spec.panels.append(panel)
+                result.added.append(panel)
+            return result
+
+        scripted.is_test_stub = True
+        ai_spec.revise_dashboard = scripted
 
     dashboard_view.render_dashboard(1)
 
@@ -126,8 +181,8 @@ def _add_chart(app: AppTest, title: str = "Sales by customer", row: int = 1,
                group_by: str = "Customer - CustName") -> AppTest:
     """Adds a chart by mutating the spec, then reruns.
 
-    The add dialog's own widgets are exercised by `test_the_add_dialog_opens`; building the
-    rest of the fixtures through it would make every other test depend on the dialog's layout.
+    Since phase 35 there is no Add a visual button to press, and building fixtures through a
+    round would make every test depend on the stub's script as well as on the page.
     """
     spec = _spec(app)
     panel = m.PanelSpec(
@@ -165,133 +220,36 @@ def test_there_is_nothing_to_download_before_a_visual_exists():
     assert not app.get("download_button")
 
 
-# ------------------------------------------------------------------ the spec table
+# ------------------------------------------------------------------ what is on the page
 
 
-def test_a_visual_appears_in_the_spec_table():
+def test_there_is_no_spec_table_and_no_buttons_to_edit_by_hand():
+    """Phase 36's change in shape, in one test. Two ways to change one dashboard meant two
+    things to learn, and the table described in eight columns what the preview shows in full
+    a few inches below it."""
     app = _add_chart(_app())
-    assert len(app.dataframe) == 1
-    frame = app.dataframe[0].value
-    assert frame["Title"].tolist() == ["Sales by customer"]
+
+    assert not app.dataframe
+    keys = {button.key for button in app.button}
+    assert not keys & {"ld_add_panel_button", "ld_edit_button",
+                       "ld_duplicate_button", "ld_delete_button"}
+    assert "ld_ai_generate" in keys
 
 
-def test_the_spec_table_reports_which_filters_narrow_a_visual():
-    app = _add_chart(_app())
-    spec = _spec(app)
-    spec.panels.append(m.PanelSpec(
-        visual_type=m.VISUAL_FILTER, sub_type=m.FILTER_DROPDOWN,
-        source_table="Transactions", source_columns=["Customer - CustName"], title="Customer",
-    ))
-    app.run()
-
-    frame = app.dataframe[0].value
-    chart_row = frame[frame["Title"] == "Sales by customer"].iloc[0]
-    assert chart_row["Depends on"] == "Customer"
-
-
-def test_a_visual_naming_an_unreachable_column_is_listed_with_a_warning():
-    """Listed, not dropped - the user has to be able to see and fix it."""
+def test_a_visual_that_cannot_be_drawn_is_named_above_the_preview():
+    """The one thing a picture of a dashboard cannot show is the visual missing from it.
+    This is what the removed table's `Status` column used to say."""
     app = _add_chart(_app(), title="By region", group_by="Region")
-    frame = app.dataframe[0].value
-    row = frame[frame["Title"] == "By region"].iloc[0]
-    assert row["Status"].startswith("!")
-    assert "Region" in row["Status"]
+
+    warnings = " ".join(warning.value for warning in app.warning)
+    assert "By region" in warnings
+    assert "Region" in warnings
 
 
-def test_visuals_sharing_a_row_number_show_the_number_once():
-    app = _add_chart(_app(), title="Left", row=1)
-    _add_chart(app, title="Right", row=1)
-    frame = app.dataframe[0].value
-    assert frame["Row"].tolist() == ["1", ""]
-
-
-def test_filters_are_listed_above_the_visuals():
+def test_a_dashboard_whose_visuals_are_all_fine_says_nothing():
+    """A standing warning nobody can clear is a warning nobody reads."""
     app = _add_chart(_app())
-    _spec(app).panels.append(m.PanelSpec(
-        visual_type=m.VISUAL_FILTER, source_table="Transactions",
-        source_columns=["Customer - CustName"], title="Customer",
-    ))
-    app.run()
-    frame = app.dataframe[0].value
-    assert frame.iloc[0]["Title"] == "Customer"
-
-
-# ------------------------------------------------------------------ dialogs
-
-
-def test_the_add_button_opens_the_add_dialog():
-    app = _app()
-    app.button(key="ld_add_panel_button").click().run()
-    assert app.session_state["ld_open_dialog"][0] == "add"
-    assert not app.exception
-
-
-def test_the_add_dialog_offers_only_the_sub_types_that_fit_the_visual_type():
-    app = _app()
-    app.button(key="ld_add_panel_button").click().run()
-
-    sub_type = app.selectbox(key="ld_add_sub_type")
-    assert list(sub_type.options) == [
-        m.DASHBOARD_CHART_LABELS[kind] for kind in m.CHART_SUB_TYPES
-    ]
-
-
-def test_switching_to_a_filter_changes_the_sub_types_on_offer():
-    app = _app()
-    app.button(key="ld_add_panel_button").click().run()
-    app.selectbox(key="ld_add_visual_type").set_value(m.VISUAL_FILTER).run()
-
-    assert list(app.selectbox(key="ld_add_sub_type").options) == [
-        m.FILTER_LABELS[kind] for kind in m.FILTER_SUB_TYPES
-    ]
-
-
-def test_the_data_source_picker_tags_fact_and_master_columns():
-    app = _app()
-    app.button(key="ld_add_panel_button").click().run()
-    app.selectbox(key="ld_add_visual_type").set_value(m.VISUAL_FILTER).run()
-
-    # AppTest reports a selectbox's options already run through its format_func, so these
-    # are the labels themselves - applying it again would tag each one twice.
-    labels = list(app.selectbox(key="ld_add_filter_column").options)
-    assert any(label.endswith("Fact") for label in labels)
-    assert any(label.endswith("Master/Lookup") for label in labels)
-
-
-def test_cancelling_the_add_dialog_leaves_the_dashboard_alone():
-    app = _app()
-    app.button(key="ld_add_panel_button").click().run()
-    app.button(key="ld_add_cancel").click().run()
-    assert _spec(app).panels == []
-    assert "ld_open_dialog" not in app.session_state
-
-
-# ------------------------------------------------------------------ removing
-
-
-def test_removing_a_visual_takes_it_off_the_dashboard():
-    app = _add_chart(_app())
-    panel_id = _spec(app).panels[0].panel_id
-
-    app.session_state["ld_open_dialog"] = ("delete", {"panel_id": panel_id})
-    app.run()
-    app.button(key=f"ld_delete_confirm_{panel_id}").click().run()
-
-    assert _spec(app).panels == []
-
-
-def test_removing_a_visual_clears_the_table_selection():
-    """Otherwise the buttons underneath silently point at whatever slid into that index."""
-    app = _add_chart(_app(), title="First")
-    _add_chart(app, title="Second", row=2)
-    panel_id = _spec(app).panels[0].panel_id
-
-    app.session_state["ld_spec_table"] = {"selection": {"rows": [0], "columns": []}}
-    app.session_state["ld_open_dialog"] = ("delete", {"panel_id": panel_id})
-    app.run()
-    app.button(key=f"ld_delete_confirm_{panel_id}").click().run()
-
-    assert app.session_state["ld_spec_table"]["selection"]["rows"] == []
+    assert not any("can't be drawn" in warning.value for warning in app.warning)
 
 
 # ------------------------------------------------------------------ export
@@ -344,133 +302,122 @@ def test_the_title_reaches_the_spec():
     assert _spec(app).title == "Monthly sales"
 
 
-# ------------------------------------------------------------------ describe in plain English
+# ------------------------------------------------------------------ the conversation
 
 
-def _proposal(*titles: str) -> m.DashboardSpec:
-    """What `ai_spec.propose_dashboard` would have returned, without calling a model.
-
-    Put straight into session state rather than generated: what these tests are about is
-    what the two accept buttons *do* with a proposal, and `test_live_dashboard_ai_spec.py`
-    already covers how one is made.
-    """
-    return m.DashboardSpec(
-        title="Generated",
-        filter_position=m.FILTER_TOP,
-        panels=[
-            m.PanelSpec(visual_type=m.VISUAL_CHART, sub_type=m.CHART_BAR,
-                        source_table="Transactions", measure_column="Amount",
-                        group_by="Customer - CustName", title=title, row_number=1)
-            for title in titles
-        ],
-    )
-
-
-def _open_describe(app: AppTest, proposal: m.DashboardSpec | None = None,
-                   warnings: list[str] | None = None) -> AppTest:
-    app.session_state["ld_open_dialog"] = ("describe", {})
-    if proposal is not None or warnings is not None:
-        app.session_state["ld_ai_proposal"] = (proposal, warnings or [], None)
-    app.run()
+def _round(app: AppTest, instruction: str = "add a chart", **plan) -> AppTest:
+    """Types an instruction, scripts what the round did, and presses the button."""
+    app.session_state["test_round_plan"] = plan
+    app.text_area(key="ld_ai_instruction").set_value(instruction).run()
+    app.button(key="ld_ai_generate").click().run()
     assert not app.exception
     return app
 
 
-def test_the_describe_button_opens_the_dialog():
-    app = _app()
-    app.button(key="ld_ai_button").click().run()
-    assert app.session_state["ld_open_dialog"][0] == "describe"
-    assert not app.exception
-
-
-def test_with_no_light_model_the_dialog_says_so_rather_than_offering_a_box():
-    app = AppTest.from_function(_scenario_without_a_light_model, default_timeout=120)
-    app.session_state["ld_open_dialog"] = ("describe", {})
-    app.run()
-
-    assert not app.exception
-    assert any("No Light Model" in warning.value for warning in app.warning)
-    assert not app.get("text_area")
-
-
-def test_replacing_the_dashboard_swaps_the_visuals():
+def test_a_round_changes_the_dashboard_in_place_with_no_accept_step():
+    """The whole of phase 35's change in shape: no Replace, no Add to it, no dialog."""
     app = _add_chart(_app(), title="Built by hand")
-    _open_describe(app, _proposal("Generated one", "Generated two"))
+    _round(app, "add a second chart", add=["Asked for"])
 
-    app.button(key="ld_ai_replace").click().run()
-
-    assert [panel.title for panel in _spec(app).panels] == ["Generated one", "Generated two"]
-    assert "ld_ai_proposal" not in app.session_state
+    assert [panel.title for panel in _spec(app).panels] == ["Built by hand", "Asked for"]
+    assert "ld_open_dialog" not in app.session_state
 
 
-def test_adding_to_the_dashboard_keeps_what_was_there():
-    app = _add_chart(_app(), title="Built by hand", row=2)
-    _open_describe(app, _proposal("Generated"))
+def test_a_round_can_take_a_visual_off_the_dashboard():
+    """The Remove button's replacement: it is said, not clicked."""
+    app = _add_chart(_app(), title="Keep me")
+    _add_chart(app, title="Drop me", row=2)
 
-    app.button(key="ld_ai_append").click().run()
+    _round(app, "drop the second chart", remove=[1])
+
+    assert [panel.title for panel in _spec(app).panels] == ["Keep me"]
+
+
+def test_a_round_that_changes_one_visual_leaves_the_others_alone():
+    app = _add_chart(_app(), title="First")
+    _add_chart(app, title="Second", row=2)
+    untouched = _spec(app).panels[1].panel_id
+
+    _round(app, "rename the first one", retitle={0: "Renamed"})
 
     spec = _spec(app)
-    assert [panel.title for panel in spec.panels] == ["Built by hand", "Generated"]
-    # Underneath the hand-built row rather than beside it - a generated row 1 landing on
-    # top of an existing row 1 would silently rearrange the page.
-    assert spec.panels[1].row_number == 3
+    assert [panel.title for panel in spec.panels] == ["Renamed", "Second"]
+    assert spec.panels[1].panel_id == untouched
 
 
-def test_cancelling_the_description_leaves_the_dashboard_alone():
+def test_what_each_round_did_is_listed_back():
+    app = _add_chart(_app())
+    _round(app, "add a chart of sales by customer", add=["Sales by customer"])
+
+    written = " ".join(element.value for element in app.markdown)
+    assert "add a chart of sales by customer" in written
+    assert any("Added 1 visual(s)" in caption.value for caption in app.caption)
+
+
+def test_a_note_from_a_round_is_shown_as_a_warning():
+    """A shape swapped for the nearest one we can draw must not be discovered in someone
+    else's inbox three days later."""
+    app = _add_chart(_app())
+    _round(app, "show products as a treemap", add=["Products"],
+           notes=["'Products' asked for a treemap. This dashboard can't draw one yet."])
+
+    assert any("treemap" in warning.value for warning in app.warning)
+
+
+def test_undo_puts_the_dashboard_back_as_it_was():
     app = _add_chart(_app(), title="Built by hand")
-    _open_describe(app, _proposal("Generated"))
+    _round(app, "add one", add=["Generated"])
+    assert len(_spec(app).panels) == 2
 
-    app.button(key="ld_ai_cancel").click().run()
+    app.button(key="ld_ai_undo").click().run()
 
+    assert not app.exception
     assert [panel.title for panel in _spec(app).panels] == ["Built by hand"]
-    assert "ld_ai_proposal" not in app.session_state
 
 
-def test_a_description_that_produced_nothing_says_what_to_do_next():
-    app = _open_describe(_app(), None, ["We couldn't read that description: no answer"])
-    assert any("couldn't read that" in warning.value for warning in app.warning)
-    assert "ld_ai_replace" not in {button.key for button in app.button}
+def test_undo_is_offered_only_once_there_is_a_round_to_undo():
+    app = _add_chart(_app())
+    assert app.button(key="ld_ai_undo").disabled
+
+    _round(app, "add one", add=["Generated"])
+    assert not app.button(key="ld_ai_undo").disabled
 
 
-def test_the_extra_guidance_is_kept_on_the_dashboard():
-    """Saved as it is typed, whether or not the user goes on to generate anything - it is
-    the kind of preference that is written once and expected to still apply next month."""
-    app = _open_describe(_app())
-    app.text_area(key="ld_ai_guidance").set_value("always show currency in INR").run()
+def test_a_round_that_changed_nothing_does_not_light_up_undo():
+    """A button that restores the page to exactly what it already is teaches the user to
+    distrust the next one."""
+    app = _add_chart(_app())
+    _round(app, "do something impossible", notes=["Nothing on the dashboard changed."])
 
-    assert _spec(app).ai_guidance == "always show currency in INR"
-
-
-# ------------------------------------------------- phase 34: the wider vocabulary
+    assert app.button(key="ld_ai_undo").disabled
+    assert len(_spec(app).panels) == 1
 
 
-def test_the_aggregation_picker_offers_the_dashboards_own_wider_list():
-    """The page and the exported file must offer the same totals, or a card could be built
-    here that the downloaded file has no arithmetic for."""
-    app = _app()
-    app.button(key="ld_add_panel_button").click().run()
+def test_a_blank_box_with_visuals_already_there_asks_for_words():
+    """Run against the real `revise_dashboard`: the refusal happens before any model is
+    reached, which is the point - "add something" and "start over" are not one request."""
+    app = _add_chart(_app(), title="Built by hand")
+    app.text_area(key="ld_ai_instruction").set_value("").run()
+    app.button(key="ld_ai_generate").click().run()
 
-    aggregation = app.selectbox(key="ld_add_aggregation")
-    assert list(aggregation.options) == list(m.DASHBOARD_AGGREGATIONS.values())
+    assert not app.exception
+    assert [panel.title for panel in _spec(app).panels] == ["Built by hand"]
+    assert any("Say what you'd like changed" in warning.value for warning in app.warning)
 
 
-def test_the_currency_picker_appears_only_once_the_format_says_money():
-    """Asked at the moment it means something, so the form stays short for everyone else."""
-    app = _app()
-    app.button(key="ld_add_panel_button").click().run()
-    assert not [box for box in app.selectbox if box.key == "ld_add_currency"]
-
-    app.text_input(key="ld_add_properties").set_value("format:currency").run()
-
-    currency = app.selectbox(key="ld_add_currency")
-    assert list(currency.options) == list(m.CURRENCY_CODES)
+def test_with_no_light_model_the_page_says_so_and_a_saved_dashboard_still_downloads():
+    """Since phase 36 there is nothing else to do here without a model - so the page has to
+    say which setting is missing, and a dashboard saved earlier must still come out."""
+    app = AppTest.from_function(_scenario_without_a_light_model, default_timeout=120)
+    app.run()
     assert not app.exception
 
+    app.session_state["ld_spec"].panels.append(m.PanelSpec(
+        visual_type=m.VISUAL_CHART, sub_type=m.CHART_BAR, source_table="Transactions",
+        measure_column="Amount", group_by="Customer - CustName", title="Saved earlier",
+    ))
+    app.run()
 
-def test_a_combo_chart_asks_for_its_second_number_in_the_form():
-    app = _app()
-    app.button(key="ld_add_panel_button").click().run()
-    app.selectbox(key="ld_add_sub_type").set_value(m.CHART_COMBO).run()
-
-    assert app.selectbox(key="ld_add_measure_2")
-    assert not app.exception
+    assert any("No Light Model" in warning.value for warning in app.warning)
+    assert "ld_ai_generate" not in {button.key for button in app.button}
+    assert app.get("download_button")
