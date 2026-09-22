@@ -250,7 +250,208 @@
     target.textContent = formatNumber(value, panel.number_format || "plain", panel.currency || "");
   }
 
+  /* How many group rows a drill-down will build. Every level multiplies the row count, and
+     a level over a column with thousands of values is a page that hangs rather than draws.
+     The note under the table says when the cap bit, so nothing is dropped silently. */
+  var DRILLDOWN_ROW_LIMIT = 2000;
+
+  function drilldownGroups(rows, levels, measureColumn, aggregation) {
+    /* The whole tree of a drill-down table: one node per group, each with its own total and
+       its children below it. Pure arithmetic over plain objects and no DOM anywhere, which
+       is what lets `tests/test_live_dashboard_runtime.py` run it in Node.
+
+       Groups are ordered by their own label, which is what a pivot table does: the reader is
+       looking a category up, not reading a leaderboard. A blank shows as "(blank)" rather
+       than an empty row, so a gap in the data is visible instead of looking like an indent. */
+    if (!levels || !levels.length) return [];
+
+    var column = levels[0];
+    /* Object.create(null), not {}: a value of "__proto__" assigned onto a plain object sets
+       its prototype instead of a key, so that one category would be counted afresh on every
+       row and listed once per row. The same defence `columnIndex` already uses. */
+    var buckets = Object.create(null);
+    var labels = [];
+    for (var i = 0; i < rows.length; i++) {
+      var value = rows[i][column];
+      var blank = value === null || value === undefined || value === "";
+      var label = blank ? "(blank)" : String(value);
+      if (buckets[label] === undefined) {
+        buckets[label] = { rows: [], value: blank ? null : value };
+        labels.push(label);
+      }
+      buckets[label].rows.push(rows[i]);
+    }
+
+    labels.sort(function (left, right) {
+      return String(left).localeCompare(String(right), undefined, { numeric: true });
+    });
+
+    var rest = levels.slice(1);
+    return labels.map(function (label) {
+      var own = buckets[label].rows;
+      return {
+        label: label,
+        column: column,
+        /* The value as the data holds it, kept beside the label the reader sees: clicking a
+           row cross-filters on it, and "(blank)" is a word for the reader, not a value any
+           row carries. */
+        match: buckets[label].value,
+        count: own.length,
+        value: aggregate(own, measureColumn, aggregation),
+        children: drilldownGroups(own, rest, measureColumn, aggregation)
+      };
+    });
+  }
+
+  function drilldownRows(groups, limit) {
+    /* The tree flattened into the order the rows are printed in, each carrying its depth and
+       its parent's position, so collapsing a group can hide everything under it by looking
+       at one field. Built once; opening and closing afterwards only toggles a CSS class,
+       which is what keeps a few thousand rows responsive. */
+    var flat = [];
+    function walk(nodes, depth, parent) {
+      for (var i = 0; i < nodes.length && flat.length < limit; i++) {
+        var node = nodes[i];
+        var index = flat.length;
+        flat.push({
+          label: node.label, column: node.column, match: node.match,
+          count: node.count, value: node.value,
+          depth: depth, parent: parent, hasChildren: node.children.length > 0, open: false
+        });
+        walk(node.children, depth + 1, index);
+      }
+    }
+    walk(groups, 0, -1);
+    return flat;
+  }
+
+  function toggleDrilldownRow(flat, lines, index) {
+    /* Opens a group, or closes it and everything beneath it. A close hides every descendant
+       outright; an open shows only the direct children, so a branch the reader had closed
+       three levels down stays closed when its parent is opened again. */
+    var open = !flat[index].open;
+    flat[index].open = open;
+    setDrilldownArrow(lines[index], open);
+
+    var depth = flat[index].depth;
+    for (var i = index + 1; i < flat.length && flat[i].depth > depth; i++) {
+      if (open) {
+        if (flat[i].parent === index) showDrilldownRow(lines[i], true);
+        continue;
+      }
+      showDrilldownRow(lines[i], false);
+      flat[i].open = false;
+      setDrilldownArrow(lines[i], false);
+    }
+  }
+
+  function showDrilldownRow(line, shown) {
+    if (line && line.classList) line.classList.toggle("is-hidden", !shown);
+  }
+
+  function setDrilldownArrow(line, open) {
+    var arrow = line && line.querySelector ? line.querySelector(".drilldown-toggle") : null;
+    /* textContent, not innerHTML - see rule 1 at the top of this file. */
+    if (arrow) arrow.textContent = open ? "\u25BE" : "\u25B8";
+  }
+
+  function renderDrilldownTable(panel) {
+    var host = document.getElementById("table-" + panel.panel_id);
+    if (!host) return;
+
+    var levels = panel.source_columns || [];
+    var rows = filteredRows(panel.source_table, panel.panel_id);
+    var groups = drilldownGroups(rows, levels, panel.measure_column, panel.aggregation);
+    var flat = drilldownRows(groups, DRILLDOWN_ROW_LIMIT);
+
+    var table = document.createElement("table");
+    table.className = "drilldown";
+
+    var head = document.createElement("thead");
+    var headRow = document.createElement("tr");
+    [levels.join(" / "), "Rows", panel.measure_label || "Total"].forEach(function (text, at) {
+      var cell = document.createElement("th");
+      cell.textContent = text;
+      if (at > 0) cell.className = "numeric";
+      headRow.appendChild(cell);
+    });
+    head.appendChild(headRow);
+    table.appendChild(head);
+
+    var body = document.createElement("tbody");
+    var lines = [];
+
+    flat.forEach(function (entry, index) {
+      var line = document.createElement("tr");
+      line.className = "drilldown-row";
+      /* Only the top level is open to start with, the way a pivot table opens: the headline
+         totals at a glance, and the reader drills into the one branch they want. */
+      if (entry.depth > 0) line.classList.add("is-hidden");
+
+      var labelCell = document.createElement("td");
+      labelCell.className = "drilldown-label";
+      labelCell.style.paddingLeft = (8 + entry.depth * 18) + "px";
+
+      var marker = document.createElement("span");
+      marker.className = entry.hasChildren ? "drilldown-toggle" : "drilldown-leaf";
+      marker.textContent = entry.hasChildren ? "\u25B8" : "\u00B7";
+      labelCell.appendChild(marker);
+
+      var text = document.createElement("span");
+      text.textContent = entry.label;
+      labelCell.appendChild(text);
+      line.appendChild(labelCell);
+
+      var countCell = document.createElement("td");
+      countCell.className = "numeric";
+      countCell.textContent = entry.count.toLocaleString();
+      line.appendChild(countCell);
+
+      var valueCell = document.createElement("td");
+      valueCell.className = "numeric";
+      valueCell.textContent = formatNumber(
+        entry.value, panel.number_format || "plain", panel.currency || ""
+      );
+      line.appendChild(valueCell);
+
+      if (entry.hasChildren) {
+        line.addEventListener("click", function () {
+          toggleDrilldownRow(flat, lines, index);
+        });
+      } else {
+        /* A leaf is the smallest group there is, so clicking it means "show me this one" -
+           the same cross-filter a flat table's row does, on the level it sits at. */
+        line.addEventListener("click", function () {
+          setCrossFilter(panel.panel_id, entry.column, entry.match);
+        });
+      }
+
+      lines.push(line);
+      body.appendChild(line);
+    });
+
+    table.appendChild(body);
+    host.textContent = "";
+    host.appendChild(table);
+
+    var note = document.getElementById("note-" + panel.panel_id);
+    if (note) {
+      note.textContent = flat.length >= DRILLDOWN_ROW_LIMIT
+        ? "Showing the first " + DRILLDOWN_ROW_LIMIT.toLocaleString() + " groups of "
+          + rows.length.toLocaleString() + " rows."
+        : groups.length.toLocaleString() + " group(s) over "
+          + rows.length.toLocaleString() + " row(s). Click a row to open it.";
+    }
+  }
+
   function renderTable(panel) {
+    /* Two shapes, one entry point: every caller already says `renderTable(panel)`, and a
+       drill-down redraws on exactly the same events a flat table does. */
+    if (panel.sub_type === "drilldown") {
+      renderDrilldownTable(panel);
+      return;
+    }
+
     var host = document.getElementById("table-" + panel.panel_id);
     if (!host) return;
 

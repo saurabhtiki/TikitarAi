@@ -68,6 +68,12 @@ LD_CONFIRM_REMOVE_KEY = "ld_confirm_remove"
 #: be enough to do it.
 LD_CONFIRM_GENERATE_KEY = "ld_confirm_generate"
 
+#: The **Update the dashboard** toggle: on, a round runs on the session's own model rather
+#: than the Light Model. A plain widget key rather than a helper pair, because nothing reads
+#: it but the one `st.toggle` that writes it, and it is deliberately not saved into the Task
+#: - which model answered is a choice for this sitting, not a property of the dashboard.
+LD_USE_ACTIVE_MODEL_KEY = "ld_use_my_model"
+
 #: A one-line message queued for the run right after this one - `st.rerun` throws away
 #: anything written before it, the same reason `cleaner.session.queue_flash` exists.
 LD_FLASH_KEY = "ld_ai_flash"

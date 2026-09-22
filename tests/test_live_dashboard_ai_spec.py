@@ -928,7 +928,9 @@ def test_every_shape_the_design_rules_recommend_is_one_we_can_draw():
              # Phase 38's look settings: each is a named choice from a list in `model`, so a
              # rule recommending "labels:yes" is pinned exactly as one recommending a shape.
              | set(m.YES_NO) | set(m.LEGEND_POSITIONS) | set(m.NAMED_COLOURS)
-             | set(m.PANEL_SIZES) | set(m.PANEL_WIDTHS) | set(m.CARD_SIZES))
+             | set(m.PANEL_SIZES) | set(m.PANEL_WIDTHS) | set(m.CARD_SIZES)
+             # Phase 40's table shapes, for the rule that says when to drill rather than list.
+             | set(m.TABLE_SUB_TYPES))
 
     for name in ai_spec._DESIGN_RULE_NAMES:
         assert name in known, name
@@ -1103,3 +1105,120 @@ def test_an_edit_to_a_visual_removed_earlier_in_the_round_is_skipped(monkeypatch
 
     assert [panel.title for panel in spec.panels] == ["Second"]
     assert result.removed == ["First"]
+
+
+# --------------------------------------------------------------------------------------
+# Drill-down tables (phase 40)
+# --------------------------------------------------------------------------------------
+
+
+def _drilldown(**overrides) -> ProposedPanel:
+    proposed = {
+        "visual_type": "table",
+        "sub_type": "drilldown",
+        "source_table": MAIN,
+        "columns": "Customer - CustName, TxnID",
+        "measure_column": "Amount",
+        "aggregation": "sum",
+        "title": "Sales by customer",
+        "row_number": "3",
+    }
+    proposed.update(overrides)
+    return ProposedPanel(**proposed)
+
+
+def test_a_proposed_drilldown_keeps_its_levels_in_the_order_they_were_asked_for(monkeypatch):
+    """The order IS the visual: the same two columns the other way round is a different
+    table to read, so a round that reordered them would change what the page says."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[_drilldown()]))
+
+    assert warnings == []
+    panel = spec.panels[0]
+    assert panel.visual_type == m.VISUAL_TABLE
+    assert panel.sub_type == m.TABLE_DRILLDOWN
+    assert panel.source_columns == ["Customer - CustName", "TxnID"]
+    assert (panel.measure_column, panel.aggregation) == ("Amount", AGG_SUM)
+
+
+def test_a_drilldown_over_a_column_that_is_not_a_number_is_dropped(monkeypatch):
+    """The same guard a card gets, for the same reason: a summed text column is a column of
+    zeroes at every level, which looks exactly like real data."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(
+        panels=[_drilldown(measure_column="Customer - CustName")]
+    ))
+
+    assert spec is None
+    assert warnings and "isn't a number" in warnings[0]
+
+
+def test_a_drilldown_with_one_level_is_dropped_with_a_sentence(monkeypatch):
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(
+        panels=[_drilldown(columns="Customer - CustName")]
+    ))
+
+    assert spec is None
+    assert warnings and "at least two levels" in warnings[0]
+
+
+def test_a_flat_table_is_still_built_from_the_same_fields(monkeypatch):
+    """Nothing about the flat table moved, which is what makes phase 40 additive: an older
+    saved dashboard has `sub_type="flat"` and reads exactly as it always did."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[
+        ProposedPanel(visual_type="table", source_table=MAIN,
+                      columns="TxnID, Amount", title="Every transaction", row_number="3")
+    ]))
+
+    assert warnings == []
+    panel = spec.panels[0]
+    assert panel.sub_type == m.TABLE_FLAT
+    assert panel.source_columns == ["TxnID", "Amount"]
+
+
+def test_a_drilldown_is_described_level_by_level(monkeypatch):
+    """What the user reads before accepting a round. A list of columns would describe a flat
+    table; the arrows are what say this one opens up."""
+    spec, _, _ = _generate(monkeypatch, ProposedDashboard(panels=[_drilldown()]))
+    sentence = ai_spec.describe_panel(spec.panels[0])
+
+    assert "drill-down table" in sentence
+    assert "Sum of Amount" in sentence
+    assert "Customer - CustName -> TxnID" in sentence
+
+
+def test_the_catalog_offers_the_drilldown_by_name_and_in_words():
+    """The model can only pick a sub-type the catalog names, so this is the line between a
+    feature that exists and a feature the AI can reach."""
+    catalog = ai_spec.describe_catalog_for_prompt()
+    assert m.TABLE_DRILLDOWN in catalog
+    assert m.TABLE_LABELS[m.TABLE_DRILLDOWN] in catalog
+
+
+def test_a_drilldown_on_the_page_is_described_to_the_next_round_with_its_number():
+    """`describe_spec_for_prompt` is the round's only memory. A drill-down described without
+    its measure and aggregation would come back from an unrelated edit with them blanked."""
+    spec = m.DashboardSpec()
+    spec.panels.append(m.PanelSpec(
+        visual_type=m.VISUAL_TABLE, sub_type=m.TABLE_DRILLDOWN, source_table=MAIN,
+        source_columns=["Customer - CustName", "TxnID"], measure_column="Amount",
+        aggregation=AGG_SUM, title="Sales by customer", row_number=3,
+    ))
+
+    described = ai_spec.describe_spec_for_prompt(spec)
+    assert "Amount" in described
+    assert AGG_SUM in described
+
+
+def test_a_flat_table_is_not_described_with_an_aggregation_it_does_not_use():
+    """`aggregation` defaults to "sum" on every panel whether or not anything totals, so
+    printing it on a flat table would advertise a field that changes nothing - and phase 38
+    already found that a round asked to "fix" such a field re-sends it unchanged and reports
+    a change that never happened."""
+    spec = m.DashboardSpec()
+    spec.panels.append(m.PanelSpec(
+        visual_type=m.VISUAL_TABLE, sub_type=m.TABLE_FLAT, source_table=MAIN,
+        source_columns=["TxnID", "Amount"], title="Every transaction", row_number=3,
+    ))
+
+    described = ai_spec.describe_spec_for_prompt(spec)
+    assert "aggregation" not in described
+    assert "measure_column" not in described

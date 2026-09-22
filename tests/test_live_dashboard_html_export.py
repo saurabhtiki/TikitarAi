@@ -483,3 +483,45 @@ def test_a_page_over_two_sibling_tables_carries_both_and_one_filter_over_them():
     assert len(document["filters"]) == 1
     assert document["filters"][0]["column"] == "EmployeeMaster - Department"
     assert {panel["source_table"] for panel in document["panels"]} == {"Salary", "Attendance"}
+
+
+# --------------------------------------------------------------------------------------
+# Drill-down tables (phase 40)
+# --------------------------------------------------------------------------------------
+
+
+def drilldown(**overrides) -> m.PanelSpec:
+    panel = m.PanelSpec(
+        visual_type=m.VISUAL_TABLE, sub_type=m.TABLE_DRILLDOWN, source_table="main",
+        source_columns=["Category", "Customer - Name"], measure_column="Amount",
+        aggregation=m.AGG_SUM, title="Sales by category",
+    )
+    for name, value in overrides.items():
+        setattr(panel, name, value)
+    return panel
+
+
+def test_a_drilldown_reaches_the_runtime_with_its_levels_and_its_total():
+    """The browser does the grouping, so everything it needs has to be in the payload: the
+    levels in order, the number, and how to total it."""
+    html = html_export.build_dashboard_html(dashboard(drilldown()), {"main": FRAME})
+    entry = payload_of(html)["panels"][0]
+
+    assert entry["sub_type"] == m.TABLE_DRILLDOWN
+    assert entry["source_columns"] == ["Category", "Customer - Name"]
+    assert entry["measure_column"] == "Amount"
+    assert entry["aggregation"] == m.AGG_SUM
+    assert "Amount" in entry["measure_label"]
+
+
+def test_a_drilldown_has_no_search_box():
+    """It shows totals per group, not the rows a search would look through - so the box
+    would be a control that finds nothing."""
+    html = html_export.build_dashboard_html(dashboard(drilldown()), {"main": FRAME})
+    assert "<input class=\"table-search\"" not in html
+
+    flat = m.PanelSpec(visual_type=m.VISUAL_TABLE, source_table="main",
+                       source_columns=["Amount"], title="Every row")
+    assert "<input class=\"table-search\"" in html_export.build_dashboard_html(
+        dashboard(flat), {"main": FRAME}
+    )

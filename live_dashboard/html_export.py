@@ -45,9 +45,11 @@ from live_dashboard.model import (
     CARD_SIZES,
     DashboardSpec,
     PanelSpec,
+    TABLE_DRILLDOWN,
     THEME_DARK,
     VISUAL_CARD,
     VISUAL_CHART,
+    VISUAL_TABLE,
     WIDTH_FULL,
     WIDTH_HALF,
     group_into_rows,
@@ -181,6 +183,7 @@ def _panel_for_template(panel: PanelSpec, problem: str) -> dict:
     return {
         "panel_id": panel.panel_id,
         "visual_type": panel.visual_type,
+        "sub_type": panel.sub_type,
         "title": panel.display_title(),
         "measure_label": _measure_label(panel),
         "style": _panel_style(panel),
@@ -207,6 +210,12 @@ def _panel_for_payload(panel: PanelSpec, spec: DashboardSpec,
         "number_format": panel.properties.get("number_format", "plain"),
         "currency": panel.properties.get("currency", ""),
     }
+
+    if panel.visual_type == VISUAL_TABLE and panel.sub_type == TABLE_DRILLDOWN:
+        # The column heading over a drill-down's totals - "Sum of Amount". Built here rather
+        # than in the browser so a card and a drill-down of the same number read alike, and
+        # so the aggregation's label lives in exactly one place (`vega_spec.measure_title`).
+        entry["measure_label"] = _measure_label(panel)
 
     if panel.visual_type == VISUAL_CHART:
         entry["spec"] = vega_spec.build_vega_spec(

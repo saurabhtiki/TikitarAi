@@ -115,6 +115,9 @@ from live_dashboard.model import (
     NUMBER_FORMATS,
     PANEL_SIZES,
     PANEL_WIDTHS,
+    TABLE_DRILLDOWN,
+    TABLE_FLAT,
+    TABLE_LABELS,
     WIDTH_FULL,
     clean_measures,
     clean_properties,
@@ -231,6 +234,10 @@ _CORE_RULES = """Hard rules:
   means measure_column=the amount column, group_by=the customer column. Never the other
   way round.
 - A table names the columns it shows in `columns`.
+- A "drilldown" table is different: `columns` is the LEVELS to group by, outermost first
+  ("Category, SubCategory, Item") - two to four of them - and it needs an `aggregation`
+  and, unless that is "count", a `measure_column`, exactly like a chart. It shows one
+  total per group, not the rows themselves. Use "flat" when the user wants the rows.
 - Some sub-types need one more field, and are dropped without it:
   bar_stacked, bar_grouped and heatmap need `colour_by` (the second breakdown);
   combo needs a right-axis entry in `more_measures` (the number drawn as a line);
@@ -261,6 +268,9 @@ _DESIGN_RULES = """Design rules - follow these unless the user asks for somethin
 - Where the data has a date column, give the page one trend - a line or an area chart
   broken down by that date - on a row of its own.
 - At most 2 charts to a row. Tables go on rows of their own, near the bottom.
+- Where the data has a hierarchy (category then subcategory then item, region then branch),
+  a "drilldown" table reads better than a flat one: the reader sees the top totals and
+  opens only the branch they care about. Use "flat" when the rows themselves are the point.
 - Propose at most 12 visuals unless the user asks for more.
 - Sort a bar chart "largest" so the biggest bar comes first, unless it is broken down by a
   date, where "automatic" keeps the dates in order.
@@ -297,6 +307,8 @@ _DESIGN_RULES = """Design rules - follow these unless the user asks for somethin
 #: test can pin all of them at once. Cheaper than a record per shape, and it catches the one
 #: failure that matters: a rule that keeps recommending something the page cannot draw.
 _DESIGN_RULE_NAMES: tuple[str, ...] = (
+    TABLE_FLAT,
+    TABLE_DRILLDOWN,
     CHART_LINE,
     CHART_AREA,
     CHART_BAR_HORIZONTAL,
@@ -423,6 +435,7 @@ def describe_catalog_for_prompt() -> str:
     sub_labels: dict[str, str] = {}
     sub_labels.update(FILTER_LABELS)
     sub_labels.update(DASHBOARD_CHART_LABELS)
+    sub_labels.update(TABLE_LABELS)
 
     lines: list[str] = []
     for visual_type in VISUAL_TYPES:
@@ -625,9 +638,17 @@ _FIELDS_BY_KIND: dict[str, frozenset[str]] = {
                             "row_number", "properties"}),
 }
 
+#: What a drill-down table adds to a plain table's fields: the number it totals on every
+#: level. A flat table keeps the shorter list - `aggregation` defaults to "sum" on every
+#: panel whether or not anything totals, so printing it on a flat table would advertise a
+#: field that changes nothing and invite a round to "fix" it.
+_DRILLDOWN_EXTRA_FIELDS = frozenset({"measure_column", "aggregation"})
+
 
 def _panel_fields_for_prompt(panel: PanelSpec) -> str:
     allowed = _FIELDS_BY_KIND.get(panel.visual_type)
+    if panel.visual_type == VISUAL_TABLE and panel.sub_type == TABLE_DRILLDOWN:
+        allowed = allowed | _DRILLDOWN_EXTRA_FIELDS
     parts: list[str] = []
     for name, label in _SPEC_FIELD_LABELS.items():
         if not label:
@@ -845,7 +866,7 @@ def _resolve_sub_type(proposed: ProposedPanel, visual_type: str) -> tuple[str, s
     for name in allowed:
         if _key(name) == wanted:
             return name, None
-    labels = {**FILTER_LABELS, **DASHBOARD_CHART_LABELS}
+    labels = {**FILTER_LABELS, **DASHBOARD_CHART_LABELS, **TABLE_LABELS}
     for name in allowed:
         if _key(labels.get(name, "")) == wanted:
             return name, None
@@ -1032,7 +1053,10 @@ def _build_one(
     # Counting *different* values is the exception, and an important one: "how many
     # customers" is the usual question and customers are text. Refusing it here would refuse
     # the most obvious use of the whole aggregation.
-    if (visual_type in (VISUAL_CARD, VISUAL_CHART)
+    # A drill-down table totals a number at every level, so it is in this check for the
+    # same reason a card is: summed text is a silent column of zeroes, not a visible error.
+    totals_a_number = visual_type in (VISUAL_CARD, VISUAL_CHART) or sub_type == TABLE_DRILLDOWN
+    if (totals_a_number
             and aggregation not in TEXT_FRIENDLY_AGGREGATIONS
             and panel.measure_column not in _numeric_columns(frame)):
         return None, (
@@ -1519,6 +1543,14 @@ def describe_panel(panel: PanelSpec) -> str:
         return f"**{panel.display_title()}** - {style} on {panel.filter_column()}"
 
     if panel.visual_type == VISUAL_TABLE:
+        if panel.sub_type == TABLE_DRILLDOWN:
+            # Named level by level with arrows, because the ORDER is the whole visual: the
+            # same three columns the other way round is a different table to read.
+            total = DASHBOARD_AGGREGATIONS.get(panel.aggregation, panel.aggregation)
+            what = "rows" if panel.aggregation == AGG_COUNT else panel.measure_column
+            levels = " -> ".join(panel.source_columns) or "no levels yet"
+            return (f"**{panel.display_title()}** - drill-down table of {total} of {what} "
+                    f"by {levels} - row {panel.row_number}")
         return (f"**{panel.display_title()}** - table of "
                 f"{', '.join(panel.source_columns) or 'no columns yet'} - row {panel.row_number}")
 

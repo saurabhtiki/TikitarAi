@@ -9,9 +9,10 @@ what to change, see it again, download**.
   one control here that uses the session's own model rather than the Light Model, because
   laying out a page from nothing is the single judgement call on this screen. On a page
   that already has visuals it asks before replacing them, and Undo brings the old one back.
-- **Asking is the only way the dashboard is changed.** Each press is one round: the Light
-  Model is shown the page as it stands and returns the changes asked for, and a visual it
-  does not mention is left alone. Each round carries the dashboard from before it, so its
+- **Asking is the only way the dashboard is changed.** Each press is one round: the model
+  is shown the page as it stands and returns the changes asked for, and a visual it does not
+  mention is left alone. Rounds run on the Light Model unless the toggle above the button
+  says otherwise (phase 40). Each round carries the dashboard from before it, so its
   own Undo button sits beside it in the history. Since phase 37 the instruction is typed in
   a dialog rather than in a box sitting on the page: it is one sentence written once and
   then finished with, and an always-open box above the dashboard pushed the dashboard
@@ -207,6 +208,10 @@ def _render_conversation(spec: model.DashboardSpec, data: dashboard_session.Buil
     real use showed the opposite - an always-open text area pushed the dashboard it
     describes below the fold on every visit, and one sentence is written once, not lived in.
 
+    Since phase 40 a round is not stuck on the Light Model: a toggle beside the caption
+    switches it to the session's own model for the change that needs judgement rather than
+    speed. Off by default, so nothing changes for anyone who leaves it alone.
+
     With no Light Model configured the round box says so and shows no button. Generate is
     unaffected, so a user with one provider configured can still have a dashboard designed.
     """
@@ -217,6 +222,7 @@ def _render_conversation(spec: model.DashboardSpec, data: dashboard_session.Buil
     _render_generate(spec, data, user_id)
 
     light = llm_session.light_profile(user_id)
+    round_profile = light
     if spec.panels and light is None:
         st.warning(
             "No Light Model is configured. Set one in Settings -> LLM providers to change "
@@ -224,13 +230,15 @@ def _render_conversation(spec: model.DashboardSpec, data: dashboard_session.Buil
             icon=":material/error:",
         )
     elif spec.panels:
+        round_profile = _round_model(light, user_id)
         # There is no separate box for standing preferences since phase 36. "Always show
         # currency in INR" is a sentence, and the dialog already takes sentences - a second
         # box only asked the user to decide which of the two a preference belonged in.
         st.caption(
-            f":red[Changes are read by **{light['nickname']}** ({light['default_model']}). "
-            "It can only choose from the visuals this page already has - it never writes "
-            "code, and it only uses columns your data really has.]"
+            f":red[Changes are read by **{round_profile['nickname']}** "
+            f"({round_profile['default_model']}). It can only choose from the visuals this "
+            "page already has - it never writes code, and it only uses columns your data "
+            "really has.]"
         )
         if st.button(
             "Update the dashboard",type="primary", key="ld_ai_open", width="stretch",
@@ -242,8 +250,39 @@ def _render_conversation(spec: model.DashboardSpec, data: dashboard_session.Buil
             st.rerun(scope="app")
 
     _render_rounds()
-    if light is not None:
-        _render_open_dialog(light, spec, data)
+    if round_profile is not None:
+        _render_open_dialog(round_profile, spec, data)
+
+
+def _round_model(light: dict, user_id: int) -> dict:
+    """Which model this dashboard's rounds run on - the Light Model unless asked otherwise.
+
+    Rounds have been on the Light Model since phase 35, on the grounds that "make it
+    horizontal" is a small edit. Some changes are not small ("redesign the bottom half so it
+    reads as one story"), and the user owns a better model, so phase 40 makes it a choice -
+    a toggle rather than a dropdown, because there are exactly two answers.
+
+    Off by default, and re-read on every run rather than saved into the Task: which model
+    answered is a choice for this sitting, not a property of the dashboard.
+
+    Returns the profile the round should use; `light` unchanged when there is no second
+    model to choose (`session_profiles` already excludes the Light Model, so the two can
+    only be the same profile if the designations overlap).
+    """
+    active = llm_session.active_profile(user_id)
+    if active is None or active.get("profile_id") == light.get("profile_id"):
+        return light
+
+    use_active = st.toggle(
+        "Use my model instead of the Light Model",
+        key=dashboard_session.LD_USE_ACTIVE_MODEL_KEY,
+        value=False,
+        help=f"Off, changes are read by the Light Model ({light['default_model']}), which "
+             f"is quick and cheap. On, they are read by {active['nickname']} "
+             f"({active['default_model']}) - slower, but better at a change that needs "
+             "judgement. This does not change the dashboard by itself.",
+    )
+    return active if use_active else light
 
 
 # --------------------------------------------------------------------------------------
@@ -251,20 +290,23 @@ def _render_conversation(spec: model.DashboardSpec, data: dashboard_session.Buil
 # --------------------------------------------------------------------------------------
 
 
-def _render_open_dialog(light: dict, spec: model.DashboardSpec,
+def _render_open_dialog(profile: dict, spec: model.DashboardSpec,
                         data: dashboard_session.BuiltData) -> None:
     """Draws whichever dialog is open, if any.
 
     Driven from a session flag rather than a button's return value, which is the rule the
     rest of this app already follows: a `st.dialog` holding widgets reruns the script, and by
     the second run the press that opened it has been forgotten.
+
+    `profile` is whichever model the toggle above resolved to, so both dialogs run the round
+    on the same model the caption named.
     """
     which = dashboard_session.current_dialog()
     if not which:
         return
 
     if which == dashboard_session.ASK_DIALOG:
-        _dialog_ask(light, spec, data)
+        _dialog_ask(profile, spec, data)
         return
 
     panel = next((one for one in spec.panels if one.panel_id == which), None)
@@ -272,7 +314,7 @@ def _render_open_dialog(light: dict, spec: model.DashboardSpec,
         # The visual it was scoped to is gone - removed by the very round opened from it.
         dashboard_session.close_dialog()
         return
-    _dialog_edit_visual(light, spec, data, panel)
+    _dialog_edit_visual(profile, spec, data, panel)
 
 
 def _render_help(key: str) -> None:
@@ -305,7 +347,7 @@ def _dialog_footer(run_label: str, run_key: str, cancel_key: str, run_help: str)
 
 @st.dialog("Describe your dashboard", width="large",
            on_dismiss=dashboard_session.close_dialog)
-def _dialog_ask(light: dict, spec: model.DashboardSpec,
+def _dialog_ask(profile: dict, spec: model.DashboardSpec,
                 data: dashboard_session.BuiltData) -> None:
     """One round over the whole dashboard - the box that used to sit on the page.
 
@@ -329,11 +371,11 @@ def _dialog_ask(light: dict, spec: model.DashboardSpec,
         "Update the dashboard", "ld_ai_generate", "ld_ai_cancel",
         "Changes only what you asked for. Everything else stays as it is.",
     ):
-        _run_round(light, spec, data)
+        _run_round(profile, spec, data)
 
 
 @st.dialog("Change this visual", width="large", on_dismiss=dashboard_session.close_dialog)
-def _dialog_edit_visual(light: dict, spec: model.DashboardSpec,
+def _dialog_edit_visual(profile: dict, spec: model.DashboardSpec,
                         data: dashboard_session.BuiltData,
                         panel: model.PanelSpec) -> None:
     """One round confined to the visual whose Edit button was pressed.
@@ -358,7 +400,7 @@ def _dialog_edit_visual(light: dict, spec: model.DashboardSpec,
         f"ld_panel_cancel_{panel.panel_id}",
         "Changes this visual only. Every other one stays as it is.",
     ):
-        _run_round(light, spec, data, panel=panel,
+        _run_round(profile, spec, data, panel=panel,
                    instruction_key=f"ld_panel_instruction_{panel.panel_id}")
 
     _remove_control(spec, panel)
@@ -426,14 +468,15 @@ def _render_visual_buttons(spec: model.DashboardSpec, user_id: int) -> None:
             )
 
 
-def _run_round(light: dict, spec: model.DashboardSpec,
+def _run_round(profile: dict, spec: model.DashboardSpec,
                data: dashboard_session.BuiltData, *,
                panel: model.PanelSpec | None = None,
                instruction_key: str = "ld_ai_instruction") -> None:
     """Runs one round and records what it did.
 
     `panel` is what the Edit button beside a visual passes: the same round, confined to that
-    one visual, so nothing else on the page can move.
+    one visual, so nothing else on the page can move. `profile` is the model the round runs
+    on - the Light Model unless the toggle on the page says otherwise (phase 40).
 
     `revise_dashboard` never raises and edits `spec` in place only once it has a change to
     make, so there is no error path here beyond the sentences it returns - a failed call is
@@ -446,9 +489,9 @@ def _run_round(light: dict, spec: model.DashboardSpec,
     instruction = str(st.session_state.get(instruction_key, "") or "")
     before = dashboard_session.snapshot(spec)
 
-    with st.spinner(f"Asking {light['default_model']}..."):
+    with st.spinner(f"Asking {profile['default_model']}..."):
         result = ai_spec.revise_dashboard(
-            light, instruction, data.tables, spec, notes=_column_notes(), focus=panel,
+            profile, instruction, data.tables, spec, notes=_column_notes(), focus=panel,
         )
 
     changed = result.changed()

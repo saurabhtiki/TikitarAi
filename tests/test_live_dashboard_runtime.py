@@ -36,6 +36,14 @@ LIFTED = ("quantile", "uniqueValues", "aggregate", "formatNumber")
 #: put the page in a state no sequence of clicks would be needed to reach.
 LIFTED_FILTERS = ("hasColumn", "matchesGlobal")
 
+#: The drill-down table's arithmetic (phase 40): the tree of groups and their totals, and the
+#: flattening that turns it into the rows the page prints. Both are pure functions over plain
+#: objects with no DOM anywhere, which is exactly why they are separate from the renderer -
+#: the totals on a pivot table are the one thing a reader will check by hand, so they are the
+#: one thing that must be checked here. `drilldownGroups` calls `aggregate`, which is already
+#: lifted.
+LIFTED_DRILLDOWN = LIFTED + ("drilldownGroups", "drilldownRows")
+
 
 def _function_source(runtime: str, name: str) -> str:
     match = re.search(r"\n  function " + name + r"\(.*?\n  \}\n", runtime, re.DOTALL)
@@ -256,3 +264,153 @@ def test_a_column_named_after_a_javascript_builtin_is_still_matched():
     assert answers["inherited"] is False
     # An unknown table behaves as it did before any of this existed.
     assert answers["unknownTable"] is True
+
+
+# --------------------------------------------------------------------------------------
+# Drill-down tables (phase 40)
+# --------------------------------------------------------------------------------------
+
+
+SALES = """
+var sales = [
+  {Category: "Food", Sub: "Fruit", Amount: 10},
+  {Category: "Food", Sub: "Fruit", Amount: 20},
+  {Category: "Food", Sub: "Bread", Amount: 5},
+  {Category: "Drink", Sub: "Tea", Amount: 70},
+  {Category: "", Sub: "Tea", Amount: 1}
+];
+"""
+
+
+def _drilldown(script: str) -> dict:
+    return _run(SALES + script, LIFTED_DRILLDOWN)
+
+
+def test_every_level_totals_the_rows_beneath_it():
+    """The number a reader checks by hand. A level whose total is not its children's total
+    is a pivot table that lies, and nothing in Python would ever see it."""
+    answers = _drilldown("""
+    var tree = drilldownGroups(sales, ["Category", "Sub"], "Amount", "sum");
+    console.log(JSON.stringify({
+      top: tree.map(function (node) { return [node.label, node.value, node.count]; }),
+      food: tree[2].children.map(function (node) { return [node.label, node.value]; })
+    }));
+    """)
+
+    # Sorted by label, the way a pivot table lists them - a blank shows as "(blank)".
+    assert answers["top"] == [["(blank)", 1, 1], ["Drink", 70, 1], ["Food", 35, 3]]
+    assert answers["food"] == [["Bread", 5], ["Fruit", 30]]
+
+
+def test_a_drilldown_can_use_any_total_a_card_can():
+    """It computes exactly what a card computes, once per group - so the same `aggregate`
+    answers both, and an average is an average of that group's rows and nothing else."""
+    answers = _drilldown("""
+    var averages = drilldownGroups(sales, ["Category", "Sub"], "Amount", "average");
+    var counts = drilldownGroups(sales, ["Category", "Sub"], "", "count");
+    console.log(JSON.stringify({
+      foodAverage: averages[2].value,
+      foodCount: counts[2].value
+    }));
+    """)
+
+    assert answers["foodAverage"] == 35 / 3
+    assert answers["foodCount"] == 3
+
+
+def test_the_deepest_level_is_a_group_too_not_the_raw_rows():
+    """One shape rather than two: every row on the page is a group with a total, so a reader
+    never has to work out whether the row they are looking at is a total or a record."""
+    answers = _drilldown("""
+    var tree = drilldownGroups(sales, ["Category", "Sub"], "Amount", "sum");
+    var fruit = tree[2].children[1];
+    console.log(JSON.stringify({
+      label: fruit.label, value: fruit.value, count: fruit.count,
+      children: fruit.children.length
+    }));
+    """)
+
+    assert answers == {"label": "Fruit", "value": 30, "count": 2, "children": 0}
+
+
+def test_the_rows_come_out_in_reading_order_each_knowing_its_parent():
+    """What makes opening and closing a class toggle rather than a redraw: a row's parent is
+    its position in this list, so closing a group hides everything under it in one pass."""
+    answers = _drilldown("""
+    var tree = drilldownGroups(sales, ["Category", "Sub"], "Amount", "sum");
+    var flat = drilldownRows(tree, 2000);
+    console.log(JSON.stringify(flat.map(function (row) {
+      return [row.label, row.depth, row.parent, row.hasChildren];
+    })));
+    """)
+
+    assert answers == [
+        ["(blank)", 0, -1, True],
+        ["Tea", 1, 0, False],
+        ["Drink", 0, -1, True],
+        ["Tea", 1, 2, False],
+        ["Food", 0, -1, True],
+        ["Bread", 1, 4, False],
+        ["Fruit", 1, 4, False],
+    ]
+
+
+def test_the_row_cap_stops_a_level_over_a_column_with_thousands_of_values():
+    """Every level multiplies the rows. Without a cap, a drill-down over an id column is a
+    page that hangs - and the note under the table says when the cap bit."""
+    answers = _run("""
+    var many = [];
+    for (var i = 0; i < 50; i++) many.push({Code: "C" + i, Amount: i});
+    var tree = drilldownGroups(many, ["Code"], "Amount", "sum");
+    console.log(JSON.stringify({ groups: tree.length, capped: drilldownRows(tree, 10).length }));
+    """, LIFTED_DRILLDOWN)
+
+    assert answers["groups"] == 50
+    assert answers["capped"] == 10
+
+
+def test_a_drilldown_with_no_levels_builds_nothing_rather_than_throwing():
+    """`panel_problems` refuses this panel long before the browser sees it, but the renderer
+    is handed a payload it did not build - so it answers with an empty table, not an error
+    that takes the rest of the page's JavaScript down with it."""
+    answers = _drilldown("""
+    console.log(JSON.stringify({
+      none: drilldownGroups(sales, [], "Amount", "sum").length,
+      missing: drilldownGroups(sales, null, "Amount", "sum").length
+    }));
+    """)
+
+    assert answers == {"none": 0, "missing": 0}
+
+
+def test_a_category_named_after_a_javascript_builtin_is_one_group_like_any_other():
+    """A value of "__proto__" assigned onto a plain object sets its prototype instead of a
+    key, so that one category would be counted afresh on every row and listed once per row.
+    Real data has a column of codes somewhere; this is the one that would look like data
+    corruption rather than a bug."""
+    answers = _run("""
+    var odd = [
+      {Name: "__proto__", Amount: 5}, {Name: "__proto__", Amount: 5},
+      {Name: "constructor", Amount: 3}, {Name: "Normal", Amount: 1}
+    ];
+    var tree = drilldownGroups(odd, ["Name"], "Amount", "sum");
+    console.log(JSON.stringify(tree.map(function (node) {
+      return [node.label, node.count, node.value];
+    })));
+    """, LIFTED_DRILLDOWN)
+
+    assert sorted(answers) == [["Normal", 1, 1], ["__proto__", 2, 10], ["constructor", 1, 3]]
+
+
+def test_a_group_keeps_the_value_a_click_should_filter_on():
+    """"(blank)" is a word for the reader, not a value any row carries - cross-filtering on
+    it would empty the page. The raw value is kept beside the label for exactly that press."""
+    answers = _run("""
+    var rows = [{Code: 7, Amount: 1}, {Code: "", Amount: 2}];
+    var tree = drilldownGroups(rows, ["Code"], "Amount", "sum");
+    console.log(JSON.stringify(tree.map(function (node) {
+      return [node.label, node.match];
+    })));
+    """, LIFTED_DRILLDOWN)
+
+    assert answers == [["(blank)", None], ["7", 7]]

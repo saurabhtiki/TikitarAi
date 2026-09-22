@@ -72,8 +72,12 @@
         <div class="card-label">{{ panel.measure_label }}</div>
 
         {% elif panel.visual_type == 'table' %}
+        {# A drill-down has no search box: it shows totals per group, not the rows a search
+           would look through, so the box would be a control that finds nothing. #}
+        {% if panel.sub_type != 'drilldown' %}
         <input class="table-search" id="search-{{ panel.panel_id }}" type="search"
                placeholder="Search this table">
+        {% endif %}
         <div class="table-scroll" id="table-{{ panel.panel_id }}"></div>
         <p class="panel-note" id="note-{{ panel.panel_id }}"></p>
 

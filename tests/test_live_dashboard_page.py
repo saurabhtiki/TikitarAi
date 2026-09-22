@@ -185,6 +185,36 @@ def _scenario_without_a_light_model():
     dashboard_view.render_dashboard(1)
 
 
+def _scenario_with_only_a_light_model():
+    """One provider, designated Light - so there is no second model to toggle to."""
+    import duckdb
+
+    from app_pages import dashboard_view
+    from engine.relationships import Relationship
+
+    connection = duckdb.connect()
+    connection.execute("CREATE TABLE Customer(CustID INT, CustName VARCHAR, CreditPeriod INT)")
+    connection.execute("CREATE TABLE Transactions(TxnID INT, CustID INT, Amount DOUBLE)")
+    connection.execute("INSERT INTO Customer VALUES (5,'ABC Traders',30),(6,'XYZ Corp',45)")
+    connection.execute("INSERT INTO Transactions VALUES (1,5,5000.0),(2,6,3200.0),(3,5,1500.0)")
+
+    engine = dashboard_view.engine_session
+    engine.connection = lambda: connection
+    engine.table_names = lambda: ["Transactions", "Customer"]
+    engine.get_relationships = lambda: [Relationship("Transactions", "CustID", "Customer", "CustID")]
+    engine.rebuild_count = lambda: 0
+
+    dashboard_view.llm_session.light_profile = lambda user_id: {
+        "profile_id": 1, "nickname": "Light", "default_model": "small-model",
+        "provider_type": "local",
+    }
+    # `session_profiles` excludes the Light Model, so a user whose only provider is the
+    # light one really does have no active profile - this is not a contrived state.
+    dashboard_view.llm_session.active_profile = lambda user_id: None
+
+    dashboard_view.render_dashboard(1)
+
+
 def _app() -> AppTest:
     app = AppTest.from_function(_scenario, default_timeout=120)
     app.run()
@@ -705,3 +735,74 @@ def test_a_broken_filter_is_listed_once_and_not_twice():
     mentions = [one for one in [*app.warning, *app.markdown, *app.caption]
                 if "Broken filter" in str(one.value)]
     assert sum(str(one.value).count("Broken filter") for one in mentions) == 1
+
+
+# --------------------------------------------------------------------------------------
+# Which model a round runs on (phase 40)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_round_runs_on_the_light_model_until_the_toggle_is_turned_on():
+    """The promise phase 35 made about cost, kept: the default is unchanged, and switching
+    it is a deliberate press rather than something a dashboard remembers for you."""
+    app = _add_chart(_app(), title="Built by hand")
+    assert app.toggle(key="ld_use_my_model").value is False
+
+    _round(app, "rename it", retitle={0: "Renamed"})
+    assert app.session_state["test_round_profile"]["nickname"] == "Light"
+
+
+def test_the_toggle_sends_the_round_to_the_session_model_instead():
+    """The whole point of the toggle: "redesign the bottom half" is not a small edit, and
+    the user already owns a model that can do it."""
+    app = _add_chart(_app(), title="Built by hand")
+    app.toggle(key="ld_use_my_model").set_value(True).run()
+
+    _round(app, "rename it", retitle={0: "Renamed"})
+    assert app.session_state["test_round_profile"]["nickname"] == "Good"
+
+
+def test_the_toggle_also_moves_the_per_visual_edit_round():
+    """Both dialogs, because they are one round with the "which one" part answered - a
+    toggle that moved only the page-wide box would be a setting that half applies."""
+    app = _add_chart(_app(), title="Built by hand")
+    app.toggle(key="ld_use_my_model").set_value(True).run()
+
+    panel_id = _spec(app).panels[0].panel_id
+    app.session_state["test_round_plan"] = {"retitle": {0: "Renamed"}}
+    app.button(key=f"ld_edit_{panel_id}").click().run()
+    app.text_area(key=f"ld_panel_instruction_{panel_id}").set_value("make it horizontal").run()
+    app.button(key=f"ld_panel_generate_{panel_id}").click().run()
+
+    assert not app.exception
+    assert app.session_state["test_round_profile"]["nickname"] == "Good"
+
+
+def test_the_caption_names_whichever_model_the_round_will_use():
+    """A choice you cannot see is a choice you have to remember making. The caption above
+    the button is where the answer belongs, since that is the button it changes."""
+    app = _add_chart(_app(), title="Built by hand")
+    assert any("Light" in caption.value for caption in app.caption)
+
+    app.toggle(key="ld_use_my_model").set_value(True).run()
+    assert any("Good" in caption.value and "big-model" in caption.value
+               for caption in app.caption)
+
+
+def test_there_is_no_toggle_with_nothing_to_toggle_to():
+    """One provider, designated Light: a switch with one position is a control that lies."""
+    app = AppTest.from_function(_scenario_with_only_a_light_model, default_timeout=120)
+    app.run()
+    assert not app.exception
+
+    spec = app.session_state["ld_spec"]
+    spec.panels.append(m.PanelSpec(
+        visual_type=m.VISUAL_CHART, sub_type=m.CHART_BAR, source_table="Transactions",
+        measure_column="Amount", group_by="Customer - CustName", title="By hand",
+        row_number=1,
+    ))
+    app.run()
+
+    assert not app.exception
+    assert "ld_use_my_model" not in {toggle.key for toggle in app.toggle}
+    assert "ld_ai_open" in {button.key for button in app.button}

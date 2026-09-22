@@ -152,10 +152,33 @@ MULTI_MEASURE_CHARTS = (
 # A histogram bins one column by itself: asking what to break it down by has no answer.
 CHARTS_WITHOUT_GROUP_BY = frozenset({CHART_HISTOGRAM})
 
-# Drilldown and Pivot are a later phase - they are new widgets in the exported page rather
-# than new chart specs, so offering them now would be a control that refuses.
+# The two shapes a table can take. A flat table lists the rows themselves; a drill-down
+# table groups them into collapsible layers with a total on each, the way an Excel pivot
+# table's row grouping does. Both are widgets the exported page draws itself - neither is a
+# Vega-Lite spec - which is why they live under `table` rather than among the chart shapes.
+#
+# A drill-down table reads the fields a table already has *differently*: `source_columns` is
+# the ordered list of levels to group by (outermost first), and `measure_column` +
+# `aggregation` are the number totalled at every level. No new field, and so no migration:
+# an older saved table has `sub_type="flat"` and reads exactly as it always did.
 TABLE_FLAT = "flat"
-TABLE_SUB_TYPES = (TABLE_FLAT,)
+TABLE_DRILLDOWN = "drilldown"
+TABLE_SUB_TYPES = (TABLE_FLAT, TABLE_DRILLDOWN)
+
+#: What each table shape is called on screen and in the AI's catalog - the same job
+#: `FILTER_LABELS` and `DASHBOARD_CHART_LABELS` do for their own sub-types.
+TABLE_LABELS: dict[str, str] = {
+    TABLE_FLAT: "Flat (the rows themselves)",
+    TABLE_DRILLDOWN: "Drill-down (grouped, collapsible layers with a total on each)",
+}
+
+#: The fewest levels a drill-down table can have. With one there is nothing to drill into -
+#: it is a bar chart's data drawn as text, and a flat table or a chart says it better.
+MIN_DRILLDOWN_LEVELS = 2
+
+#: The most levels a drill-down table can have. Past four the indent eats the panel's width
+#: and every level below the third is one row of its own, which is a flat table again.
+MAX_DRILLDOWN_LEVELS = 4
 
 # The one sub-type a card can have. Named rather than left blank so `sub_types_for` can
 # answer for every visual type without a special case.
@@ -864,17 +887,44 @@ def panel_problems(
 
     if panel.visual_type == VISUAL_TABLE:
         if not panel.source_columns:
+            if panel.sub_type == TABLE_DRILLDOWN:
+                return ("Pick the columns this drill-down should group by, outermost "
+                        "first - Category, then SubCategory, then Item.")
             return "Pick at least one column for this table to show."
         for column in panel.source_columns:
             if missing(column):
                 return _unreachable(column, panel.source_table)
-        return ""
+        if panel.sub_type != TABLE_DRILLDOWN:
+            return ""
 
-    # Cards and charts both compute a number; a count is the one that needs no column.
+        # A drill-down reads `source_columns` as the levels to group by, so one column is
+        # not a drill-down at all, and it totals a number at every level - which is exactly
+        # what a card or a chart needs, so it falls through to the same check below.
+        if len(panel.source_columns) < MIN_DRILLDOWN_LEVELS:
+            return ("A drill-down table needs at least two levels to open up. Add another "
+                    "column to group by, or make this a flat table.")
+        if len(panel.source_columns) > MAX_DRILLDOWN_LEVELS:
+            return (f"A drill-down table can have at most {MAX_DRILLDOWN_LEVELS} levels. "
+                    "Drop one, or split this into two tables.")
+        if panel.aggregation in (AGG_PERCENT_OF_TOTAL, AGG_RUNNING_TOTAL):
+            # Both are measured against a chart's other bars. A drill-down's rows sit at
+            # different levels of one tree, so there is no single whole to be a part of and
+            # no order to run along - the same refusal a card already gets, for the same
+            # reason. Every other total in the catalog is a number per group and works here.
+            total = DASHBOARD_AGGREGATIONS.get(panel.aggregation, panel.aggregation)
+            return (f"'{total}' is measured against a whole chart, so it can't be a "
+                    "drill-down's total. Use a sum, an average or a count.")
+
+    # Cards, charts and drill-down tables all compute a number; a count needs no column.
     if panel.aggregation != AGG_COUNT and not panel.measure_column:
         return "Pick the number this visual should total, or switch it to a count."
     if missing(panel.measure_column):
         return _unreachable(panel.measure_column, panel.source_table)
+
+    if panel.visual_type == VISUAL_TABLE:
+        # A drill-down has passed every check that applies to it; the rest below are about
+        # cards and charts, which have a `group_by` and a shape that a table has not.
+        return ""
 
     if panel.visual_type == VISUAL_CARD and panel.aggregation == AGG_PERCENT_OF_TOTAL:
         # There is nothing on a card for the percentage to be *of*. On a chart the other

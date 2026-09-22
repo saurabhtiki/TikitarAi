@@ -291,6 +291,32 @@ body {
 .panel tbody tr:hover { background: var(--table-hover); cursor: pointer; }
 .panel td.numeric { text-align: right; font-variant-numeric: tabular-nums; }
 
+/* ------------------------------------------------- drill-down tables (phase 40) */
+
+/* A drill-down's header is one label per level joined together, not a sortable column, so
+   it loses the pointer a flat table's headings carry. */
+.panel table.drilldown th { cursor: default; }
+.panel table.drilldown th:hover { color: inherit; }
+
+/* Collapsed rows are removed from the flow rather than faded: a level with two hundred
+   children must cost no height at all while it is closed. */
+.panel tr.drilldown-row.is-hidden { display: none; }
+
+/* The indent itself is set per row in `runtime.js`, because how deep a level sits is data -
+   the number of levels is whatever the user asked for, and a rule per depth would quietly
+   stop indenting past whichever depth the stylesheet happened to name. */
+.panel td.drilldown-label { white-space: nowrap; }
+
+.drilldown-toggle,
+.drilldown-leaf {
+  display: inline-block;
+  width: 14px;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.drilldown-toggle { color: var(--accent); }
+
 .table-search {
   font: inherit;
   padding: 5px 9px;

@@ -30,6 +30,8 @@ from live_dashboard.model import (
     NAMED_COLOURS,
     PANEL_SIZES,
     PANEL_WIDTHS,
+    TABLE_LABELS,
+    TABLE_SUB_TYPES,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,7 @@ def capabilities_markdown(max_visuals: int) -> str:
     ))
     totals = _listed(sorted(label.lower() for label in DASHBOARD_AGGREGATIONS.values()))
     filters = _listed(sorted(label.lower() for label in FILTER_LABELS.values()))
+    tables = _listed([TABLE_LABELS[name].lower() for name in TABLE_SUB_TYPES])
 
     return f"""**You can ask for**
 
@@ -68,6 +71,7 @@ def capabilities_markdown(max_visuals: int) -> str:
 | Visuals | Cards (one big number), charts, tables and filters, up to {max_visuals} on a page | *"add a pie of headcount by department"* |
 | Chart shapes | {shapes} | *"show this as a donut"* |
 | Ways to total a number | {totals} | *"show the average salary"* |
+| Table styles | {tables} | *"make it a drill-down by category, subcategory and item"* |
 | Several numbers on one chart | Up to {MAX_MEASURES_PER_CHART} numbers together; different units go on a second axis on the right | *"show min, average and max salary by department"* or *"salary as bars and headcount as a line"* |
 | How it looks | **Data labels** on {labellable} (a pie shows each slice's percentage), **legend** {_listed(LEGEND_POSITIONS)}, **axis titles** on/off, **colour** from {_listed(NAMED_COLOURS)}, ****size {_listed(PANEL_SIZES)}, **width** {_listed(PANEL_WIDTHS)}, **card size** {_listed(CARD_SIZES)} | *"turn on data labels"*, *"make it medium"* |
 | Numbers written properly | **Currency** in any of {_listed(CURRENCY_CODES)} | *"show amounts in currency"* |
@@ -84,6 +88,8 @@ def capabilities_markdown(max_visuals: int) -> str:
 - **Changing the data itself** - new columns, fixing spellings, combining tables. That is
   what **Transform Data** is for; the dashboard only ever draws what is already there.
 - **Sums across visuals**, targets and forecasts.
+- **Searching or sorting a drill-down table.** A flat table has both; a drill-down opens and
+  closes its layers instead.
 - **Writing formulas** into a chart.
 
 **Tips**

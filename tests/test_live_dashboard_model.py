@@ -162,6 +162,86 @@ def test_a_table_panel_needs_at_least_one_column():
     assert "at least one column" in m.panel_problems(panel, COLUMNS)
 
 
+# --------------------------------------------------- drill-down tables (phase 40)
+
+
+def drilldown(**overrides) -> m.PanelSpec:
+    """A drill-down table reading its fields the way phase 40 defines: `source_columns` are
+    the levels to group by, and `measure_column` + `aggregation` are the total on each."""
+    panel = m.PanelSpec(
+        visual_type=m.VISUAL_TABLE,
+        sub_type=m.TABLE_DRILLDOWN,
+        source_table="main",
+        source_columns=["Category", "Customer - Name"],
+        measure_column="Amount",
+        aggregation=m.AGG_SUM,
+    )
+    for name, value in overrides.items():
+        setattr(panel, name, value)
+    return panel
+
+
+def test_a_drilldown_with_levels_and_a_number_is_fine():
+    assert m.panel_problems(drilldown(), COLUMNS) == ""
+
+
+def test_a_drilldown_with_one_level_has_nothing_to_drill_into():
+    problem = m.panel_problems(drilldown(source_columns=["Category"]), COLUMNS)
+    assert "at least two levels" in problem
+
+
+def test_a_drilldown_with_no_levels_is_told_what_a_level_is():
+    """The empty case says "columns to group by", not "columns to show" - the flat table's
+    sentence would send the user to fix the wrong thing."""
+    problem = m.panel_problems(drilldown(source_columns=[]), COLUMNS)
+    assert "group by" in problem
+
+
+def test_a_drilldown_with_too_many_levels_is_refused():
+    levels = ["Category", "Customer - Name", "Region2", "Amount", "Category"]
+    problem = m.panel_problems(drilldown(source_columns=levels), COLUMNS)
+    assert str(m.MAX_DRILLDOWN_LEVELS) in problem
+
+
+def test_a_drilldown_level_no_link_reaches_is_reported_like_any_other_column():
+    problem = m.panel_problems(
+        drilldown(source_columns=["Category", "Region"]), COLUMNS
+    )
+    assert "Region" in problem and "isn't reachable" in problem
+
+
+def test_a_drilldown_needs_a_number_unless_it_is_counting():
+    """Exactly what a card needs, because it computes exactly what a card computes - once
+    per group instead of once per page."""
+    assert "total" in m.panel_problems(drilldown(measure_column=""), COLUMNS)
+    counting = drilldown(measure_column="", aggregation=m.AGG_COUNT)
+    assert m.panel_problems(counting, COLUMNS) == ""
+
+
+def test_a_drilldown_refuses_the_totals_that_are_measured_against_a_chart():
+    """A percentage of total and a running total are about a chart's other bars. A tree of
+    groups has no single whole and no order, so both would print a confident wrong number."""
+    for aggregation in (m.AGG_PERCENT_OF_TOTAL, m.AGG_RUNNING_TOTAL):
+        problem = m.panel_problems(drilldown(aggregation=aggregation), COLUMNS)
+        assert "drill-down" in problem, aggregation
+
+
+def test_a_flat_table_still_ignores_the_measure_and_the_aggregation():
+    """The whole reason phase 40 needed no new field and no migration: a flat table reads
+    `source_columns` as the columns to show and never looks at the rest."""
+    flat = m.PanelSpec(
+        visual_type=m.VISUAL_TABLE, sub_type=m.TABLE_FLAT, source_table="main",
+        source_columns=["Amount"], measure_column="", aggregation=m.AGG_SUM,
+    )
+    assert m.panel_problems(flat, COLUMNS) == ""
+
+
+def test_every_table_sub_type_has_a_label():
+    """The catalog the AI is shown is rendered from these, so a sub-type with no label is a
+    shape offered to the model as a bare keyword."""
+    assert set(m.TABLE_LABELS) == set(m.TABLE_SUB_TYPES)
+
+
 # ------------------------------------------------------------------ properties
 
 
