@@ -86,7 +86,7 @@ def _chart(**overrides) -> ProposedPanel:
 def _generate(monkeypatch, response: ProposedDashboard, **kwargs):
     _answer(monkeypatch, response)
     return ai_spec.propose_dashboard(
-        PROFILE, "sales by customer", _tables(), main_table=MAIN, **kwargs
+        PROFILE, "sales by customer", _tables(), **kwargs
     )
 
 
@@ -118,11 +118,22 @@ def test_a_description_becomes_panels(monkeypatch):
     assert spec.panels[2].filter_column() == "Customer - CustName"
 
 
-def test_the_main_table_is_used_when_a_panel_names_none(monkeypatch):
+def test_a_panel_that_names_no_table_goes_to_the_one_that_owns_its_columns(monkeypatch):
+    """Phase 39 took the Main table away, so there is no page-wide table to fall back on.
+    The honest answer is the table that actually carries the columns the visual names."""
     spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[_chart(source_table="")]))
     assert warnings == []
     assert spec.panels[0].source_table == MAIN
-    assert spec.main_table == MAIN
+
+
+def test_a_panel_naming_a_sibling_table_s_columns_lands_on_that_table(monkeypatch):
+    """`Month` lives only on Calendar, so a chart over it is a Calendar chart however
+    confidently the model wrote another table's name."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[
+        _chart(source_table="", measure_column="", aggregation="count", group_by="Month")
+    ]))
+    assert warnings == []
+    assert spec.panels[0].source_table == "Calendar"
 
 
 def test_a_column_in_the_wrong_case_is_matched(monkeypatch):
@@ -279,6 +290,28 @@ def test_a_side_table_is_allowed(monkeypatch):
     assert spec.panels[0].source_table == "Calendar"
 
 
+def test_a_filter_on_a_lookup_table_uses_the_prefixed_spelling(monkeypatch):
+    """A filter written against a parent's own plain column name is rewired to the
+
+    prefixed spelling every child actually carries - otherwise it narrows the parent only
+    and quietly does nothing on tables joined to it, which read as a broken filter rather
+    than a filter that simply used the wrong name for the same column.
+    """
+    tables = _tables()
+    tables["Customer"] = pd.DataFrame({
+        "CustName": ["ABC Traders", "XYZ Corp"],
+        "Customer - CustName": ["ABC Traders", "XYZ Corp"],
+    })
+    _answer(monkeypatch, ProposedDashboard(panels=[
+        ProposedPanel(visual_type="filter", sub_type="multiselect", source_table="Customer",
+                      columns="CustName", title="Customer"),
+    ]))
+    spec, warnings, _ = ai_spec.propose_dashboard(PROFILE, "filter by customer", tables)
+
+    assert warnings == []
+    assert spec.panels[0].filter_column() == "Customer - CustName"
+
+
 # ------------------------------------------------------------------ numbers written as text
 
 
@@ -332,12 +365,12 @@ def test_a_layout_the_model_did_choose_is_left_alone(monkeypatch):
     assert [panel.row_number for panel in spec.panels] == [1, 5, 5]
 
 
-def test_more_than_ten_visuals_are_capped(monkeypatch):
+def test_more_than_the_cap_are_trimmed(monkeypatch):
     spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(
-        panels=[_chart(title=f"Chart {index}") for index in range(14)]
+        panels=[_chart(title=f"Chart {index}") for index in range(ai_spec.MAX_PANELS + 4)]
     ))
     assert len(spec.panels) == ai_spec.MAX_PANELS
-    assert any("first 10" in warning for warning in warnings)
+    assert any(f"first {ai_spec.MAX_PANELS}" in warning for warning in warnings)
 
 
 # ------------------------------------------------------------------ honest failure
@@ -358,7 +391,7 @@ def test_a_model_that_is_down_is_one_warning_not_an_exception(monkeypatch):
 
     monkeypatch.setattr(ai_spec, "run_structured", fake_run)
     spec, warnings, clarification = ai_spec.propose_dashboard(
-        PROFILE, "sales by customer", _tables(), main_table=MAIN
+        PROFILE, "sales by customer", _tables()
     )
     assert spec is None
     assert len(warnings) == 1
@@ -389,7 +422,7 @@ def test_no_data_loaded_never_reaches_the_model(monkeypatch):
 
 
 def test_the_prompt_carries_the_real_columns_and_their_types():
-    prompt = ai_spec.build_prompt("sales by customer", _tables(), main_table=MAIN)
+    prompt = ai_spec.build_prompt("sales by customer", _tables())
     assert "Amount (number)" in prompt
     assert "Customer - CustName (text)" in prompt
     assert "TxnDate (date)" in prompt
@@ -463,7 +496,6 @@ def _dashboard(*titles: str) -> m.DashboardSpec:
     """A dashboard already on screen, for a round to edit."""
     return m.DashboardSpec(
         title="Sales review",
-        main_table=MAIN,
         panels=[
             m.PanelSpec(
                 visual_type=m.VISUAL_CHART, sub_type=CHART_BAR, source_table=MAIN,
@@ -524,6 +556,21 @@ def test_an_update_that_says_nothing_about_the_row_stays_where_it_was(monkeypatc
     ]))
 
     assert spec.panels[1].row_number == 7
+
+
+def test_an_update_that_changes_nothing_is_reported_as_no_change(monkeypatch):
+    """The 'show data labels' bug: the model re-sent the same visual, and the round said
+    'Changed 1 ...' for a request the dashboard couldn't do."""
+    spec = _dashboard("First")
+    before = spec.panels[0]
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="1", title="First", row_number="1"),
+    ]))
+
+    assert not result.changed()
+    assert spec.panels[0] is before
+    assert any("didn't change" in note for note in result.notes)
 
 
 def test_a_round_can_remove_one_visual(monkeypatch):
@@ -627,7 +674,7 @@ def test_a_blank_instruction_on_a_dashboard_with_visuals_is_refused(monkeypatch)
 
 def test_a_blank_instruction_on_an_empty_dashboard_designs_one(monkeypatch):
     """The requirement's "leave it blank and press Generate"."""
-    spec = m.DashboardSpec(main_table=MAIN)
+    spec = m.DashboardSpec()
     recorder: list = []
     result = _round(monkeypatch, spec, ProposedDashboard(
         title="Sales", panels=[_chart(title="Sales by customer")],
@@ -792,10 +839,78 @@ def test_the_column_meanings_reach_the_prompt(monkeypatch):
     recorder: list = []
     _answer(monkeypatch, ProposedDashboard(panels=[_chart()]), recorder)
 
-    ai_spec.propose_dashboard(PROFILE, "sales by customer", _tables(), main_table=MAIN,
+    ai_spec.propose_dashboard(PROFILE, "sales by customer", _tables(),
                               notes=ai_spec.column_notes(_entries()))
 
     assert "invoice value after discount, INR" in recorder[0][0]
+
+
+# ------------------------------------------------ phase 37: a round scoped to one visual
+
+
+def test_a_round_opened_from_one_visual_can_only_change_that_visual(monkeypatch):
+    """The Edit button beside a visual says which one it means, so a model that answers
+    about the chart next to it cannot move the wrong one."""
+    spec = _dashboard("First", "Second")
+    second = spec.panels[1]
+
+    # The model answers about visual 1 - the one the user was not looking at.
+    _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="1", title="Renamed", row_number="1"),
+    ]), focus=second)
+
+    assert [panel.title for panel in spec.panels] == ["First", "Renamed"]
+    assert spec.panels[1].panel_id == second.panel_id
+
+
+def test_a_scoped_round_tells_the_model_which_visual_it_may_change(monkeypatch):
+    """The number in the prompt is the same one `describe_spec_for_prompt` lists it under -
+    that is the only name the model and this code share for a visual."""
+    spec = _dashboard("First", "Second")
+    recorder: list = []
+
+    _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="2", title="Renamed", row_number="1"),
+    ]), recorder=recorder, focus=spec.panels[1])
+
+    prompt = recorder[0][0]
+    assert "visual number 2" in prompt and "Second" in prompt
+
+
+def test_a_scoped_round_adds_nothing_to_the_page(monkeypatch):
+    """"Make it horizontal" typed under one chart must never leave two charts behind."""
+    spec = _dashboard("First")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="add", title="Something else", row_number="2"),
+    ]), focus=spec.panels[0])
+
+    assert [panel.title for panel in spec.panels] == ["Something else"]
+    assert result.updated and not result.added
+
+
+def test_a_scoped_round_ignores_the_rest_of_an_over_eager_answer(monkeypatch):
+    spec = _dashboard("First", "Second")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="1", title="Renamed", row_number="1"),
+        _chart(action="update", target="2", title="Also renamed", row_number="1"),
+    ]), focus=spec.panels[0])
+
+    assert [panel.title for panel in spec.panels] == ["Renamed", "Second"]
+    assert any("Only the visual you opened" in note for note in result.notes)
+
+
+def test_a_scoped_round_on_a_visual_that_has_gone_says_so(monkeypatch):
+    """The dialog outlives one rerun, and the round before it may have removed the visual."""
+    spec = _dashboard("First")
+    gone = m.PanelSpec(visual_type=m.VISUAL_CHART, sub_type=CHART_BAR, source_table=MAIN,
+                       measure_column="Amount", title="Gone")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[]), focus=gone)
+
+    assert result.failed
+    assert [panel.title for panel in spec.panels] == ["First"]
 
 
 # --------------------------------------------------------- phase 35: the design skill
@@ -806,7 +921,14 @@ def test_every_shape_the_design_rules_recommend_is_one_we_can_draw():
     catalog is exactly how a rule ends up recommending a chart the exported file cannot
     draw - which is a blank box found after the file has been emailed."""
     known = (set(m.CHART_SUB_TYPES) | set(m.DASHBOARD_AGGREGATIONS) | set(SORT_LABELS)
-             | set(m.NUMBER_FORMATS) | set(m.CURRENCY_CODES))
+             | set(m.NUMBER_FORMATS) | set(m.CURRENCY_CODES)
+             # Phase 37's layout defaults: filters down the left, in a widget that opens
+             # only when clicked. Both are catalog values, so both are pinned here too.
+             | set(m.FILTER_POSITIONS) | set(m.FILTER_SUB_TYPES)
+             # Phase 38's look settings: each is a named choice from a list in `model`, so a
+             # rule recommending "labels:yes" is pinned exactly as one recommending a shape.
+             | set(m.YES_NO) | set(m.LEGEND_POSITIONS) | set(m.NAMED_COLOURS)
+             | set(m.PANEL_SIZES) | set(m.PANEL_WIDTHS) | set(m.CARD_SIZES))
 
     for name in ai_spec._DESIGN_RULE_NAMES:
         assert name in known, name
@@ -832,3 +954,152 @@ def test_a_round_is_told_it_is_editing_rather_than_rebuilding(monkeypatch):
     _round(monkeypatch, spec, ProposedDashboard(panels=[]), recorder=recorder)
 
     assert recorder[0][1]["instructions"] == ai_spec._ROUND_INSTRUCTIONS
+
+
+# ------------------------------------------------- phase 38: several numbers on one chart
+
+
+def test_more_measures_is_read_off_one_line_of_text(monkeypatch):
+    """Flat text rather than a nested list, because a provider's strict schema fills nested
+    lists in badly - and a schema filled in wrongly is worse than a string we parse."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[
+        _chart(measure_column="Amount", aggregation="average",
+               more_measures="amount:min:left; amount:max:left; :count:right"),
+    ]))
+
+    assert warnings == []
+    assert spec.panels[0].extra_measures == [
+        {"column": "Amount", "aggregation": "minimum", "axis": "left"},
+        {"column": "Amount", "aggregation": "maximum", "axis": "left"},
+        {"column": "", "aggregation": "count", "axis": "right"},
+    ]
+
+
+def test_an_extra_measure_over_a_column_that_is_not_there_loses_the_visual(monkeypatch):
+    """The same fence every other column is held to: a chart quietly totalling a column the
+    data does not have is the failure this module exists to prevent."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[
+        _chart(more_measures="Amt:min:left"),
+    ]))
+
+    assert spec is None
+    assert "Amt" in warnings[0]
+
+
+def test_an_extra_measure_the_catalog_does_not_have_is_dropped_not_invented(monkeypatch):
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[
+        _chart(more_measures="Amount:geometric_mean:left; Amount:sum:sideways"),
+    ]))
+
+    assert spec.panels[0].extra_measures == []
+
+
+def test_a_chart_with_several_numbers_says_so_in_words(monkeypatch):
+    """The round's own account of what it did is the only description of a visual the user
+    gets, so it has to name the numbers rather than count them."""
+    spec, _, _ = _generate(monkeypatch, ProposedDashboard(panels=[
+        _chart(measure_column="Amount", aggregation="average", title="Amount spread",
+               more_measures="amount:min:left; amount:max:left"),
+    ]))
+
+    sentence = ai_spec.describe_panel(spec.panels[0])
+    assert "Smallest of Amount" in sentence and "Largest of Amount" in sentence
+
+
+def test_the_settings_catalog_offers_only_what_the_whitelist_keeps():
+    """The phase 38 bug in one line: a setting offered in the prompt and then dropped by
+    `clean_properties` is a request the model answers and the page ignores."""
+    catalog = ai_spec.describe_properties_for_prompt()
+
+    for name in ("labels", "legend", "axis_titles", "colour", "size", "width", "card_size"):
+        assert name in catalog
+
+    for value in (*m.LEGEND_POSITIONS, *m.NAMED_COLOURS, *m.PANEL_SIZES,
+                  *m.PANEL_WIDTHS, *m.CARD_SIZES):
+        assert value in catalog
+
+    # Everything it offers has to survive the gate it is offered against.
+    kept = m.clean_properties(
+        "labels:yes, legend:top, axis_titles:no, colour:orange, size:medium, "
+        "width:half, card_size:small"
+    )
+    assert len(kept) == 7
+
+
+def test_a_round_can_add_a_second_number_to_a_visual_that_already_exists(monkeypatch):
+    spec = _dashboard("Sales by customer")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="1", title="Sales by customer", row_number="1",
+               more_measures="Quantity:sum:right"),
+    ]))
+
+    assert result.changed()
+    assert spec.panels[0].extra_measures == [
+        {"column": "Quantity", "aggregation": "sum", "axis": "right"}
+    ]
+
+
+def test_the_listing_shows_a_round_the_numbers_a_chart_already_draws(monkeypatch):
+    """`describe_spec_for_prompt` is the model's whole memory, so a measure missing from it
+    is a measure the next round silently deletes."""
+    spec = _dashboard("Sales by customer")
+    spec.panels[0].extra_measures = m.clean_measures(
+        [{"column": "Quantity", "aggregation": "sum", "axis": "right"}])
+
+    listing = ai_spec.describe_spec_for_prompt(spec)
+
+    assert "more_measures" in listing and "Quantity:sum:right" in listing
+
+
+# ------------------------------------------------------- phase 38: found by the review
+
+
+def test_a_setting_the_shape_cannot_use_becomes_a_note_and_never_a_crash(monkeypatch):
+    """`_build_one` once read a variable it had never assigned, so the FIRST time a model
+    asked for labels on a shape that cannot show them the page died with an
+    UnboundLocalError. The contract is that a round never raises."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[
+        _chart(sub_type="heatmap", colour_by="Quantity", properties="labels:yes"),
+    ]))
+
+    assert spec is not None
+    assert any("data labels" in warning for warning in warnings)
+
+
+def test_colour_over_a_chart_already_split_by_colour_is_a_note_in_a_round(monkeypatch):
+    spec = _dashboard("First")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="1", title="First", row_number="1",
+               colour_by="Quantity", properties="colour:green"),
+    ]))
+
+    assert any("already split into colours" in note for note in result.notes)
+    assert result.changed()
+
+
+def test_two_edits_to_one_visual_in_one_round_keep_the_first_and_do_not_crash(monkeypatch):
+    """A very plausible answer to "make it horizontal and only the top 10": two proposals
+    naming the same target. The second used to raise ValueError off `working.index`."""
+    spec = _dashboard("First", "Second")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        _chart(action="update", target="1", title="Renamed", row_number="1"),
+        _chart(action="update", target="1", title="Renamed again", row_number="1"),
+    ]))
+
+    assert [panel.title for panel in spec.panels] == ["Renamed", "Second"]
+    assert any("already changed" in note for note in result.notes)
+
+
+def test_an_edit_to_a_visual_removed_earlier_in_the_round_is_skipped(monkeypatch):
+    spec = _dashboard("First", "Second")
+
+    result = _round(monkeypatch, spec, ProposedDashboard(panels=[
+        ProposedPanel(action="remove", target="1", visual_type="chart"),
+        _chart(action="update", target="1", title="Ghost", row_number="1"),
+    ]))
+
+    assert [panel.title for panel in spec.panels] == ["Second"]
+    assert result.removed == ["First"]

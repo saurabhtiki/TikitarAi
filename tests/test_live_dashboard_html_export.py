@@ -30,7 +30,7 @@ FRAME = pd.DataFrame(
 
 
 def dashboard(*panels: m.PanelSpec, **settings) -> m.DashboardSpec:
-    spec = m.DashboardSpec(title="Sales", main_table="main", **settings)
+    spec = m.DashboardSpec(title="Sales", **settings)
     spec.panels.extend(panels)
     return spec
 
@@ -253,13 +253,66 @@ def test_every_filter_widget_says_how_to_clear_itself():
     html_export._asset.cache_clear()
 
     assert "data-filter-input" not in runtime
-    # One per widget kind: dropdown, tick list, range slider, date range.
-    assert runtime.count("resetters.push(") == 4
+    # One per widget kind: dropdown, tick list, range slider, date range. They go onto the
+    # filter's own `resets` list since phase 37, because the same functions now serve Clear
+    # all and that one filter's Clear button.
+    assert runtime.count("resets.push(") == 4
+    # And each filter hands the pair of them to Clear all, exactly once.
+    assert runtime.count("resetters.push(") == 1
 
 
 def test_the_page_ships_the_tick_box_styling():
     html = html_export.build_dashboard_html(dashboard(chart()), {"main": FRAME})
     assert ".choice-list {" in html
+
+
+# ------------------------------------------------- phase 37: layout defaults and Clear
+
+
+def test_a_new_dashboard_puts_its_filters_down_the_left():
+    """A top strip pushes the first row of visuals off the screen as soon as there are three
+    filters, which is what real use showed."""
+    spec = m.DashboardSpec()
+    assert spec.filter_position == m.FILTER_LEFT
+
+    html = html_export.build_dashboard_html(dashboard(chart()), {"main": FRAME})
+    assert "filters-left" in html
+
+
+def test_a_dashboard_saved_with_filters_on_top_still_opens_with_them_on_top():
+    """The new default is a default, not a retrofit: a page someone laid out by hand keeps
+    the layout they chose."""
+    stored = m.to_json(dashboard(chart(), filter_position=m.FILTER_TOP))
+    assert m.from_json(stored).filter_position == m.FILTER_TOP
+
+
+def test_panel_titles_are_centred():
+    html = html_export.build_dashboard_html(dashboard(chart()), {"main": FRAME})
+    assert ".panel h2" in html and "text-align: center" in html
+
+
+def test_every_filter_gets_a_clear_button_of_its_own():
+    """Clear all is the wrong tool when a reader has set four filters and wants three."""
+    filter_panel = m.PanelSpec(
+        visual_type=m.VISUAL_FILTER, sub_type=m.FILTER_MULTISELECT,
+        source_table="main", source_columns=["Customer - Name"], title="Customer",
+    )
+    spec = dashboard(chart(), filter_panel)
+    html = html_export.build_dashboard_html(spec, {"main": FRAME})
+
+    for panel in spec.filters():
+        assert f'id="clear-{panel.panel_id}"' in html
+
+
+def test_the_tick_list_opens_only_when_it_is_clicked():
+    """A list of three hundred customers sitting open is most of a screen spent on a control
+    nobody has touched yet - so it is a `details`, with what is chosen on its summary."""
+    runtime = html_export._asset("runtime.js")
+    html_export._asset.cache_clear()
+
+    assert 'createElement("details")' in runtime
+    assert 'createElement("summary")' in runtime
+    assert "summary.appendChild(readout)" in runtime
 
 
 # ------------------------------------------------- phase 34: the wider vocabulary
@@ -273,7 +326,12 @@ def test_every_shape_and_every_total_survives_a_real_export():
     after the file has been emailed.
     """
     panels = [
-        chart(sub_type=sub_type, colour_by="Customer - Name", measure_column_2="Amount",
+        chart(sub_type=sub_type, colour_by="Customer - Name",
+              # Only the shapes that can draw a second number are given one; the rest would
+              # rightly refuse it, and this test is about every shape reaching the file.
+              extra_measures=m.clean_measures(
+                  [{"column": "Amount", "aggregation": "sum", "axis": "right"}]
+                  if sub_type in m.MULTI_MEASURE_CHARTS else []),
               group_by="" if sub_type == m.CHART_HISTOGRAM else "Category",
               title=f"A {sub_type}", row_number=index + 1)
         for index, sub_type in enumerate(m.CHART_SUB_TYPES)
@@ -332,3 +390,96 @@ def test_a_running_total_over_a_date_still_exports():
 
     assert "needs a date to run along" not in html
     assert len(payload_of(html)["panels"]) == 1
+
+
+# ------------------------------------------------------- phase 38: the look settings
+
+
+def test_a_full_width_panel_and_a_big_card_carry_their_classes_into_the_page():
+    """Classes rather than inline numbers: the stylesheet keeps deciding what "full" and
+    "large" actually measure, and a class name from a fixed list carries nothing typed."""
+    card = m.PanelSpec(visual_type=m.VISUAL_CARD, source_table="main", measure_column="Amount",
+                       title="Total", properties=m.clean_properties("card_size:large"))
+    wide = chart(row_number=2, properties=m.clean_properties("width:full, size:tall"))
+
+    html = html_export.build_dashboard_html(dashboard(card, wide), {"main": FRAME})
+
+    assert 'class="panel card-large"' in html
+    assert 'class="panel panel-full"' in html
+    assert f"min-height:{m.PANEL_SIZES['tall']}px" in html
+    assert ".panel.panel-full" in html and ".panel.card-large .card-value" in html
+
+
+def test_a_panel_with_no_look_settings_is_still_a_plain_panel():
+    html = html_export.build_dashboard_html(dashboard(chart()), {"main": FRAME})
+    assert 'class="panel"' in html
+
+
+def test_nothing_typed_into_a_look_setting_reaches_the_page_as_styling():
+    """`clean_properties` is the gate; this is the proof that the exporter has no way round
+    it. Every one of these is dropped before a class or an inline style is built."""
+    nasty = chart(properties=m.clean_properties(
+        "width:100%;background:url(evil.png), colour:</style><script>alert(1)</script>, "
+        "card_size:huge, size:9999px"
+    ))
+
+    html = html_export.build_dashboard_html(dashboard(nasty), {"main": FRAME})
+
+    assert "evil.png" not in html
+    assert "alert(1)" not in html
+    assert 'class="panel"' in html
+    assert "min-height" not in html.split("<style>")[0] + html.split("</style>")[-1]
+
+
+def test_the_disclosure_arrows_are_css_escapes_and_not_stray_control_characters():
+    """A heredoc once turned `\\25be` into a raw 0x15 byte plus the letters "be", so every
+    exported dashboard's collapsed filter showed the word "be" instead of an arrow."""
+    css = html_export._asset("dashboard.css")
+
+    assert '"\\25be"' in css and '"\\25b4"' in css
+    assert not [char for char in css if ord(char) < 32 and char not in "\t\r\n"]
+
+
+# --------------------------------------------- phase 39: one filter, every related table
+
+
+def test_a_page_over_two_sibling_tables_carries_both_and_one_filter_over_them():
+    """The plan's end-to-end case, as far as Python can take it.
+
+    Employee Master with two children that know nothing about each other: a salary total,
+    an attendance total, and one Department filter above them. What the export has to get
+    right is that **both** tables reach the page, each carrying the same
+    `EmployeeMaster - Department` column, and that the filter is a single panel rather than
+    one per table. That the filter then narrows both is `test_live_dashboard_runtime.py`'s
+    job, because that part happens in the browser.
+    """
+    salary = pd.DataFrame({
+        "Amount": [50000.0, 60000.0],
+        "EmployeeMaster - Department": ["HR", "Ops"],
+    })
+    attendance = pd.DataFrame({
+        "Days": [20, 25],
+        "EmployeeMaster - Department": ["HR", "Ops"],
+    })
+
+    spec = dashboard(
+        m.PanelSpec(visual_type=m.VISUAL_CARD, source_table="Salary",
+                    measure_column="Amount", aggregation=m.AGG_SUM, title="Total salary"),
+        m.PanelSpec(visual_type=m.VISUAL_CARD, source_table="Attendance",
+                    measure_column="Days", aggregation=m.AGG_SUM, title="Days present"),
+        m.PanelSpec(visual_type=m.VISUAL_FILTER, sub_type=m.FILTER_MULTISELECT,
+                    source_table="Salary", source_columns=["EmployeeMaster - Department"],
+                    title="Department"),
+    )
+
+    document = payload_of(html_export.build_dashboard_html(
+        spec, {"Salary": salary, "Attendance": attendance}
+    ))
+
+    assert sorted(document["tables"]) == ["Attendance", "Salary"]
+    for name in ("Salary", "Attendance"):
+        assert "EmployeeMaster - Department" in document["tables"][name]["columns"], name
+
+    assert len(document["filters"]) == 1
+    assert document["filters"][0]["column"] == "EmployeeMaster - Department"
+    assert {panel["source_table"] for panel in document["panels"]} == {"Salary", "Attendance"}

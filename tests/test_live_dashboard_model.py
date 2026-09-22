@@ -347,10 +347,12 @@ def test_a_combo_chart_asks_for_its_second_number():
     problem = m.panel_problems(chart(sub_type=m.CHART_COMBO), COLUMNS)
     assert "second number" in problem
 
-    unreachable = chart(sub_type=m.CHART_COMBO, measure_column_2="Nowhere")
+    unreachable = chart(sub_type=m.CHART_COMBO, extra_measures=m.clean_measures(
+        [{"column": "Nowhere", "aggregation": "sum", "axis": "right"}]))
     assert "isn't reachable" in m.panel_problems(unreachable, COLUMNS)
 
-    fixed = chart(sub_type=m.CHART_COMBO, measure_column_2="Region2")
+    fixed = chart(sub_type=m.CHART_COMBO, extra_measures=m.clean_measures(
+        [{"column": "Region2", "aggregation": "sum", "axis": "right"}]))
     assert m.panel_problems(fixed, COLUMNS) == ""
 
 
@@ -367,17 +369,119 @@ def test_properties_text_round_trips_the_currency():
     assert m.clean_properties(m.properties_text(cleaned)) == cleaned
 
 
-def test_a_second_measure_survives_being_saved_and_read_back():
-    spec = m.DashboardSpec(panels=[chart(sub_type=m.CHART_COMBO, measure_column_2="Quantity")])
-    read_back = m.from_json(m.to_json(spec))
-    assert read_back.panels[0].measure_column_2 == "Quantity"
+def test_extra_measures_survive_being_saved_and_read_back():
+    measures = m.clean_measures([
+        {"column": "Amount", "aggregation": "minimum", "axis": "left"},
+        {"column": "Amount", "aggregation": "count", "axis": "right"},
+    ])
+    spec = m.DashboardSpec(panels=[chart(extra_measures=measures)])
+
+    assert m.from_json(m.to_json(spec)).panels[0].extra_measures == measures
+
+
+def test_an_extra_measure_is_kept_only_when_every_part_of_it_is_known():
+    assert m.clean_measures([{"column": "Amount", "aggregation": "nonsense",
+                             "axis": "left"}]) == []
+    assert m.clean_measures([{"column": "Amount", "aggregation": "sum",
+                             "axis": "sideways"}]) == []
+    assert m.clean_measures([{"column": "", "aggregation": "sum",
+                             "axis": "left"}]) == []
+    assert m.clean_measures("Amount:sum:left") == []
+
+    # A percentage of total is measured against the rest of the chart, so a second
+    # number sharing that chart is two answers to a question that has one.
+    assert m.clean_measures([{"column": "Amount", "aggregation": "percent_of_total",
+                             "axis": "left"}]) == []
+
+    # Counting rows needs no column, which is what makes "salary and headcount" work.
+    assert len(m.clean_measures([{"column": "", "aggregation": "count",
+                                 "axis": "right"}])) == 1
+
+
+def test_a_chart_is_held_to_four_numbers_in_all():
+    too_many = [{"column": "Amount", "aggregation": "sum", "axis": "left"}] * 9
+    assert len(m.clean_measures(too_many)) == m.MAX_MEASURES_PER_CHART - 1
+
+
+def test_a_shape_that_draws_one_number_says_so_rather_than_drawing_the_wrong_thing():
+    pie = chart(sub_type=m.CHART_PIE, extra_measures=m.clean_measures(
+        [{"column": "Amount", "aggregation": "minimum", "axis": "left"}]))
+    assert "one number" in m.panel_problems(pie, COLUMNS)
 
 
 def test_a_dashboard_saved_before_this_phase_still_loads():
-    """Every addition is a new field with a default, which is why `SCHEMA_VERSION` stays 1."""
-    older = json.loads(m.to_json(m.DashboardSpec(panels=[chart()])))
+    """A dashboard saved with `measure_column_2` opens showing what it always showed:
+    the second number as a line, against the right-hand axis."""
+    older = json.loads(m.to_json(m.DashboardSpec(
+        panels=[chart(sub_type=m.CHART_COMBO, aggregation="average")])))
     for panel in older["panels"]:
-        panel.pop("measure_column_2")
+        panel.pop("extra_measures")
+        panel["measure_column_2"] = "Quantity"
 
     read_back = m.from_json(json.dumps(older))
-    assert read_back.panels[0].measure_column_2 == ""
+
+    assert read_back.panels[0].extra_measures == [
+        {"column": "Quantity", "aggregation": "average", "axis": m.AXIS_RIGHT}
+    ]
+
+
+def test_a_dashboard_saved_with_neither_spelling_still_loads():
+    older = json.loads(m.to_json(m.DashboardSpec(panels=[chart()])))
+    for panel in older["panels"]:
+        panel.pop("extra_measures")
+
+    assert m.from_json(json.dumps(older)).panels[0].extra_measures == []
+
+
+# ------------------------------------------------------- phase 38: the look settings
+
+
+def test_every_look_setting_is_kept_only_when_it_is_one_of_the_named_choices():
+    """The whole reason `clean_properties` exists, applied to seven new settings at once:
+    these values are written into a page a reader opens, so a word off the list never
+    arrives."""
+    kept = m.clean_properties(
+        "labels:yes, legend:bottom, axis_titles:no, colour:green, "
+        "size:tall, width:full, card_size:large"
+    )
+    assert kept == {
+        "labels": True, "legend": "bottom", "axis_titles": False, "colour": "green",
+        "size": "tall", "width": "full", "card_size": "large",
+    }
+
+    invented = m.clean_properties(
+        "legend:diagonal, colour:#ff0000, size:enormous, width:120px, card_size:huge, "
+        "labels:maybe"
+    )
+    assert invented == {}
+
+
+def test_a_look_setting_survives_being_saved_and_read_back():
+    cleaned = m.clean_properties("labels:yes, legend:none, colour:purple, size:short")
+    assert m.clean_properties(m.properties_text(cleaned)) == cleaned
+
+    spec = m.DashboardSpec(panels=[chart(properties=cleaned)])
+    assert m.from_json(m.to_json(spec)).panels[0].properties == cleaned
+
+
+def test_size_sets_the_height_and_an_exact_height_still_wins():
+    """`height:420` is what a dashboard saved before phase 38 carries, so it has to keep
+    meaning what it meant - `size` is the word the AI is taught to use from now on."""
+    assert chart(properties=m.clean_properties("size:tall")).height() == m.PANEL_SIZES["tall"]
+    assert chart(properties=m.clean_properties("size:short")).height() == m.PANEL_SIZES["short"]
+    assert chart(properties=m.clean_properties("size:tall, height:420")).height() == 420
+    assert chart().height() > 0
+
+
+def test_a_setting_a_shape_cannot_use_is_reported_rather_than_silently_dropped():
+    """The phase 38 bug in one sentence: the user asked for something, did not get it, and
+    nothing said so."""
+    heatmap = chart(sub_type=m.CHART_HEATMAP, colour_by="Region2",
+                    properties=m.clean_properties("labels:yes"))
+    assert "data labels" in m.property_problems(heatmap)
+
+    split = chart(colour_by="Region2", properties=m.clean_properties("colour:green"))
+    assert "Region2" in m.property_problems(split)
+
+    fine = chart(properties=m.clean_properties("labels:yes, colour:green"))
+    assert m.property_problems(fine) == ""

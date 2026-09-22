@@ -158,20 +158,22 @@ def dumps_for_script(payload: dict) -> str:
     return escape_for_script(json.dumps(payload, ensure_ascii=False, allow_nan=False))
 
 
-def build_payload(tables: dict[str, pd.DataFrame], main_table: str, panels: list[dict],
+def build_payload(tables: dict[str, pd.DataFrame], panels: list[dict],
                   filters: list[dict], settings: dict) -> dict:
     """Everything the exported page needs, as one object.
 
+    There is no "main table" in here since phase 39. Every table is embedded, each carrying
+    the columns of the parents it can reach, so each panel names the table it reads and the
+    page has no favourite - which is what lets one filter narrow all of them.
+
     Args:
         tables: each embedded table by the name panels refer to it by.
-        main_table: which of those is the flattened fact table.
         panels: the visual panels, each already carrying its Vega-Lite spec where it has one.
         filters: the filter widgets, each with the column and widget type it drives.
         settings: theme, filter position, palette, and the page's titles.
     """
     return {
         "tables": {name: frame_to_table(frame) for name, frame in tables.items()},
-        "main_table": main_table,
         "panels": panels,
         "filters": filters,
         "settings": settings,

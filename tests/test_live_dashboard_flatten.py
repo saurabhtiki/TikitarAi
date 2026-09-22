@@ -9,6 +9,10 @@ The two tests that matter most:
 - **The orphan.** A LEFT JOIN keeps a transaction whose customer is missing from the master.
   An inner join here would show fewer sales than the system of record, which is the worst
   thing a dashboard can quietly do.
+- **The sibling** (phase 39). Salary and Attendance are both children of Employee Master
+  and are not related to each other at all. Each must come out carrying Employee Master's
+  columns under the *same* name and with its own row count untouched, because that one
+  shared spelling is the whole of how a single filter reaches both.
 """
 
 import duckdb
@@ -51,23 +55,6 @@ def connection():
         con.close()
 
 
-# ------------------------------------------------------------------ fact detection
-
-
-def test_the_fact_table_is_the_one_that_refers_to_the_most_others(connection):
-    assert flatten.detect_fact_table(RELATIONSHIPS, TABLE_NAMES, connection) == "Transactions"
-
-
-def test_with_no_confirmed_links_the_largest_table_wins(connection):
-    connection.execute("INSERT INTO Customer VALUES (6,'B',1),(7,'C',1),(8,'D',1)")
-    chosen = flatten.detect_fact_table([], ["Transactions", "Customer"], connection)
-    assert chosen == "Customer"
-
-
-def test_detection_survives_having_no_tables_at_all():
-    assert flatten.detect_fact_table(RELATIONSHIPS, []) == ""
-
-
 # ------------------------------------------------------------------ the join walk
 
 
@@ -84,9 +71,14 @@ def test_a_deeper_hop_joins_to_the_previous_hop_not_to_the_fact_table(connection
     assert by_prefix["Category"].parent_alias == by_prefix["SubCategory"].alias
 
 
-def test_a_table_the_walk_never_reaches_stays_a_side_table(connection):
-    plan = flatten.join_plan("Transactions", RELATIONSHIPS, TABLE_NAMES)
-    assert plan.side_tables == ["Calendar"]
+def test_a_table_the_walk_never_reaches_is_simply_a_plan_with_no_joins(connection):
+    """There is no "side table" any more: every table gets its own plan, and a table
+    nothing links out of is that plan with an empty join list."""
+    plan = flatten.join_plan("Calendar", RELATIONSHIPS, TABLE_NAMES)
+    assert plan.joins == []
+    frame = flatten.flatten_main_table(connection, plan)
+    assert list(frame.columns) == ["TheDate", "MonthName"]
+    assert len(frame) == 1
 
 
 def test_the_walk_stops_at_the_depth_limit(connection):
@@ -162,12 +154,6 @@ def test_an_identifier_containing_a_quote_is_handled(connection):
     assert "Odd - Note" in frame.columns
 
 
-def test_a_side_table_loads_whole(connection):
-    frame = flatten.load_side_table(connection, "Calendar")
-    assert list(frame.columns) == ["TheDate", "MonthName"]
-    assert len(frame) == 1
-
-
 # ------------------------------------------------------------------ names charts can read
 
 
@@ -205,6 +191,92 @@ def test_a_rename_that_would_collide_keeps_both_columns(connection):
     assert len([name for name in frame.columns if name.startswith("Price Net")]) == 2
 
 
-def test_a_side_table_is_cleaned_the_same_way(connection):
+def test_an_unlinked_table_is_cleaned_the_same_way(connection):
     connection.execute('CREATE TABLE Budget("Plan.Amount" DOUBLE)')
-    assert "Plan Amount" in flatten.load_side_table(connection, "Budget").columns
+    plan = flatten.join_plan("Budget", [], ["Budget"])
+    assert "Plan Amount" in flatten.flatten_main_table(connection, plan).columns
+
+
+# ------------------------------------------------- phase 39: every table, one filter
+
+
+#: Employee Master with two children that are not related to each other. The shape phase 39
+#: was written for, and the one the old single-table flattening could not serve.
+SIBLINGS = [
+    Relationship("Salary", "EmpID", "EmployeeMaster", "EmpID"),
+    Relationship("Attendance", "EmpID", "EmployeeMaster", "EmpID"),
+]
+
+SIBLING_TABLES = ["EmployeeMaster", "Salary", "Attendance"]
+
+
+@pytest.fixture
+def people():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE EmployeeMaster(EmpID INT, EmpName VARCHAR, Department VARCHAR)")
+    con.execute("CREATE TABLE Salary(SalID INT, EmpID INT, Amount DOUBLE)")
+    con.execute("CREATE TABLE Attendance(AttID INT, EmpID INT, Days INT)")
+    con.execute("INSERT INTO EmployeeMaster VALUES (1,'Asha','HR'),(2,'Ravi','Ops')")
+    con.execute("INSERT INTO Salary VALUES (1,1,50000.0),(2,2,60000.0)")
+    con.execute("INSERT INTO Attendance VALUES (1,1,20),(2,2,25)")
+    try:
+        yield con
+    finally:
+        con.close()
+
+
+def test_both_children_carry_the_parents_columns_under_the_same_name(people):
+    """The bug phase 39 exists for: with Salary as the one flattened table, Attendance was
+    embedded raw, had no Department column at all, and a Department filter could not reach
+    it - or, worse, emptied it."""
+    tables, _ = flatten.flatten_every_table(people, SIBLINGS, SIBLING_TABLES)
+
+    for name in ("Salary", "Attendance"):
+        assert "EmployeeMaster - Department" in tables[name].columns, name
+
+
+def test_the_parent_itself_carries_the_same_prefixed_name(people):
+    """Otherwise the one table the filter missed would be the table the column came from."""
+    tables, _ = flatten.flatten_every_table(people, SIBLINGS, SIBLING_TABLES)
+    columns = tables["EmployeeMaster"].columns
+    assert "Department" in columns
+    assert "EmployeeMaster - Department" in columns
+
+
+def test_a_parents_own_key_is_not_repeated_under_a_prefixed_name(people):
+    """`EmployeeMaster - EmpID` would be a second column of identical values with no way to
+    tell which of the two to filter on."""
+    tables, _ = flatten.flatten_every_table(people, SIBLINGS, SIBLING_TABLES)
+    assert "EmployeeMaster - EmpID" not in tables["EmployeeMaster"].columns
+
+
+def test_no_table_is_ever_joined_to_a_sibling(people):
+    """Row counts are the test that matters: a sibling join would multiply them, and every
+    total on the page with them."""
+    tables, _ = flatten.flatten_every_table(people, SIBLINGS, SIBLING_TABLES)
+    assert [len(tables[name]) for name in SIBLING_TABLES] == [2, 2, 2]
+    assert "Attendance - Days" not in tables["Salary"].columns
+
+
+def test_a_table_nothing_links_to_keeps_its_columns_to_itself(people):
+    """A Budget at another grain gains nothing and loses nothing - and the runtime skips a
+    filter it cannot answer rather than emptying it."""
+    people.execute("CREATE TABLE Budget(BudgetID INT, Amount DOUBLE)")
+    tables, _ = flatten.flatten_every_table(
+        people, SIBLINGS, [*SIBLING_TABLES, "Budget"]
+    )
+    assert list(tables["Budget"].columns) == ["BudgetID", "Amount"]
+
+
+def test_a_hierarchy_still_reaches_every_level_from_every_table(connection):
+    """Each table walks its own parents, so the three-level hierarchy is still three hops -
+    and Customer, which used to be a master only, is now flattened in its own right too."""
+    tables, description = flatten.flatten_every_table(
+        connection, RELATIONSHIPS, TABLE_NAMES
+    )
+
+    assert set(tables) == set(TABLE_NAMES)
+    assert "Category - CatName" in tables["Transactions"].columns
+    assert "Category - CatName" in tables["Stock"].columns
+    assert len(tables["Stock"]) == 1
+    assert "Transactions" in description and "Calendar" in description

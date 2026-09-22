@@ -6,6 +6,12 @@ their totals are computed in `assets/runtime.js`, in the reader's browser, with 
 no Python anywhere near them. Asserting the *source text* of those functions would only
 prove they were typed - so the functions are lifted out and actually run.
 
+Since phase 39 the *filtering* is lifted the same way, for the same reason and one more:
+`matchesGlobal` is now the piece that decides whether one filter reaches a related table,
+and its two failure modes - narrowing a table it should have left alone, and emptying one
+that simply does not carry the column - both look exactly like a working dashboard from
+Python.
+
 Skipped when Node isn't installed. A machine with no Node still runs every other test, and
 the alternative - pretending a `"median" in source` check is a test of the median - would be
 worse than an honest skip.
@@ -25,6 +31,11 @@ from live_dashboard import html_export
 #: possible; a rewrite that nests them differently fails loudly here rather than silently.
 LIFTED = ("quantile", "uniqueValues", "aggregate", "formatNumber")
 
+#: The filtering half, lifted the same way. They read two module-level variables -
+#: `globalFilters` and `columnIndex` - which each test declares for itself, so a test can
+#: put the page in a state no sequence of clicks would be needed to reach.
+LIFTED_FILTERS = ("hasColumn", "matchesGlobal")
+
 
 def _function_source(runtime: str, name: str) -> str:
     match = re.search(r"\n  function " + name + r"\(.*?\n  \}\n", runtime, re.DOTALL)
@@ -32,7 +43,7 @@ def _function_source(runtime: str, name: str) -> str:
     return match.group(0)
 
 
-def _run(script: str) -> dict:
+def _run(script: str, names: tuple[str, ...] = LIFTED) -> dict:
     """Runs the lifted functions plus `script`, and returns what it printed as JSON."""
     node = shutil.which("node")
     if not node:
@@ -42,7 +53,7 @@ def _run(script: str) -> dict:
     fractions = re.search(r"\n  var QUANTILE_FRACTIONS = .*?;\n", runtime, re.DOTALL)
     assert fractions, "QUANTILE_FRACTIONS is no longer a plain declaration in runtime.js"
     source = (fractions.group(0)
-              + "".join(_function_source(runtime, name) for name in LIFTED) + script)
+              + "".join(_function_source(runtime, name) for name in names) + script)
     try:
         finished = subprocess.run(
             [node, "--input-type=module", "-e", source],
@@ -135,3 +146,113 @@ def test_counting_different_values_is_not_confused_by_javascript_itself():
     console.log(JSON.stringify({ distinct: aggregate(rows, "name", "distinct") }));
     """)
     assert answers["distinct"] == 3
+
+
+
+# ------------------------------------------------- phase 39: filters, run rather than read
+
+
+def _run_filters(script: str) -> dict:
+    """The filtering functions, with a page state the script sets up itself."""
+    return _run(script, LIFTED_FILTERS)
+
+
+#: Employee Master's Department carried onto Salary and Attendance, with a Budget table at
+#: another grain that never heard of it. The shape phase 39 exists for.
+TABLES = """
+var columnIndex = {
+  Salary: { "EmployeeMaster - Department": true, Amount: true },
+  Attendance: { "EmployeeMaster - Department": true, Days: true },
+  Budget: { Plan: true }
+};
+var globalFilters = {};
+function keep(rows, table) {
+  return rows.filter(function (row) { return matchesGlobal(row, table); });
+}
+"""
+
+
+def test_one_filter_narrows_every_table_that_carries_the_column():
+    """The whole point of the phase: Department = HR must reach the salary total and the
+    attendance total together, though the two tables are not related to each other."""
+    answers = _run_filters(TABLES + """
+    globalFilters["EmployeeMaster - Department"] = { kind: "values", values: ["HR"] };
+    var salary = [
+      {"EmployeeMaster - Department": "HR", Amount: 10},
+      {"EmployeeMaster - Department": "Ops", Amount: 20}
+    ];
+    var attendance = [
+      {"EmployeeMaster - Department": "HR", Days: 20},
+      {"EmployeeMaster - Department": "Ops", Days: 25}
+    ];
+    console.log(JSON.stringify({
+      salary: keep(salary, "Salary").length,
+      attendance: keep(attendance, "Attendance").length
+    }));
+    """)
+
+    assert answers["salary"] == 1
+    assert answers["attendance"] == 1
+
+
+def test_a_table_without_the_column_is_left_alone_rather_than_emptied():
+    """The bug underneath the bug: a missing column counted as "no match", so a Department
+    filter did not fail to narrow the Budget table - it wiped it out."""
+    answers = _run_filters(TABLES + """
+    globalFilters["EmployeeMaster - Department"] = { kind: "values", values: ["HR"] };
+    var budget = [{ Plan: 100 }, { Plan: 200 }];
+    console.log(JSON.stringify({ budget: keep(budget, "Budget").length }));
+    """)
+
+    assert answers["budget"] == 2
+
+
+def test_a_range_filter_keeps_only_what_is_between_both_handles():
+    """Phase 39 gave the number filter a second handle. The rule always carried both ends;
+    only the widget was sending max: null."""
+    answers = _run_filters(TABLES + """
+    globalFilters["Amount"] = { kind: "range", min: 30000, max: 60000 };
+    var rows = [
+      {Amount: 20000}, {Amount: 30000}, {Amount: 45000},
+      {Amount: 60000}, {Amount: 75000}, {Amount: null}
+    ];
+    var kept = rows.filter(function (row) { return matchesGlobal(row, "Unknown"); });
+    console.log(JSON.stringify({ kept: kept.map(function (row) { return row.Amount; }) }));
+    """)
+
+    # Both ends inclusive, and a row with no amount at all is not "between" anything.
+    assert answers["kept"] == [30000, 45000, 60000]
+
+
+def test_an_open_ended_range_still_works_from_one_handle():
+    answers = _run_filters(TABLES + """
+    var rows = [{Amount: 10}, {Amount: 50}, {Amount: 90}];
+    globalFilters["Amount"] = { kind: "range", min: 40, max: null };
+    var from = rows.filter(function (row) { return matchesGlobal(row, "Unknown"); }).length;
+    globalFilters["Amount"] = { kind: "range", min: null, max: 40 };
+    var upTo = rows.filter(function (row) { return matchesGlobal(row, "Unknown"); }).length;
+    console.log(JSON.stringify({ from: from, upTo: upTo }));
+    """)
+
+    assert answers["from"] == 2
+    assert answers["upTo"] == 1
+
+
+def test_a_column_named_after_a_javascript_builtin_is_still_matched():
+    """`columnIndex` entries are compared against `true`, so a table with a column called
+    "constructor" must not read as carrying every column there is."""
+    answers = _run_filters("""
+    var columnIndex = { Odd: Object.create(null) };
+    columnIndex.Odd["Region"] = true;
+    var globalFilters = {};
+    console.log(JSON.stringify({
+      real: hasColumn("Odd", "Region"),
+      inherited: hasColumn("Odd", "toString"),
+      unknownTable: hasColumn("NotHere", "Region")
+    }));
+    """)
+
+    assert answers["real"] is True
+    assert answers["inherited"] is False
+    # An unknown table behaves as it did before any of this existed.
+    assert answers["unknownTable"] is True

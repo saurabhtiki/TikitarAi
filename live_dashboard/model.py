@@ -127,6 +127,28 @@ DASHBOARD_CHART_LABELS: dict[str, str] = {
 CHARTS_NEEDING_COLOUR = frozenset({CHART_BAR_STACKED, CHART_BAR_GROUPED, CHART_HEATMAP})
 CHARTS_NEEDING_SECOND_MEASURE = frozenset({CHART_COMBO})
 
+#: Which side of the chart an extra number is measured against.
+#:
+#: The right axis exists for one reason: two numbers in different units. Average salary
+#: in rupees and headcount in people share a chart happily and an axis not at all - on one
+#: scale the headcount is a flat line along the bottom. Numbers in the SAME unit (minimum,
+#: average and maximum salary) belong on the left together, where their heights can be
+#: compared, which is the whole point of drawing them side by side.
+AXIS_LEFT = "left"
+AXIS_RIGHT = "right"
+MEASURE_AXES = (AXIS_LEFT, AXIS_RIGHT)
+
+#: How many numbers one chart may draw, the first included. Four is already a busy chart;
+#: past that the bars are too thin to compare, which is the only reason to draw them.
+MAX_MEASURES_PER_CHART = 4
+
+#: The shapes that can draw more than one number. A pie has one whole to divide, a
+#: histogram one spread to show, a heatmap one number per cell, and a box plot's single
+#: number is already five.
+MULTI_MEASURE_CHARTS = (
+    CHART_BAR, CHART_BAR_HORIZONTAL, CHART_LINE, CHART_AREA, CHART_COMBO,
+)
+
 # A histogram bins one column by itself: asking what to break it down by has no answer.
 CHARTS_WITHOUT_GROUP_BY = frozenset({CHART_HISTOGRAM})
 
@@ -195,6 +217,12 @@ FILTER_TOP = "top"
 FILTER_LEFT = "left"
 FILTER_POSITIONS = (FILTER_TOP, FILTER_LEFT)
 
+#: Where filters go when nobody has said otherwise (phase 37). Left rather than top: a top
+#: strip pushes the first row of visuals below the fold as soon as there are three filters,
+#: and a reader looks for the controls down the side the way every report tool trains them
+#: to. A dashboard saved before this carries its own choice and keeps it.
+DEFAULT_FILTER_POSITION = FILTER_LEFT
+
 # How a card's number is written. A whitelist rather than a format string - see
 # `clean_properties` for why nothing the user types becomes code.
 FORMAT_PLAIN = "plain"
@@ -218,6 +246,68 @@ MIN_PANEL_HEIGHT = 120
 MAX_PANEL_HEIGHT = 1200
 
 MAX_CORNER_RADIUS = 2.0
+
+# ---------------------------------------------------------------------- look (phase 38)
+#
+# Seven settings the user can ask for in words ("show data labels", "make it tall", "put the
+# legend at the bottom"). Every one is a named choice from a short list, for the reason the
+# whole of `clean_properties` exists: these values are written into a page a reader opens, so
+# a free-form value would be a way into the exported file. A word outside the list is dropped
+# with a log line, and `panel_problems` is what tells the user it went.
+
+# Numbers printed on the bars, points or slices. On a pie or a donut it is the share of the
+# whole rather than the raw number, which is the question a pie is asked.
+LABELS_ON = "yes"
+LABELS_OFF = "no"
+YES_NO = (LABELS_ON, LABELS_OFF)
+
+#: Where the legend goes, and "none" to take it away.
+LEGEND_RIGHT = "right"
+LEGEND_BOTTOM = "bottom"
+LEGEND_TOP = "top"
+LEGEND_NONE = "none"
+LEGEND_POSITIONS = (LEGEND_RIGHT, LEGEND_BOTTOM, LEGEND_TOP, LEGEND_NONE)
+
+#: One colour for a chart with one series. Named rather than a hex code the user types: a
+#: name is a value we choose, a hex code is a value they do, and only one of those can be
+#: checked. A chart broken down by a colour column ignores this - the palette is carrying
+#: the breakdown there, and overpainting it would erase the thing the legend explains.
+NAMED_COLOURS: dict[str, str] = {
+    "blue": "#2563eb",
+    "green": "#16a34a",
+    "red": "#dc2626",
+    "orange": "#ea580c",
+    "purple": "#7c3aed",
+    "grey": "#64748b",
+}
+
+#: How tall a chart is drawn, as three words rather than a pixel count. `height:N` still
+#: works and still wins, so a dashboard saved before this opens exactly as it did.
+SIZE_SHORT = "short"
+SIZE_MEDIUM = "medium"
+SIZE_TALL = "tall"
+PANEL_SIZES: dict[str, int] = {SIZE_SHORT: 220, SIZE_MEDIUM: 320, SIZE_TALL: 480}
+
+#: How wide a panel sits in its row. "full" is a row to itself even where another visual
+#: shares the row number; "half" is the ordinary side-by-side. Applied as a CSS class on the
+#: panel rather than an inline width, so the stylesheet keeps deciding the actual number.
+WIDTH_HALF = "half"
+WIDTH_FULL = "full"
+PANEL_WIDTHS = (WIDTH_HALF, WIDTH_FULL)
+
+#: How big a card's number is printed. Cards ignored size entirely before phase 38.
+CARD_SMALL = "small"
+CARD_MEDIUM = "medium"
+CARD_LARGE = "large"
+CARD_SIZES = (CARD_SMALL, CARD_MEDIUM, CARD_LARGE)
+
+#: The chart shapes `labels:yes` can print a number on. Declared here rather than in
+#: `vega_spec` because it is a fact about the vocabulary - the AI catalog and the "what can I
+#: ask" help both read it, and neither should have to import the drawing code to find out.
+LABELLABLE_CHARTS = (
+    CHART_BAR, CHART_BAR_HORIZONTAL, CHART_BAR_STACKED, CHART_BAR_GROUPED,
+    CHART_LINE, CHART_AREA, CHART_PIE, CHART_DONUT,
+)
 
 # The JSON `to_json` writes carries its own version, so a dashboard saved today can be read
 # back after the shape changes rather than failing to load with no explanation.
@@ -257,18 +347,22 @@ class PanelSpec:
             title.
         visual_type / sub_type: columns 2 and 3. `sub_type` is only meaningful against its
             own `visual_type`; `sub_types_for` is the pairing.
-        source_table: the table this panel reads. Normally the flattened main table; a
-            filter or card over a separate side table names that instead.
+        source_table: the table this panel reads. Every table is flattened since phase 39,
+            so this is whichever of them carries the columns below - including a parent's
+            columns, which each child carries under a `Parent - Column` name.
         source_columns: column 4, the columns the user picked. Kept alongside the specific
             roles below rather than replaced by them, because a table panel has no roles at
             all - its columns *are* what it shows.
         measure_column / aggregation: column 5's "what to show" - the number, and what to do
             with it. A count needs no measure column, which is why the two are separate
             fields rather than one sentence to be parsed.
-        measure_column_2: the second number, for the one shape that draws two at once - a
-            combo chart's line over its bars. A field rather than a second panel because the
-            two share an axis; if a third shape ever wants three numbers this should become
-            a list before it becomes `measure_column_3`.
+        extra_measures: the other numbers this chart draws beside `measure_column`, each
+            with its own aggregation and its own side of the chart -
+            `{"column", "aggregation", "axis"}`, already whitelisted by
+            `clean_measures`. This was a single `measure_column_2` until phase 38, which
+            could only ever draw a combo chart's line; a list is what lets one chart show
+            the minimum, the average and the maximum of the same column. A dashboard
+            saved with the old field is migrated on the way in by `_panel_from_dict`.
         group_by: what the measure is broken down by - the category axis, or the slices.
         colour_by: the optional second breakdown that becomes a legend.
         sort / top_n: how categories are ordered and how many survive. `top_n` of 0 means
@@ -286,7 +380,7 @@ class PanelSpec:
     source_table: str = ""
     source_columns: list[str] = field(default_factory=list)
     measure_column: str = ""
-    measure_column_2: str = ""
+    extra_measures: list[dict] = field(default_factory=list)
     aggregation: str = AGG_SUM
     group_by: str = ""
     colour_by: str = ""
@@ -314,9 +408,36 @@ class PanelSpec:
             return ""
         return self.source_columns[0] if self.source_columns else ""
 
+    def measures_on(self, axis: str) -> list[dict]:
+        """Every number drawn against one side of the chart, the panel's own included.
+
+        One answer, asked by the spec builder, the exporter and the wording of the round,
+        because deciding it three times is how a legend ends up naming a line that was
+        drawn against the other axis.
+        """
+        mine: list[dict] = []
+        if axis == AXIS_LEFT:
+            # The panel's own measure is always the left axis. There is nothing to be
+            # "second" to otherwise.
+            mine.append({"column": self.measure_column, "aggregation": self.aggregation,
+                         "axis": AXIS_LEFT})
+        return mine + [dict(one) for one in self.extra_measures
+                       if one.get("axis") == axis]
+
+    def draws_several_measures(self) -> bool:
+        """Whether this chart draws more than the one number every chart draws."""
+        return bool(self.extra_measures)
+
     def height(self) -> int:
-        """The panel's drawn height, already clamped by `clean_properties`."""
-        return int(self.properties.get("height", DEFAULT_CHART_HEIGHT))
+        """The panel's drawn height, already clamped by `clean_properties`.
+
+        An exact `height:N` wins over `size:tall`. The two mean the same thing and a
+        dashboard saved before phase 38 carries the number, so the number is the one that
+        must keep working - `size` is the word the AI is taught to use from now on.
+        """
+        if "height" in self.properties:
+            return int(self.properties["height"])
+        return PANEL_SIZES.get(str(self.properties.get("size", "")), DEFAULT_CHART_HEIGHT)
 
 
 @dataclass
@@ -324,12 +445,13 @@ class DashboardSpec:
     """A whole dashboard: its look, its data source, and its ordered panels.
 
     Attributes:
-        main_table: which table's rows are embedded. Empty means "detect it", which
-            `flatten.detect_fact_table` answers - left empty rather than filled in on first
-            render, so detection keeps improving as the user confirms more relationships and
-            only stops the moment they choose for themselves.
+        main_table: **kept only so a dashboard saved before phase 39 still opens.** It is
+            never read: every table is embedded now, each carrying the columns of the
+            parents it can reach, so there is no one table a dashboard is built from and
+            each visual names its own `source_table`.
         theme: the mode the exported page *opens* in. The reader can still toggle.
-        filter_position: top strip or left rail.
+        filter_position: top strip or left rail. Left by default - see
+            `DEFAULT_FILTER_POSITION`.
         logo_bytes / logo_mime: the picture for the header, validated on the way in. Bytes
             rather than a path, because the exported file has to carry it.
     """
@@ -339,7 +461,7 @@ class DashboardSpec:
     logo_bytes: bytes | None = None
     logo_mime: str = ""
     theme: str = THEME_LIGHT
-    filter_position: str = FILTER_TOP
+    filter_position: str = DEFAULT_FILTER_POSITION
     main_table: str = ""
     palette: str = PALETTE_DEFAULT
     panels: list[PanelSpec] = field(default_factory=list)
@@ -420,9 +542,153 @@ def clean_properties(raw: str | dict | None) -> dict:
                 cleaned["height"] = max(MIN_PANEL_HEIGHT, min(int(float(text)), MAX_PANEL_HEIGHT))
             except ValueError:
                 logger.info("Ignoring an unreadable height %r in a panel's properties.", text)
+        elif name in {"labels", "data_labels", "axis_titles"}:
+            key_name = "labels" if name in {"labels", "data_labels"} else "axis_titles"
+            word = text.lower()
+            if word in {"yes", "true", "on", "1"}:
+                cleaned[key_name] = True
+            elif word in {"no", "false", "off", "0"}:
+                cleaned[key_name] = False
+            else:
+                logger.info("Ignoring an unreadable %s %r in a panel's properties.", key_name, text)
+        elif name == "legend":
+            if text.lower() in LEGEND_POSITIONS:
+                cleaned["legend"] = text.lower()
+            else:
+                logger.info("Ignoring an unknown legend position %r.", text)
+        elif name in {"colour", "color"}:
+            if text.lower() in NAMED_COLOURS:
+                cleaned["colour"] = text.lower()
+            else:
+                logger.info("Ignoring an unknown colour %r in a panel's properties.", text)
+        elif name == "size":
+            if text.lower() in PANEL_SIZES:
+                cleaned["size"] = text.lower()
+            else:
+                logger.info("Ignoring an unknown size %r in a panel's properties.", text)
+        elif name == "width":
+            if text.lower() in PANEL_WIDTHS:
+                cleaned["width"] = text.lower()
+            else:
+                logger.info("Ignoring an unknown width %r in a panel's properties.", text)
+        elif name == "card_size":
+            if text.lower() in CARD_SIZES:
+                cleaned["card_size"] = text.lower()
+            else:
+                logger.info("Ignoring an unknown card size %r in a panel's properties.", text)
         else:
             logger.info("Ignoring an unknown panel property %r.", name)
     return cleaned
+
+
+def _extra_measures_from_dict(raw: dict) -> list[dict]:
+    """The extra measures a saved panel carries, including one saved before phase 38.
+
+    A dashboard saved earlier has `measure_column_2` and no list. It becomes one extra
+    measure on the right axis with the panel's own aggregation, which is exactly what the
+    combo chart drew at the time - so the file opens showing what it always showed.
+    """
+    measures = clean_measures(raw.get("extra_measures"))
+    if measures:
+        return measures
+
+    older = str(raw.get("measure_column_2") or "").strip()
+    if not older:
+        return []
+    return clean_measures([{
+        "column": older,
+        "aggregation": str(raw.get("aggregation") or AGG_SUM),
+        "axis": AXIS_RIGHT,
+    }])
+
+
+def clean_measures(raw) -> list[dict]:
+    """The extra measures, whitelisted the way `clean_properties` whitelists settings.
+
+    Each entry keeps only three things, and each of the three is checked: a column name
+    (checked against the real data later, by `panel_problems`), an aggregation that is in
+    the catalog, and a side of the chart that is one of two words. Anything else is
+    dropped with a log line.
+
+    The four transform aggregations are refused here rather than drawn wrongly. Each one
+    is a total computed *against the other totals on the chart* - a percentage of what is
+    on screen, a total running along it - and a second such column on the same chart is
+    two answers to a question with one.
+    """
+    if not isinstance(raw, (list, tuple)):
+        return []
+
+    cleaned: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            logger.info("Ignoring an extra measure that isn't a set of fields: %r.", entry)
+            continue
+
+        column = str(entry.get("column") or "").strip()
+        aggregation = str(entry.get("aggregation") or "").strip().lower()
+        axis = str(entry.get("axis") or AXIS_LEFT).strip().lower()
+
+        if aggregation not in DASHBOARD_AGGREGATIONS:
+            logger.info("Ignoring an extra measure with an unknown total %r.", aggregation)
+            continue
+        if aggregation in TRANSFORM_AGGREGATIONS:
+            logger.info("Ignoring an extra measure totalled as %r - it is measured "
+                        "against the chart it is on.", aggregation)
+            continue
+        if not column and aggregation != AGG_COUNT:
+            logger.info("Ignoring an extra measure with no column to total.")
+            continue
+        if axis not in MEASURE_AXES:
+            logger.info("Ignoring an extra measure on an unknown axis %r.", axis)
+            continue
+
+        cleaned.append({"column": column, "aggregation": aggregation, "axis": axis})
+
+    # The panel's own measure is the first of the four, so the extras stop one short.
+    if len(cleaned) > MAX_MEASURES_PER_CHART - 1:
+        logger.info("Keeping only the first %d extra measures of %d.",
+                    MAX_MEASURES_PER_CHART - 1, len(cleaned))
+        cleaned = cleaned[:MAX_MEASURES_PER_CHART - 1]
+    return cleaned
+
+
+def measures_text(measures: list[dict]) -> str:
+    """The extra measures as the one line the AI writes them on, for editing and for the
+    listing every round is shown. `"Salary:minimum:left; Headcount:count:right"`."""
+    return "; ".join(
+        f"{one.get('column', '')}:{one.get('aggregation', '')}:{one.get('axis', '')}"
+        for one in measures
+    )
+
+
+def property_problems(panel: "PanelSpec") -> str:
+    """A sentence about a setting this visual understood but cannot use - or "".
+
+    Separate from `panel_problems` on purpose. That one decides whether a visual can be
+    *drawn*, and refusing to draw a perfectly good heatmap because labels were asked for
+    would be a bad trade. This one is a note beside a visual that was drawn anyway: the user
+    asked for something and did not get it, and saying so is the difference between a
+    setting that quietly does nothing and one that has a reason.
+    """
+    if panel.visual_type != VISUAL_CHART:
+        if panel.properties.get("labels"):
+            return "Only charts can print their numbers on themselves."
+        return ""
+
+    if panel.properties.get("labels") and panel.extra_measures:
+        return ("This chart draws several numbers, so data labels were left off - there is "
+                "no room to write one over each.")
+
+    if panel.properties.get("labels") and panel.sub_type not in LABELLABLE_CHARTS:
+        shape = DASHBOARD_CHART_LABELS.get(panel.sub_type, panel.sub_type)
+        return (f"A {shape} has nowhere to print its numbers, so data labels were left off. "
+                "A bar or a pie can show them.")
+
+    if panel.properties.get("colour") and panel.colour_by:
+        return ("This chart is already split into colours by "
+                f"'{panel.colour_by}', so one colour was not applied.")
+
+    return ""
 
 
 def properties_text(properties: dict) -> str:
@@ -442,6 +708,13 @@ def properties_text(properties: dict) -> str:
         parts.append(f"currency:{properties['currency']}")
     if "height" in properties:
         parts.append(f"height:{properties['height']}")
+    if "labels" in properties:
+        parts.append(f"labels:{'yes' if properties['labels'] else 'no'}")
+    if "axis_titles" in properties:
+        parts.append(f"axis_titles:{'yes' if properties['axis_titles'] else 'no'}")
+    for name in ("legend", "colour", "size", "width", "card_size"):
+        if name in properties:
+            parts.append(f"{name}:{properties[name]}")
     return ", ".join(parts)
 
 
@@ -558,8 +831,8 @@ def panel_problems(
 ) -> str:
     """Why this panel can't be drawn, or an empty string when it can.
 
-    `available_columns` maps each embedded table name to the columns it actually carries -
-    the flattened main table plus any side tables. A column that is not there is the
+    `available_columns` maps each embedded table name to the columns it actually carries,
+    its parents' columns included. A column that is not there is the
     requirement's warning case: the panel names a combination the confirmed relationships do
     not reach, and the honest answer is to say so rather than to guess a join.
 
@@ -575,8 +848,8 @@ def panel_problems(
     columns = available_columns.get(panel.source_table)
     if columns is None:
         return (
-            f"'{panel.source_table}' isn't part of this dashboard's data. Either pick the "
-            "main table, or confirm a link to it in Setup, under Relationships."
+            f"'{panel.source_table}' isn't one of the tables loaded. Load it in Setup, or "
+            "ask for this visual over a table you do have."
         )
 
     def missing(column: str) -> bool:
@@ -636,11 +909,24 @@ def panel_problems(
                 "needs a second breakdown. Pick a column to colour it by."
             )
 
-        if panel.sub_type in CHARTS_NEEDING_SECOND_MEASURE:
-            if not panel.measure_column_2:
-                return "A combo chart draws a line over its bars. Pick the second number."
-            if missing(panel.measure_column_2):
-                return _unreachable(panel.measure_column_2, panel.source_table)
+        if (panel.sub_type in CHARTS_NEEDING_SECOND_MEASURE
+                and not panel.measures_on(AXIS_RIGHT)):
+            return ("A combo chart draws a line over its bars. Add a second number on "
+                    "the right axis.")
+
+        if panel.extra_measures:
+            if panel.sub_type not in MULTI_MEASURE_CHARTS:
+                shape = DASHBOARD_CHART_LABELS.get(panel.sub_type, panel.sub_type).lower()
+                return (f"A {shape} draws one number, so it can't show several at once. "
+                        "A bar or a line chart can.")
+            if panel.aggregation in TRANSFORM_AGGREGATIONS:
+                total = DASHBOARD_AGGREGATIONS.get(panel.aggregation, panel.aggregation)
+                return (f"'{total}' is measured against the rest of this chart, so no "
+                        "other number can share it.")
+            for one in panel.extra_measures:
+                column = str(one.get("column") or "")
+                if one.get("aggregation") != AGG_COUNT and missing(column):
+                    return _unreachable(column, panel.source_table)
 
         # A running total adds each category to the ones before it, so the order has to mean
         # something. Over unordered labels the climbing line is an accident of sorting.
@@ -674,7 +960,7 @@ def _panel_to_dict(panel: PanelSpec) -> dict:
         "source_table": panel.source_table,
         "source_columns": list(panel.source_columns),
         "measure_column": panel.measure_column,
-        "measure_column_2": panel.measure_column_2,
+        "extra_measures": [dict(one) for one in panel.extra_measures],
         "aggregation": panel.aggregation,
         "group_by": panel.group_by,
         "colour_by": panel.colour_by,
@@ -733,7 +1019,7 @@ def _panel_from_dict(raw: dict) -> PanelSpec:
         source_table=str(raw.get("source_table") or ""),
         source_columns=[str(name) for name in raw.get("source_columns") or []],
         measure_column=str(raw.get("measure_column") or ""),
-        measure_column_2=str(raw.get("measure_column_2") or ""),
+        extra_measures=_extra_measures_from_dict(raw),
         aggregation=str(raw.get("aggregation") or AGG_SUM),
         group_by=str(raw.get("group_by") or ""),
         colour_by=str(raw.get("colour_by") or ""),
@@ -764,7 +1050,8 @@ def to_json(spec: DashboardSpec) -> str:
             "logo_mime": spec.logo_mime,
             "theme": spec.theme if spec.theme in THEMES else THEME_LIGHT,
             "filter_position": (
-                spec.filter_position if spec.filter_position in FILTER_POSITIONS else FILTER_TOP
+                spec.filter_position if spec.filter_position in FILTER_POSITIONS
+                else DEFAULT_FILTER_POSITION
             ),
             "main_table": spec.main_table,
             "palette": spec.palette,
@@ -819,7 +1106,7 @@ def from_json(text: str) -> DashboardSpec:
         logo_bytes = None
 
     theme = str(settings.get("theme") or THEME_LIGHT)
-    position = str(settings.get("filter_position") or FILTER_TOP)
+    position = str(settings.get("filter_position") or DEFAULT_FILTER_POSITION)
 
     return DashboardSpec(
         title=str(settings.get("title") or ""),
@@ -827,7 +1114,7 @@ def from_json(text: str) -> DashboardSpec:
         logo_bytes=logo_bytes,
         logo_mime=str(settings.get("logo_mime") or ""),
         theme=theme if theme in THEMES else THEME_LIGHT,
-        filter_position=position if position in FILTER_POSITIONS else FILTER_TOP,
+        filter_position=position if position in FILTER_POSITIONS else DEFAULT_FILTER_POSITION,
         main_table=str(settings.get("main_table") or ""),
         palette=str(settings.get("palette") or PALETTE_DEFAULT),
         # Anything saved between phases 33 and 35 carries an "ai_guidance" setting. It is

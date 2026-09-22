@@ -103,7 +103,10 @@ def _stub_test(monkeypatch, frame=RESULT, sql=STUB_SQL, identity_columns=("emplo
 class TestTheView:
     def test_checks_is_offered_beside_chat(self, tmp_path, monkeypatch):
         app = _make_app(tmp_path, monkeypatch)
-        assert app.segmented_control(key="de_view").options == ["Setup", "Chat", "Checks"]
+        # Dashboard joined them in phase 37 - the same four views, in the order they are read.
+        assert app.segmented_control(key="de_view").options == [
+            "Setup", "Chat", "Checks", "Dashboard",
+        ]
 
     def test_without_data_it_asks_for_a_file_rather_than_showing_an_empty_form(self, tmp_path, monkeypatch):
         """Every criteria is written against the loaded schema, so an empty session has

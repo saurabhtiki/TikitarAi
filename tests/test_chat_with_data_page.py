@@ -187,7 +187,7 @@ class TestStepOneIsOnlyOnSetup:
     def test_chat_and_checks_show_no_step_one(self, tmp_path, monkeypatch):
         app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
 
-        for view in ("Chat", "Checks"):
+        for view in ("Chat", "Checks", "Dashboard"):
             app.session_state["de_view"] = view
             app.run()
             assert not any("Step 1" in expander.label for expander in app.status), view
@@ -229,6 +229,39 @@ class TestStepOneIsOnlyOnSetup:
 
         assert app.session_state["de_view"] == "Setup"
         assert any("Step 1" in expander.label for expander in app.status)
+
+
+class TestTheDashboardView:
+    """Phase 37: the dashboard is reachable from here, not only from Report Builder.
+
+    The same view on the same spec - the tables a dashboard is drawn from are the ones
+    loaded on this page, so asking a question and drawing the same figure were two screens
+    apart for no reason a user could see.
+    """
+
+    def test_the_dashboard_view_is_offered(self, tmp_path, monkeypatch):
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        assert "Dashboard" in app.segmented_control(key="de_view").options
+
+    def test_it_draws_the_same_dashboard_view_report_builder_does(self, tmp_path, monkeypatch):
+        app = _upload(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        app.session_state["de_view"] = "Dashboard"
+        app.run()
+
+        assert not app.exception
+        assert any("Interactive dashboard" in header.value for header in app.subheader)
+        # The spec lives in `live_dashboard.session`'s keys, so what is built here is what
+        # Report Builder opens and what a Task saves.
+        assert "ld_spec" in app.session_state
+
+    def test_with_nothing_loaded_it_asks_for_data_rather_than_showing_nothing(
+            self, tmp_path, monkeypatch):
+        app = _make_app(tmp_path, monkeypatch)
+        app.session_state["de_view"] = "Dashboard"
+        app.run()
+
+        assert any("Upload your data first" in info.value for info in app.info)
+        assert app.button(key="de_dashboard_go_to_setup_button")
 
 
 class TestRelationships:

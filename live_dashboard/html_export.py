@@ -42,11 +42,14 @@ from live_dashboard import payload as payload_module
 from live_dashboard import vega_spec
 from live_dashboard.exceptions import DashboardExportError
 from live_dashboard.model import (
+    CARD_SIZES,
     DashboardSpec,
     PanelSpec,
     THEME_DARK,
     VISUAL_CARD,
     VISUAL_CHART,
+    WIDTH_FULL,
+    WIDTH_HALF,
     group_into_rows,
     panel_problems,
 )
@@ -128,9 +131,32 @@ def _panel_style(panel: PanelSpec) -> str:
         parts.append("border:none")
     if "radius" in panel.properties:
         parts.append(f"border-radius:{panel.properties['radius']:g}rem")
-    if panel.visual_type != VISUAL_CARD and "height" in panel.properties:
-        parts.append(f"min-height:{int(panel.properties['height'])}px")
+    if panel.visual_type != VISUAL_CARD and ("height" in panel.properties
+                                             or "size" in panel.properties):
+        # `panel.height()` rather than the raw property: `size:tall` and `height:480` are the
+        # same request in two spellings, and only that method knows which one wins.
+        parts.append(f"min-height:{panel.height()}px")
     return ";".join(parts)
+
+
+def _panel_classes(panel: PanelSpec) -> str:
+    """The panel's CSS classes - its width, and a card's number size.
+
+    Classes rather than inline numbers: the stylesheet keeps deciding what "full" and "large"
+    actually measure, and a class name from a fixed list is one more thing that cannot carry
+    anything typed. Both come from `model.clean_properties`, so only the known words arrive.
+    """
+    classes = ["panel"]
+    if panel.properties.get("width") == WIDTH_FULL:
+        classes.append("panel-full")
+    elif panel.properties.get("width") == WIDTH_HALF:
+        # A row-mate makes "half" happen anyway by sharing the space. Asked for on its own,
+        # it would otherwise stretch to fill the row - `panel-half` caps it at half the row
+        # and leaves the rest blank, so "half" means the same thing either way.
+        classes.append("panel-half")
+    if panel.visual_type == VISUAL_CARD and panel.properties.get("card_size") in CARD_SIZES:
+        classes.append(f"card-{panel.properties['card_size']}")
+    return " ".join(classes)
 
 
 def _measure_label(panel: PanelSpec) -> str:
@@ -158,6 +184,7 @@ def _panel_for_template(panel: PanelSpec, problem: str) -> dict:
         "title": panel.display_title(),
         "measure_label": _measure_label(panel),
         "style": _panel_style(panel),
+        "classes": _panel_classes(panel),
         "problem": problem,
     }
 
@@ -201,8 +228,8 @@ def build_dashboard_html(spec: DashboardSpec, tables: dict[str, pd.DataFrame]) -
 
     Args:
         spec: the dashboard to draw.
-        tables: the data to embed, keyed by the name panels refer to it by - normally the
-            flattened main table plus any side tables.
+        tables: the data to embed, keyed by the name panels refer to it by - every table,
+            each already flattened with the parents it can reach.
 
     Returns:
         The complete document as text. The caller hands the same string to both the preview
@@ -247,7 +274,6 @@ def build_dashboard_html(spec: DashboardSpec, tables: dict[str, pd.DataFrame]) -
 
     document = payload_module.build_payload(
         tables=tables,
-        main_table=spec.main_table,
         panels=payload_panels,
         filters=payload_filters,
         settings={

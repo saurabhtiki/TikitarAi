@@ -137,10 +137,9 @@ def test_too_many_rows_is_refused_with_a_way_forward():
 def test_build_payload_carries_every_part_the_page_needs():
     document = p.build_payload(
         tables={"main": FRAME},
-        main_table="main",
         panels=[{"panel_id": "a"}],
         filters=[{"panel_id": "b"}],
         settings={"theme": "dark"},
     )
-    assert set(document) == {"tables", "main_table", "panels", "filters", "settings"}
+    assert set(document) == {"tables", "panels", "filters", "settings"}
     assert document["tables"]["main"]["columns"][0] == "Customer"

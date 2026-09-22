@@ -38,8 +38,10 @@ def test_every_chart_type_produces_something_drawable():
     encoded would fail here, rather than in a file already sitting in a reader's inbox.
     """
     for sub_type in m.CHART_SUB_TYPES:
-        built = vs.build_vega_spec(panel(sub_type=sub_type, measure_column_2="Quantity",
-                                         colour_by="Region"))
+        built = vs.build_vega_spec(panel(
+            sub_type=sub_type, colour_by="Region",
+            extra_measures=m.clean_measures([{"column": "Quantity", "aggregation": "sum", "axis": "right"}]),
+        ))
         if "layer" in built:
             assert all(layer["mark"]["type"] for layer in built["layer"]), sub_type
         else:
@@ -305,18 +307,38 @@ def test_a_box_plot_is_drawn_from_the_rows_rather_than_from_totals():
 
 
 def test_a_combo_chart_layers_a_line_over_its_bars_on_its_own_scale():
-    built = vs.build_vega_spec(panel(sub_type=m.CHART_COMBO, measure_column_2="Quantity"))
+    built = vs.build_vega_spec(panel(sub_type=m.CHART_COMBO,
+                                     extra_measures=m.clean_measures([{"column": "Quantity", "aggregation": "sum", "axis": "right"}])))
 
     assert "mark" not in built and "encoding" not in built
     bars, line = built["layer"]
     assert bars["mark"]["type"] == "bar"
     assert line["mark"]["type"] == "line"
-    assert bars["encoding"]["y"]["field"] == "Amount"
-    assert line["encoding"]["y"]["field"] == "Quantity"
-    # Two numbers in different units: one axis would flatten the smaller into the baseline.
-    assert built["resolve"]["scale"]["y"] == "independent"
+    # Both layers read the one folded column; which measure a layer draws is decided
+    # by the names it folds, not by the field it encodes.
+    assert bars["transform"][0]["fold"] == ["Sum of Amount"]
+    assert line["transform"][0]["fold"] == ["Sum of Quantity"]
+    assert built["resolve"] == {"scale": {"y": "independent"}}
+
+
+def test_several_measures_on_one_axis_share_one_scale_and_sit_side_by_side():
+    """The minimum, the average and the maximum of one column are the same quantity
+    measured three ways, so they belong on one axis - split the scale and a taller bar
+    can draw shorter than a smaller one."""
+    built = vs.build_vega_spec(panel(extra_measures=m.clean_measures([
+        {"column": "Amount", "aggregation": "minimum", "axis": "left"},
+        {"column": "Amount", "aggregation": "maximum", "axis": "left"},
+    ])))
+
+    assert "resolve" not in built
+    one_layer, = built["layer"]
+    assert one_layer["transform"][0]["fold"] == [
+        "Sum of Amount", "Smallest of Amount", "Largest of Amount",
+    ]
+    assert one_layer["encoding"]["xOffset"]["field"] == vs.MEASURE_NAME_FIELD
+    assert built["transform"][-1]["aggregate"][0]["as"] == "Sum of Amount"
     # A layered spec takes its selection on the layer the reader actually clicks.
-    assert bars["params"][0]["name"] == vs.SELECTION_NAME
+    assert one_layer["params"][0]["name"] == vs.SELECTION_NAME
 
 
 def test_a_percentage_of_total_is_a_join_then_a_division():

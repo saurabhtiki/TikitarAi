@@ -71,6 +71,9 @@ from analyst.charts import (
     SORT_LARGEST,
 )
 from live_dashboard import payload
+# For `measure_label` only: the name a measure is given is the column the chart aggregates
+# into, the entry in its legend and the words in this sentence, and those three must agree.
+from live_dashboard import vega_spec
 from live_dashboard.flatten import COLUMN_SEPARATOR
 from live_dashboard.model import (
     AGG_DISTINCT,
@@ -87,9 +90,11 @@ from live_dashboard.model import (
     DASHBOARD_CHART_LABELS,
     DEFAULT_CURRENCY,
     DashboardSpec,
+    FILTER_DROPDOWN,
     FILTER_LABELS,
+    FILTER_MULTISELECT,
     FILTER_POSITIONS,
-    FILTER_TOP,
+    DEFAULT_FILTER_POSITION,
     FORMAT_CURRENCY,
     PanelSpec,
     VISUAL_CARD,
@@ -97,9 +102,26 @@ from live_dashboard.model import (
     VISUAL_LABELS,
     VISUAL_TABLE,
     VISUAL_TYPES,
+    AXIS_LEFT,
+    AXIS_RIGHT,
+    CARD_SIZES,
+    CURRENCY_CODES,
+    LABELLABLE_CHARTS,
+    LABELS_ON,
+    LEGEND_POSITIONS,
+    MAX_MEASURES_PER_CHART,
+    MULTI_MEASURE_CHARTS,
+    NAMED_COLOURS,
+    NUMBER_FORMATS,
+    PANEL_SIZES,
+    PANEL_WIDTHS,
+    WIDTH_FULL,
+    clean_measures,
     clean_properties,
+    property_problems,
     default_sub_type,
     panel_problems,
+    measures_text,
     properties_text,
     sub_types_for,
 )
@@ -113,7 +135,7 @@ PROMPT_COLUMN_LIMIT = 80
 
 #: The most visuals one instruction may produce. A page of twenty is not a dashboard, it is
 #: a scroll, and the user can always ask again for more.
-MAX_PANELS = 10
+MAX_PANELS = 20
 
 #: How many charts sit side by side when the row numbers have to be worked out here.
 CHARTS_PER_ROW = 2
@@ -211,7 +233,7 @@ _CORE_RULES = """Hard rules:
 - A table names the columns it shows in `columns`.
 - Some sub-types need one more field, and are dropped without it:
   bar_stacked, bar_grouped and heatmap need `colour_by` (the second breakdown);
-  combo needs `measure_column_2` (the number drawn as a line over the bars);
+  combo needs a right-axis entry in `more_measures` (the number drawn as a line);
   histogram needs `measure_column` and NO `group_by` - it shows one number's spread.
 - "percent_of_total" only works on a chart, never a card. "running_total" only works on a
   chart broken down by a DATE column.
@@ -219,7 +241,13 @@ _CORE_RULES = """Hard rules:
   row_number - say where they go with filter_position ("top" or "left").
 - If the request cannot be done with this catalog and these columns, return an EMPTY panels
   list and say why in one plain sentence in `clarification`. Never return a visual that is
-  merely close - a wrong chart is worse than an honest no."""
+  merely close - a wrong chart is worse than an honest no.
+- Never return an update that leaves the visual exactly as it was. If nothing in the catalog
+  does what was asked (a setting that doesn't exist), that is an honest no too.
+- How a visual LOOKS is asked for in `properties`, never by changing its columns. "Show
+  the numbers on the bars" is properties="labels:yes"; "make it taller" is "size:tall";
+  "move the key to the bottom" is "legend:bottom". When you change one setting, write out
+  the settings the visual already has as well, or they are lost."""
 
 #: The written design rules - the "professional dashboard" skill of phase 35.
 #:
@@ -233,7 +261,7 @@ _DESIGN_RULES = """Design rules - follow these unless the user asks for somethin
 - Where the data has a date column, give the page one trend - a line or an area chart
   broken down by that date - on a row of its own.
 - At most 2 charts to a row. Tables go on rows of their own, near the bottom.
-- Propose at most 8 visuals unless the user asks for more.
+- Propose at most 12 visuals unless the user asks for more.
 - Sort a bar chart "largest" so the biggest bar comes first, unless it is broken down by a
   date, where "automatic" keeps the dates in order.
 - Use "bar_horizontal" when the breakdown is long text: customer, product and employee
@@ -244,7 +272,26 @@ _DESIGN_RULES = """Design rules - follow these unless the user asks for somethin
   "currency:INR" unless the user says otherwise.
 - Give every visual a title that names the number: Total sales by region, never Chart 1.
 - Add a filter for the one or two columns a reader would want to narrow by - usually a
-  date and the main category."""
+  date and the main category.
+- Leave filter_position as "left" unless the user asks for them across the top: down the
+  side, filters never push the first row of visuals off the screen.
+- A filter on a text column with more than a handful of values is a "dropdown" or a
+  "multiselect" - both open only when the reader clicks them, so a long list of customers
+  costs no height until it is wanted.
+- Turn "labels:yes" on for a pie or a donut, and for a bar chart with few enough bars to
+  read. On a chart with many bars the numbers collide, so leave them off unless asked.
+- Asked for several totals of the SAME column ("min, average and max salary"), put them
+  all on the LEFT with `more_measures` - they share a unit, so they must share an axis to
+  be compared. Use "right" only when the units differ (rupees against a headcount),
+  which is what a combo chart is.
+- Use "width:full" for the one chart the page is really about, and for a wide table. Two
+  half-width charts to a row is the ordinary case and needs no width at all.
+- Filter on a RELATED table's column rather than on one table's own column where both
+  exist: the related spelling is carried on every table it reaches, so that one filter
+  narrows the whole page instead of a single visual. This applies to ANY column that comes
+  from a related table, not just one example - e.g. "Employee Master - Department" AND
+  "Employee Master - Name" both follow the same "Table - Column" spelling, never the raw
+  "Department" or "Name" on its own."""
 
 #: Every catalog entry `_DESIGN_RULES` recommends by name, declared beside the prose so a
 #: test can pin all of them at once. Cheaper than a record per shape, and it catches the one
@@ -259,6 +306,11 @@ _DESIGN_RULE_NAMES: tuple[str, ...] = (
     SORT_AUTOMATIC,
     FORMAT_CURRENCY,
     DEFAULT_CURRENCY,
+    DEFAULT_FILTER_POSITION,
+    FILTER_DROPDOWN,
+    FILTER_MULTISELECT,
+    LABELS_ON,
+    WIDTH_FULL,
 )
 
 #: The first draft: an empty dashboard, built from one description.
@@ -325,8 +377,11 @@ class ProposedPanel(BaseModel):
         default="", description="Comma separated; the filter's column, or a table's columns"
     )
     measure_column: str = Field(default="", description="The number column to aggregate")
-    measure_column_2: str = Field(
-        default="", description="Only for a combo chart: the second number, drawn as a line"
+    more_measures: str = Field(
+        default="",
+        description="Other numbers this chart draws, as "
+                    "'column:aggregation:left_or_right', separated by ';'. Example: "
+                    "'Salary:minimum:left; Salary:maximum:left'",
     )
     aggregation: str = Field(default="", description="An aggregation from the catalog")
     group_by: str = Field(default="", description="The column the number is broken down by")
@@ -336,7 +391,9 @@ class ProposedPanel(BaseModel):
     title: str = Field(default="", description="The heading shown on the visual")
     row_number: str = Field(default="", description="Which row it sits on, digits only")
     properties: str = Field(
-        default="", description="Optional, e.g. 'format:currency, height:420'"
+        default="",
+        description="Optional look settings from the catalog, e.g. "
+                    "'format:currency, labels:yes, size:tall'",
     )
 
 
@@ -382,7 +439,35 @@ def describe_catalog_for_prompt() -> str:
     lines.append("Sort orders: " + ", ".join(
         f"{key} ({label})" for key, label in SORT_LABELS.items()
     ))
+    lines.append(describe_properties_for_prompt())
     return "\n".join(lines)
+
+
+def describe_properties_for_prompt() -> str:
+    """The `properties` vocabulary, as prompt text.
+
+    Built from the same tuples `model.clean_properties` checks against, so a setting
+    cannot be offered here and then dropped there - which is exactly the shape of the bug
+    phase 38 was written for. A pie was asked for data labels, nothing in the vocabulary
+    said what those were, and the round reported a change it had not made.
+    """
+    labellable = ", ".join(LABELLABLE_CHARTS)
+    return (
+        "Properties (optional, written as 'name:value' separated by commas. Anything "
+        "not listed here is dropped):\n"
+        f"    format: {', '.join(NUMBER_FORMATS)}; currency: "
+        f"{', '.join(CURRENCY_CODES)}\n"
+        f"    labels: yes or no - prints the number on the chart. Only on {labellable}; "
+        "on a pie or donut it prints each slice's percentage of the whole.\n"
+        f"    legend: {', '.join(LEGEND_POSITIONS)} - where the colour key goes\n"
+        "    axis_titles: yes or no - the words under and beside the axes\n"
+        f"    colour: {', '.join(NAMED_COLOURS)} - one colour, for a chart with no "
+        "colour_by\n"
+        f"    size: {', '.join(PANEL_SIZES)} - how tall a chart is drawn\n"
+        f"    width: {', '.join(PANEL_WIDTHS)} - full takes the whole row\n"
+        f"    card_size: {', '.join(CARD_SIZES)} - how big a card prints its number\n"
+        "    border: yes or no; radius: 0 to 2"
+    )
 
 
 def _type_word(dtype) -> str:
@@ -473,8 +558,9 @@ def describe_tables_for_prompt(tables: dict[str, pd.DataFrame],
                                notes: dict[str, str] | None = None) -> str:
     """The tables the dashboard can draw from, their columns, and each column's type.
 
-    These are the *flattened* tables, so a master's attributes already appear as columns of
-    the main table - which is why the model never has to think about joins at all.
+    These are the *flattened* tables, so a parent's attributes already appear as columns of
+    every table that reaches it - which is why the model never has to think about joins at
+    all, and why the same `Customer - CustName` may be listed under more than one table.
 
     `notes` is `column_notes`' output. Left out, this renders exactly what it rendered before
     phase 35, so a session with an empty data dictionary loses nothing.
@@ -516,7 +602,7 @@ _SPEC_FIELD_LABELS: dict[str, str] = {
     "source_table": "source_table",
     "source_columns": "columns",
     "measure_column": "measure_column",
-    "measure_column_2": "measure_column_2",
+    "extra_measures": "more_measures",
     "aggregation": "aggregation",
     "group_by": "group_by",
     "colour_by": "colour_by",
@@ -553,6 +639,10 @@ def _panel_fields_for_prompt(panel: PanelSpec) -> str:
             text = ", ".join(str(item) for item in value)
         elif name == "properties":
             text = properties_text(value)
+        elif name == "extra_measures":
+            # The same one line the model writes them on. A dict printed raw would teach the
+            # next round to answer in dicts, which the flat text field cannot carry.
+            text = measures_text(value)
         elif name == "top_n":
             text = str(value) if value else ""
         else:
@@ -594,8 +684,28 @@ def describe_spec_for_prompt(spec: DashboardSpec) -> str:
     return "\n".join(lines)
 
 
+#: How the flattened tables relate to each other, said once in the prompt (phase 39).
+#:
+#: Every table is embedded carrying the columns of the parents it can reach, under the
+#: same `Parent - Column` spelling on each. That is the one fact a model needs in order
+#: to stop asking for a single chart over two unrelated tables, and to know that one
+#: filter is enough for all of them.
+_RELATED_TABLES_NOTE = (
+    "How these tables relate:\n"
+    "- A column named like 'Employee Master - Department' belongs to a related table "
+    "and is already carried on this one. Use it exactly as you would any other column "
+    "of the table you found it on.\n"
+    "- The same related column appears on every table it reaches, so ONE filter on it "
+    "narrows all of them at once. Never add the same filter twice for different "
+    "tables.\n"
+    "- One visual reads ONE table. Two numbers that live on different tables (a salary "
+    "and an attendance count) are two visuals, not one chart - and both still react to "
+    "the same filter."
+)
+
+
 def build_prompt(instruction: str, tables: dict[str, pd.DataFrame], *,
-                 main_table: str = "", notes: dict[str, str] | None = None,
+                 notes: dict[str, str] | None = None,
                  current: DashboardSpec | None = None) -> str:
     """The whole ask: the schema, the catalog, the page so far, and the request.
 
@@ -607,12 +717,11 @@ def build_prompt(instruction: str, tables: dict[str, pd.DataFrame], *,
         "Tables available, with their columns:\n"
         + describe_tables_for_prompt(tables, notes),
         "",
+        _RELATED_TABLES_NOTE,
+        "",
         "Visual catalog:\n" + describe_catalog_for_prompt(),
         "",
     ]
-    if main_table:
-        parts.append(f"The main table is {main_table}. Prefer it unless the request needs "
-                     "another one.\n")
 
     if current is not None:
         parts.append("The dashboard as it stands:\n" + describe_spec_for_prompt(current))
@@ -627,6 +736,34 @@ def build_prompt(instruction: str, tables: dict[str, pd.DataFrame], *,
 # --------------------------------------------------------------------------------------
 # Reading one proposal back
 # --------------------------------------------------------------------------------------
+
+
+def _extra_measures(proposed: "ProposedPanel", known_columns: dict[str, str]) -> list[dict]:
+    """`"Salary:minimum:left; Headcount:count:right"` as the list the panel keeps.
+
+    One flat text field rather than a list of objects, for the reason every other field
+    here is text: a provider's strict structured output handles nested lists badly, and a
+    schema a provider fills in wrongly is worse than a string this parses itself.
+
+    Whatever cannot be read is simply left out. `clean_measures` is the gate that decides
+    what a measure may be at all, and `panel_problems` afterwards decides whether the
+    columns named really exist - so nothing invented here reaches a chart.
+    """
+    entries = []
+    for chunk in str(proposed.more_measures or "").split(";"):
+        parts = [piece.strip() for piece in chunk.split(":")]
+        parts += [""] * (3 - len(parts))  # a line that named only a column still reads
+        column, total, axis = parts[0], _key(parts[1]), parts[2].lower()
+        if not any(parts):
+            continue
+        entries.append({
+            # "min" and "avg" are the spellings a model reaches for, and the same synonym
+            # table the main aggregation goes through maps them onto the catalog.
+            "column": _match(column, known_columns) if column else "",
+            "aggregation": _AGGREGATION_SYNONYMS.get(total, total),
+            "axis": axis or AXIS_LEFT,
+        })
+    return clean_measures(entries)
 
 
 def _split(value: str) -> list[str]:
@@ -646,6 +783,21 @@ def _match(name: str, known: dict[str, str]) -> str:
 
 def _key(name: str) -> str:
     return str(name or "").strip().casefold().replace(" ", "")
+
+
+def _prefer_prefixed(column: str, table: str, known_columns: dict[str, str]) -> str:
+    """A filter narrows by the prefixed spelling whenever the table offers one.
+
+    A parent table carries every column twice (phase 39's `_own_prefixed_columns`): its own
+    plain name, which only that table understands, and `Table - Column`, which every child
+    joined to it also carries. A filter built on the plain name looked fine in preview but
+    quietly stopped at the parent - this is what stops that mismatch from ever reaching the
+    page, rather than relying on the model to pick the right spelling every time.
+    """
+    if not column or COLUMN_SEPARATOR in column:
+        return column
+    prefixed_key = _key(f"{table}{COLUMN_SEPARATOR}{column}")
+    return known_columns.get(prefixed_key, column)
 
 
 def _whole_number(text: str, *, default: int, minimum: int) -> tuple[int, bool]:
@@ -754,10 +906,49 @@ def _numeric_columns(frame: pd.DataFrame) -> set[str]:
     return {str(name) for name in frame.columns if _type_word(types[name]) == "number"}
 
 
+def _columns_named(proposed: ProposedPanel) -> list[str]:
+    """Every column one proposal names, whatever kind of visual it is."""
+    named = _split(proposed.columns)
+    for value in (proposed.measure_column, proposed.group_by, proposed.colour_by):
+        text = str(value or "").strip()
+        if text:
+            named.append(text)
+    return named
+
+
+def _table_for(proposed: ProposedPanel, tables: dict[str, pd.DataFrame]) -> str:
+    """Which table a visual reads, when the proposal's own answer is not one we have.
+
+    There is no "main table" to fall back on since phase 39 - every table is embedded, each
+    carrying the columns of the parents it reaches, so the honest question is no longer
+    "which table is the page about" but **"which table has the columns this visual names"**.
+    A card of `Amount` broken down by `Employee Master - Department` belongs on Salary
+    because that is where both of those columns are.
+
+    Only for a proposal that named **no** table. A proposal naming a table we do not have
+    is returned unchanged so the check that follows refuses it by name: a wrong table is a
+    guess about what the user meant, and quietly redirecting it to whichever table happens
+    to carry columns of those names is precisely the silent wrong answer the whole module
+    is built to avoid.
+    """
+    known_tables = {_key(name): name for name in tables}
+    named = _match(proposed.source_table, known_tables)
+    if named:
+        return named
+
+    wanted = [_key(column) for column in _columns_named(proposed)]
+    if wanted:
+        for name, frame in tables.items():
+            have = {_key(column) for column in frame.columns}
+            if all(column in have for column in wanted):
+                return name
+
+    return named or next(iter(tables), "")
+
+
 def _build_one(
     proposed: ProposedPanel,
     tables: dict[str, pd.DataFrame],
-    main_table: str,
     available_columns: dict[str, list[str]],
     date_columns: frozenset[str],
 ) -> tuple[PanelSpec | None, str | None]:
@@ -782,8 +973,7 @@ def _build_one(
     if not sub_type:
         return None, note
 
-    known_tables = {_key(name): name for name in tables}
-    table = _match(proposed.source_table, known_tables) or main_table
+    table = _table_for(proposed, tables)
     frame = tables.get(table)
     if frame is None:
         return None, (
@@ -804,9 +994,14 @@ def _build_one(
         visual_type=visual_type,
         sub_type=sub_type,
         source_table=table,
-        source_columns=[_match(name, known_columns) for name in _split(proposed.columns)],
+        source_columns=[
+            _prefer_prefixed(_match(name, known_columns), table, known_columns)
+            if visual_type == VISUAL_FILTER
+            else _match(name, known_columns)
+            for name in _split(proposed.columns)
+        ],
         measure_column=_match(proposed.measure_column, known_columns),
-        measure_column_2=_match(proposed.measure_column_2, known_columns),
+        extra_measures=_extra_measures(proposed, known_columns),
         aggregation=aggregation,
         group_by=_match(proposed.group_by, known_columns),
         colour_by=_match(proposed.colour_by, known_columns),
@@ -823,6 +1018,13 @@ def _build_one(
     trouble = panel_problems(panel, available_columns, date_columns)
     if trouble:
         return None, f"Skipped '{panel.display_title()}': {trouble}"
+
+    # A setting that was understood but cannot apply to this shape - labels on a heatmap,
+    # one colour over a chart already split by colour. The visual is kept and drawn; the
+    # sentence is what stops the setting failing silently.
+    unusable = property_problems(panel)
+    if unusable:
+        note = f"{note} {unusable}".strip() if note else unusable
 
     # The likely model error, and an invisible one: "sales by customer" coming back with the
     # two the wrong way round. The types are already in the prompt, so this is cheap.
@@ -891,7 +1093,6 @@ def propose_dashboard(
     instruction: str,
     tables: dict[str, pd.DataFrame],
     *,
-    main_table: str = "",
     notes: dict[str, str] | None = None,
     key_path=None,
 ) -> tuple[DashboardSpec | None, list[str], str | None]:
@@ -903,7 +1104,6 @@ def propose_dashboard(
         tables: the embedded tables, keyed by the name panels refer to them by - the same
             dict the exporter is handed, so the columns checked here are the columns that
             will exist.
-        main_table: which of them is the fact table, used when a proposal names no table.
         notes: `column_notes`' output - what each column means, from the Setup dictionary.
 
     Returns:
@@ -922,7 +1122,7 @@ def propose_dashboard(
     try:
         response = run_structured(
             profile,
-            build_prompt(instruction, tables, main_table=main_table, notes=notes),
+            build_prompt(instruction, tables, notes=notes),
             ProposedDashboard,
             instructions=_INSTRUCTIONS,
             key_path=key_path,
@@ -947,7 +1147,7 @@ def propose_dashboard(
             )
             break
         panel, warning = _build_one(
-            proposed, tables, main_table, available_columns, date_columns
+            proposed, tables, available_columns, date_columns
         )
         if panel is None:
             warnings.append(warning or "A visual couldn't be understood.")
@@ -973,8 +1173,8 @@ def propose_dashboard(
     spec = DashboardSpec(
         title=str(response.title or "").strip(),
         subtitle=str(response.subtitle or "").strip(),
-        filter_position=position if position in FILTER_POSITIONS else FILTER_TOP,
-        main_table=main_table,
+        filter_position=position if position in FILTER_POSITIONS
+        else DEFAULT_FILTER_POSITION,
         panels=panels,
     )
     return spec, warnings, clarification
@@ -1081,8 +1281,7 @@ def _first_draft(profile: dict, instruction: str, tables: dict[str, pd.DataFrame
     needs to run - which it must not do on any later round.
     """
     proposed, warnings_out, clarification = propose_dashboard(
-        profile, instruction, tables, main_table=spec.main_table,
-        notes=notes, key_path=key_path,
+        profile, instruction, tables, notes=notes, key_path=key_path,
     )
     result = RoundResult(notes=list(warnings_out), clarification=clarification)
     if proposed is None or not proposed.panels:
@@ -1104,6 +1303,7 @@ def revise_dashboard(
     spec: DashboardSpec,
     *,
     notes: dict[str, str] | None = None,
+    focus: PanelSpec | None = None,
     key_path=None,
 ) -> RoundResult:
     """One round of the conversation: reads the instruction and edits `spec` in place.
@@ -1126,6 +1326,10 @@ def revise_dashboard(
         spec: the dashboard being edited. Mutated only once a round has produced a change,
             so a failed or empty round leaves the page exactly as the user left it.
         notes: `column_notes`' output, so the model knows what the columns mean.
+        focus: one visual the round is confined to - what the Edit button beside a visual
+            passes. The model is told which number it may change, and every edit it returns
+            is pointed at that visual here regardless of what it wrote, so "make it
+            horizontal" typed under one chart can never reshape another.
 
     Returns:
         A `RoundResult`. Never raises: an unreachable model is a `failed` result carrying one
@@ -1152,11 +1356,25 @@ def revise_dashboard(
                    "horizontal' or 'add a monthly trend'."],
         )
 
+    asked = text
+    if focus is not None:
+        if focus not in spec.panels:
+            return RoundResult(
+                failed=True,
+                notes=["That visual is no longer on the dashboard."],
+            )
+        number = spec.panels.index(focus) + 1
+        asked = (
+            f"Change only visual number {number} ('{focus.display_title()}'). Return exactly "
+            f"one edit, with action 'update' and target '{number}' - or action 'remove' with "
+            f"that target if the user asks for it to go. Leave every other visual alone. "
+            f"The user says: {text}"
+        )
+
     try:
         response = run_structured(
             profile,
-            build_prompt(text, tables, main_table=spec.main_table, notes=notes,
-                         current=spec),
+            build_prompt(asked, tables, notes=notes, current=spec),
             ProposedDashboard,
             instructions=_ROUND_INSTRUCTIONS,
             key_path=key_path,
@@ -1177,6 +1395,15 @@ def revise_dashboard(
     working = list(spec.panels)
 
     for proposed in response.panels:
+        if focus is not None and result.changed():
+            # One visual was opened, so one visual is changed. A model that answered with
+            # three edits is describing a page the user did not ask about.
+            result.notes.append(
+                "Only the visual you opened was changed. Use the box at the top to change "
+                "the rest of the dashboard."
+            )
+            break
+
         action = _key(proposed.action) or ACTION_ADD
         if action not in ACTIONS:
             result.notes.append(
@@ -1185,8 +1412,17 @@ def revise_dashboard(
             )
             continue
 
-        target = None
-        if action in (ACTION_UPDATE, ACTION_REMOVE):
+        if focus is not None:
+            # The user pressed Edit on one visual, so that is the one this round may touch.
+            # The model's own `target` is not trusted here - it is answering about a page it
+            # can see all of, and an off-by-one would edit the chart next to the one the
+            # user was looking at.
+            target = focus
+            if action == ACTION_ADD:
+                action = ACTION_UPDATE
+        else:
+            target = None
+        if target is None and action in (ACTION_UPDATE, ACTION_REMOVE):
             target = _target_panel(proposed.target, spec.panels)
             if target is None:
                 result.notes.append(
@@ -1209,7 +1445,7 @@ def revise_dashboard(
             continue
 
         panel, warning = _build_one(
-            proposed, tables, spec.main_table, available_columns, date_columns
+            proposed, tables, available_columns, date_columns
         )
         if panel is None:
             result.notes.append(warning or "A change couldn't be understood.")
@@ -1227,6 +1463,24 @@ def revise_dashboard(
                 # Nothing was said about where it sits, so it stays where it was rather than
                 # jumping to row 1 on the strength of a field the model left out.
                 panel.row_number = target.row_number
+            if panel == target:
+                # Every field matches, so nothing would change. Counting it would report
+                # "Changed 1 ..." for a request the catalog has no setting for - the model
+                # re-sends the same visual when it can't do what was asked.
+                result.notes.append(
+                    f"That didn't change '{target.display_title()}'. It may not be something "
+                    "the dashboard can do yet - open 'What can I ask?' to see what can."
+                )
+                continue
+            if target not in working:
+                # An earlier edit in this same round already replaced or removed it, so
+                # there is nothing left to swap. Two edits to one visual is a model
+                # answering twice; the first one stands.
+                result.notes.append(
+                    f"Skipped a second change to '{target.display_title()}' - it was "
+                    "already changed in this round."
+                )
+                continue
             working[working.index(target)] = panel
             result.updated.append(panel)
         else:
@@ -1281,8 +1535,11 @@ def describe_panel(panel: PanelSpec) -> str:
                 f" - row {panel.row_number}")
 
     breakdown = f" by {panel.group_by}" if panel.group_by else ""
-    if panel.measure_column_2:
-        what = f"{what} and {panel.measure_column_2}"
+    if panel.extra_measures:
+        # Named one by one rather than counted: "and 2 more" tells the user nothing about
+        # whether the chart they asked for is the chart they are about to get.
+        others = ", ".join(vega_spec.measure_label(one) for one in panel.extra_measures)
+        what = f"{what}, with {others}"
     if panel.colour_by:
         breakdown += f", split by {panel.colour_by}"
     return (f"**{panel.display_title()}** - {style.lower()} of {total} of {what}{breakdown}"

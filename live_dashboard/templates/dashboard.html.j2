@@ -42,7 +42,13 @@
   <div class="filter-bar">
     {% for filter in filters %}
     <div class="filter">
-      <label for="filter-{{ filter.panel_id }}">{{ filter.title }}</label>
+      <div class="filter-head">
+        <label for="filter-{{ filter.panel_id }}">{{ filter.title }}</label>
+        {# Clears this one filter. "Clear all" at the top of the page empties every filter
+           at once, which is the wrong tool when a reader has set four and wants three. #}
+        <button type="button" class="filter-clear" id="clear-{{ filter.panel_id }}"
+                title="Clear this filter">Clear</button>
+      </div>
       <div id="filter-{{ filter.panel_id }}"></div>
     </div>
     {% endfor %}
@@ -55,7 +61,7 @@
     {% for row in rows %}
     <div class="panel-row">
       {% for panel in row %}
-      <section class="panel" style="{{ panel.style }}">
+      <section class="{{ panel.classes }}" style="{{ panel.style }}">
         <h2>{{ panel.title }}</h2>
 
         {% if panel.problem %}

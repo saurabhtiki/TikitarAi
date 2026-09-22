@@ -21,9 +21,16 @@ re-run its preview queries. Actions that need input open an `st.dialog`, driven 
 session-state flag rather than a button's return value, which breaks the moment a dialog
 holds widgets.
 
-A `st.segmented_control` (`de_view`) switches between "Setup" (steps 1, 2 & 3) and "Chat"
-(the transcript, the chat input, and the Actions menu), rendered *above* them so it reads
-as the page's primary navigation rather than something below a full upload panel.
+A `st.segmented_control` (`de_view`) switches between "Setup" (steps 1, 2 & 3), "Chat"
+(the transcript, the chat input, and the Actions menu), "Checks" and - since phase 37 -
+"Dashboard", rendered *above* them so it reads as the page's primary navigation rather
+than something below a full upload panel.
+
+Dashboard is `app_pages.dashboard_view` itself, not a copy of it: the same spec in the same
+`live_dashboard.session` keys, so a dashboard built here is the one Report Builder opens
+and the one a Task saves. It is here because the tables a dashboard is drawn from are the
+ones loaded on this page, and asking a question and drawing the same figure on a page were
+two screens apart for no reason a user could see.
 
 Setup is the only view that **shows** Step 1: Chat and Checks are for working, not for
 managing files, and a step header repeated above every question is setup chrome on a
@@ -57,7 +64,7 @@ from analyst import charts, pipeline, routing
 from analyst import session as chat_session
 from analyst.exceptions import ChatStorageError
 from analyst.session import ChatMessage
-from app_pages import chart_controls, setup_view
+from app_pages import chart_controls, dashboard_view, setup_view
 from app_pages.checks_view import render_checks
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
@@ -1131,7 +1138,7 @@ if profile is not None:
     # sitting below a full upload panel on every later visit.
     view = st.segmented_control(
         "View",
-        options=["Setup", "Chat", "Checks"],
+        options=["Setup", "Chat", "Checks", "Dashboard"],
         key=VIEW_KEY,
         default="Setup",
         required=True,
@@ -1142,7 +1149,8 @@ if profile is not None:
         persist_state="session",
         help=(
             "Setup: links and column descriptions. Chat: ask questions about your data. "
-            "Checks: test business rules and report the exceptions."
+            "Checks: test business rules and report the exceptions. Dashboard: build an "
+            "interactive page you can download and send."
         ),
         width="stretch",
     )
@@ -1253,6 +1261,26 @@ if profile is not None:
                 "until then.",
                 "de_chat_mismatch_setup_button",
             )
+
+    if view == "Dashboard":
+        # The same view Report Builder shows, on the same spec - not a second copy of it.
+        # Gated exactly like Chat and Checks: a dashboard is drawn from the loaded columns,
+        # and a half-matched upload draws the wrong totals rather than an error.
+        if not loaded_tables:
+            st.info(
+                "Upload your data first — a dashboard is built from the columns you load.",
+                icon=":material/upload_file:",
+            )
+            _render_go_to_setup("de_dashboard_go_to_setup_button")
+        elif not upload_matches:
+            _render_mismatch_gate(
+                match_report,
+                "Fix these before building a dashboard — the numbers on it wouldn't be "
+                "reliable until then.",
+                "de_dashboard_mismatch_setup_button",
+            )
+        else:
+            dashboard_view.render_dashboard(user_id)
 
     if view == "Checks":
         # Gated on tables for the same reason Chat is: every criteria is written against

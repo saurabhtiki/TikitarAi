@@ -70,10 +70,15 @@ view.runAsync().then(() => {
   }
   const marks = [];
   const labels = {};
+  const texts = [];
   const walk = (items) => {
     for (const item of items || []) {
       if (item.marktype && item.role === 'mark') {
         marks.push({type: item.marktype, count: (item.items || []).length});
+      }
+      if (item.marktype === 'text' && item.role !== 'axis-label') {
+        const written = (item.items || []).map((one) => String(one.text));
+        if (written.length) { texts.push(written); }
       }
       if (item.marktype === 'text' && item.role === 'axis-label') {
         const texts = (item.items || []).map((one) => String(one.text));
@@ -84,7 +89,7 @@ view.runAsync().then(() => {
   };
   walk(view.scenegraph().root.items);
   console.log(JSON.stringify({domains: domains, marks: marks,
-                              labels: Object.values(labels)}));
+                              labels: Object.values(labels), texts: texts}));
 }).catch((error) => {
   console.error(error.stack);
   process.exit(1);
@@ -135,6 +140,16 @@ SPENDING = [
 
 def _bars(panel: m.PanelSpec, tmp_path: Path, rows=None) -> dict:
     return _draw(panel, rows if rows is not None else SPENDING, tmp_path)
+
+
+def _mark_text(panel: m.PanelSpec, tmp_path: Path, rows=None) -> list[list[str]]:
+    """Every run of text this chart *drew*, as against the text on its axes.
+
+    A data label is a text mark like any other, so the only way to know one was
+    written - and that it says the right number - is to read it back off the drawn
+    scene rather than off the spec that asked for it.
+    """
+    return _draw(panel, rows if rows is not None else SPENDING, tmp_path)["texts"]
 
 
 def _panel(**overrides) -> m.PanelSpec:
@@ -252,3 +267,61 @@ def test_the_supplier_names_reach_the_axis_whole(tmp_path):
     shown = [text for group in drawn["labels"] for text in group]
     assert "UPPER INDIA STEEL MFG CO" in shown
     assert "CK ENTERPRISES PVT LTD" in shown
+
+
+# ------------------------------------------------------------ phase 38: the look settings
+
+
+@pytest.mark.parametrize("sub_type", [m.CHART_BAR, m.CHART_BAR_HORIZONTAL, m.CHART_LINE,
+                                      m.CHART_AREA, m.CHART_PIE, m.CHART_DONUT])
+def test_a_chart_asked_for_labels_draws_one_per_mark(sub_type, tmp_path):
+    """Labels are a second layer of text marks rather than an option, so the failure to
+    catch is the quiet one: the bars still draw and no numbers appear over them."""
+    drawn = _bars(_panel(sub_type=sub_type, group_by=CATEGORY,
+                         properties={"labels": True}), tmp_path)
+
+    kinds = {mark["type"]: mark["count"] for mark in drawn["marks"] if mark["count"]}
+    # Four categories in SPENDING, so four marks and four numbers written over them.
+    assert kinds.get("text") == 4, kinds
+    assert kinds.get("arc" if sub_type in (m.CHART_PIE, m.CHART_DONUT) else
+                     ("line" if sub_type == m.CHART_LINE else None), 4) >= 1
+
+
+def test_a_pie_labels_each_slice_with_its_share_of_the_whole(tmp_path):
+    """A pie is asked "what share is that?", so its label is a percentage - which means the
+    slices have to be totalled in the data before anything can be written."""
+    written = _mark_text(_panel(sub_type=m.CHART_PIE, group_by=CATEGORY,
+                                properties={"labels": True}), tmp_path)
+
+    shares = next(texts for texts in written if all(one.endswith("%") for one in texts))
+    assert sorted(shares) == ["20%", "27%", "47%", "7%"]
+
+
+def test_a_bar_chart_labels_each_bar_with_its_own_total(tmp_path):
+    written = _mark_text(_panel(sub_type=m.CHART_BAR, group_by=CATEGORY,
+                                properties={"labels": True}), tmp_path)
+
+    assert ["7,000", "4,000", "3,000", "1,010"] in written
+
+
+def test_labels_and_a_top_n_still_agree_about_which_bars_are_there(tmp_path):
+    """Two features that each change what the data holds. A label drawn from rows the Top N
+    had already dropped would be a number floating beside no bar."""
+    drawn = _bars(_panel(top_n=3, properties={"labels": True}), tmp_path)
+
+    kinds = {mark["type"]: mark["count"] for mark in drawn["marks"] if mark["count"]}
+    assert kinds.get("rect") == 3 and kinds.get("text") == 3
+
+
+def test_a_named_colour_paints_a_single_series_chart(tmp_path):
+    panel = _panel(sub_type=m.CHART_BAR, group_by=CATEGORY, properties={"colour": "green"})
+
+    assert vs.build_vega_spec(panel)["mark"]["color"] == m.NAMED_COLOURS["green"]
+    assert any(mark["count"] for mark in _bars(panel, tmp_path)["marks"])
+
+
+def test_taking_the_legend_away_still_draws_the_chart(tmp_path):
+    drawn = _bars(_panel(sub_type=m.CHART_BAR_STACKED, group_by=CATEGORY, colour_by=SUPPLIER,
+                         properties={"legend": "none"}), tmp_path)
+
+    assert any(mark["count"] for mark in drawn["marks"])

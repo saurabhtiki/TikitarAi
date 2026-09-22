@@ -1,96 +1,134 @@
-# Phase 37 — Dashboard chat, made easier to drive
+# Phase 39 — Filters that reach every related table, and a proper starting point
 
-**Status: planned, not built.**
+**Status: built.** Phase 38's plan is in git history.
 
-Seven small requests from using phase 36 on real data. None change how a dashboard is
-described to the AI or how a round works - all seven are UI, one default-layout nudge to the
-design rules, and one real bug fix (item 5).
+All four parts are in. What changed from the plan as written, and why:
 
-## 1. Layout defaults: filters left, titles centered, dropdowns collapsed
+- **`propose_dashboard`, `build_prompt` and `_build_one` lost their `main_table` argument
+  entirely** rather than keeping an ignored one. A visual that names no table now goes to
+  the table that owns the columns it names (`ai_spec._table_for`). A visual naming a table
+  we do *not* have is still refused by name - redirecting it to whichever table happens to
+  carry columns of those names would be exactly the silent wrong answer this module exists
+  to prevent.
+- **`flatten.detect_fact_table`, `load_side_table` and `FlattenPlan.side_tables` are gone**,
+  along with `payload`'s `main_table` field: with every table flattened, nothing called
+  them. `DashboardSpec.main_table` stays in the file format, documented as read by nothing.
+- **The range widget is two stacked sliders**, not two on one track: overlaid native inputs
+  leave only the top handle grabbable. `Math.min.apply` also went - an argument list of
+  90,000 values (which `ROW_LIMIT` allows) throws a RangeError in several browsers.
+- **A failed Generate puts the old panels back.** The panels are emptied on the way in so
+  the round reads as a first draft, so a provider outage would otherwise clear the page.
+- **The per-visual Edit buttons are hidden with no Light Model configured**, since the
+  dialog they open is the round box.
 
-Add three rules to `_DESIGN_RULES` in `live_dashboard/ai_spec.py` (the text already sent with
-every round, tested against the catalog): filters default to the left column rather than the
-top row, every panel title is center-aligned, and any dropdown/select filter renders
-collapsed rather than expanded. Rendering side: `vega_spec.py` / the dashboard layout code in
-`dashboard_view.py` needs to honor a left-column filter placement and center-aligned titles
-(a CSS/Vega config change, not a new spec field) and the filter widgets need to default to
-collapsed. No spec schema change - this is a default, not something the user can already ask
-for differently per visual, so it applies globally.
+Four things found using phase 38 on Employee Master + Salary + Attendance. Build in this
+order: 1, 2, 3 (small, independent) then 4 (the big one).
 
-## 2. Clear one filter, not just all
+## 1. Range slider with two handles (min and max)
 
-Find the existing "Clear all" control (filters live in `spec.filters()`, rendered in
-`dashboard_view.py`/`vega_spec.py`/`runtime.js`). Add a small reset control per filter
-alongside it, scoped to that one filter's current selection. Likely a per-filter "x" next to
-the widget rather than a new button row.
+Today a number filter has one slider ("from 30,000"). Make it a min and a max.
 
-## 3. Light vs. a stronger model
+- `runtime.js` `buildFilterWidget`, `range` branch: two `input type=range` on one track (or two
+  number boxes + two sliders if a native dual slider is fiddly). The rule already supports
+  `{kind: "range", min, max}` — `matchesGlobal` needs no change; only the widget sends `max: null`.
+- Readout: "30,000 to 60,000". Clear puts both handles back to the column's lowest / highest.
+- Guard: min can never pass max (the moving handle pushes the other, or is clamped).
+- Tests: `tests/test_live_dashboard_runtime.py` (Node) — a rule with both ends keeps only rows
+  between them; a row with no value is dropped.
 
-No change planned. Confirmed with the user: Describe/Revise only ever pick from a fixed
-catalog of chart types, columns, and aggregations - a constrained, structured task the Light
-Model already handles reliably, per the existing schema-safe name/value contract from phase
-28. Revisit only if real use shows the Light Model misreading instructions.
+## 2. Undo per round, like the Data Cleaner
 
-## 4. Dashboard reachable from the Chat with Data tab
+Today there is one stash (`LD_UNDO_KEY`) and the top Undo goes grey after one press.
 
-Flagged as a later item back in phase 32/33 ("AI generation, templates, drill-down,
-pivot/map, and the Chat with Data entry are phase 33+"). Add an entry point - likely a tab or
-button inside Chat with Data that renders the same saved `DashboardSpec` / preview already
-built for Report Builder, reusing `dashboard_session` and `vega_spec` rather than a second
-implementation.
+- Keep a **stack**: each `Round` carries the spec JSON from *before* it (`Round.before_json`).
+  This replaces `LD_UNDO_KEY`, `stash_for_undo`, `can_undo`, `discard_undo`.
+- In "What was asked, and what changed", each round shows its own **Undo** button; only the
+  newest is enabled, older ones are disabled with a help tooltip saying "Undo the newer ones
+  first". Pressing it restores that JSON and drops the round (the flash note stays).
+- The top Undo button is removed. `MAX_ROUNDS_SHOWN` already caps memory; rounds that fall off
+  the end lose their JSON with them.
+- A round that changed nothing is simply not recorded (same as `discard_undo` today).
+- `remove_visual` records a round with its stash, so Undo covers it unchanged.
+- Tests: `test_live_dashboard_page.py` — two rounds give two buttons, only the top enabled;
+  undoing the top enables the next; a no-change round leaves no button.
 
-## 5. Bug: Undo doesn't update "What was asked, and what changed"
+## 3. "Generate Dashboard" is the starting point; it uses the Good model
 
-Real bug, not a request. `session.undo_last_round()` (`live_dashboard/session.py:197`) pops
-`LD_UNDO_KEY` and restores the spec, but never touches `LD_ROUNDS_KEY` - so the round that was
-just undone is still sitting at the top of `rounds()`, and the expander in
-`_render_rounds()` (`app_pages/dashboard_view.py:272`) keeps describing a change that no
-longer exists on the page.
+- New primary button **Generate Dashboard** at the top of the tab, always visible. It builds
+  from the *current* data, confirmed relationships and column descriptions (the `_column_notes`
+  path already carries the dictionary).
+- Uses the **Default model** = `llm_session.active_profile(user_id)` (the session's chosen model,), not `light_profile`. `revise_dashboard` already takes a
+  profile dict, so only which profile is passed changes. If none is configured, say so and name
+  Settings -> LLM providers.
+- If the dashboard already has visuals, pressing it first asks **"This replaces everything,
+  including your edits. Continue?"** — the same two-press session-flag idiom as Remove (a flag
+  like `LD_CONFIRM_GENERATE_KEY`, Yes / No). Yes = clear spec panels, stash a round (so Undo
+  still brings the old one back), then run the round with the Good model.
+- **Update the dashboard** stays as it is, on the Light Model, and shows only once panels exist.
+  Edit-this-visual also stays Light.
+- The old "Build the dashboard" label goes away (that was the same button before panels existed).
+- Tests: no model call until Yes when panels exist; the profile passed is the active one, not
+  the light one; Undo after Generate restores the old page.
 
-Fix: `undo_last_round` should also drop the round it's undoing from history (`rounds()[0]`),
-the same way `record_round` prepends it. Rather than inventing a new "Undone" entry, popping
-the entry keeps the history honest: it describes only rounds that are still reflected in the
-dashboard on screen.
+## 4. Filters that reach every related table (the main fix)
 
-**And:** match Data Cleaner's step pattern (`app_pages/transform_data.py:317-389`) - each
-step in a list with a **Remove** button next to it, "remove this step; to change an earlier
-step, delete back to it." Reusing this pattern for dashboard rounds means each entry in
-`_render_rounds` gets a "Cancel this round" affordance the same shape as Data Cleaner's,
-rather than a single Undo button restoring only the very last round. This is a bigger change
-than the bug fix (needs a per-round stash, not just the one-step `LD_UNDO_KEY`), so it should
-land as a distinct, clearly-labelled step within this phase - worth confirming that scope
-before building rather than assuming a one-step undo becomes a full history stack.
+**Problem.** `_build_data` flattens only **one** table (`spec.main_table`, or the one that points
+at the most others) with the parents it can reach child -> parent. In Employee Master (parent),
+Salary and Attendance (children): with Salary as main, Attendance is a sibling the walk never
+reaches, so it is embedded on its own with no Department column and a Department filter does
+not touch it. (Worse, `matchesGlobal` treats a missing column as "no match", so it can even
+empty a table.)
 
-## 6. Text box → dialog on "Update the dashboard"
+**Design.** Flatten **every table on its own**, each decorated with the parents it can reach
+(reuse `join_plan` + `flatten_main_table` once per table; the join direction is unchanged, so
+row counts never multiply). No table is ever joined to a sibling.
 
-Currently `st.text_area` + button run in place (`app_pages/dashboard_view.py:144-183`). Move
-the instruction box into an `st.dialog`, opened by the "Update the dashboard" / "Build the
-dashboard" button, matching the dialog pattern already used elsewhere in this file (e.g. the
-Apply/Cancel dialogs in `data_cleaner.py:331`). Same instruction text and help copy, just
-collected in a dialog instead of inline.
+- `_build_data`: loop over all `table_names`; `tables[name] = flatten_main_table(connection,
+  join_plan(name, relationships, table_names))`. The `GRAIN_SAFETY_MARGIN` guard stays per
+  table. Signature drops `main_table`. `side_tables` / `load_side_table` become unnecessary for
+  linked tables; a table with no links is just a plain one-table plan.
+- **One name for a parent's column everywhere**: `Employee Master - Department`. A child gets
+  it by the join; the parent table itself also carries its own columns under that prefixed name
+  (a duplicate column, cheap) so the same filter narrows Employee Master rows too. Guard against
+  a clash with `_safe_frame` as today.
+- `runtime.js`:
+  - `matchesGlobal(record, tableName)`: **skip** a rule whose column that table doesn't have
+    (use `tableMeta(name).columns`), instead of failing the row. This is the line that makes
+    "filter Department = HR" reach Salary *and* Attendance while leaving a Budget table alone.
+  - The cross-filter (click a bar) gets the same skip.
+  - Filter options (`distinctValues`) and the range's min/max are read from the filter's own
+    `source_table`, which the AI/Model picks as the parent's prefixed column - unchanged.
+- **Main Table picker goes** from the UI (`dashboard_view.py` ~l.628-641). `DashboardSpec.
+  main_table` stays in the file format so an older Task opens; it is ignored, and each visual
+  keeps its own `source_table` (defaults to the table that owns the column).
+- **Charts stay one table each.** A chart on Salary can use `Employee Master - Department`
+  (it is on Salary's rows). A single chart mixing Salary's amount with Attendance's days is
+  still not possible — `panel_problems` already reports it in words; the AI prompt is told to
+  put those in two visuals. Cards on different tables are fine and both react to filters.
+- `ai_spec.py`: drop "The main table is X. Prefer it" (l.~696); describe every table and its
+  columns, note that parent columns (`Employee Master - ...`) are available on each child table
+  and a filter on one applies to all tables that carry it. `_DESIGN_RULES` gets one line to
+  that effect, and a test keeps the prompt and the catalog in step as before.
+- `help.py`: "What can I ask?" gains one sentence about filters across related tables.
+- Data description line (`plan.describe`) becomes one sentence per table, e.g. "Salary: with
+  columns from Employee Master. Attendance: with columns from Employee Master."
 
-## 7. Per-visual Edit button → dialog scoped to that one visual
+**Risks and honest limits**
+- Two parents feeding one child through two paths (diamond) — first path wins, as today.
+- A many-to-many link (no clean parent) is still not flattened; the filter just doesn't reach it
+  and a warning above the preview says which table was left out.
+- Payload gets bigger: every table is embedded once, each with its parent columns. Watch size on
+  large tables; keep the existing size warning.
 
-Each panel in the preview gets a small Edit control. Clicking it opens a dialog pre-scoped to
-that panel (title shown, instruction box for "what should change about *this* visual"), which
-calls `ai_spec.revise_dashboard` with a `target` naming that panel's `panel_id` directly -
-same mechanism phase 35 built for round edits (`action`/`target`), just invoked from a
-specific visual instead of free text mentioning it by title. Reduces to "one more entry point
-into revise_dashboard with the target pre-filled," not a new AI path.
+**Tests**
+- `test_live_dashboard_flatten.py`: star, 3-level hierarchy, one parent with two children, a
+  child with no links — row counts equal the raw table's, and each child carries the parent's
+  prefixed columns.
+- `test_live_dashboard_runtime.py` (Node): a Department rule narrows Salary *and* Attendance,
+  leaves a table without that column untouched, and a click cross-filter does the same.
+- End to end with Employee Master 2 rows / Salary / Attendance: Department = HR gives HR's
+  salary total and HR's attendance total together.
 
-## Open questions to settle before building
-
-- Item 5's "Cancel this round" - confirm we want a full per-round undo stack (harder, more
-  session state) vs. keeping one-step Undo but fixing the history-sync bug and adding a
-  "removed" note. Recommend: fix the bug first (cheap, correct), then decide separately
-  whether multi-step history is worth the extra state.
-- Item 1's layout rules are global defaults - confirm no existing dashboards rely on top-row
-  filters or left-aligned titles (a saved Task's spec doesn't encode layout today, so this
-  should be safe, but worth checking `model.py` for any layout field before assuming so).
-
-## Plan for Build/Test (once confirmed)
-
-Build in the order above (1 → 7), each with its own test addition in the matching
-`tests/test_live_dashboard_*.py` file, then `uv run pytest tests/ -k "live_dashboard"`.
-Item 5's bug fix should land first and alone, since it's the one regression a user could hit
-today.
+## Done when
+`uv run pytest` is green, and by hand: Generate -> filter Department -> both salary and
+attendance charts move; two rounds -> two Undo buttons, only the newest live.

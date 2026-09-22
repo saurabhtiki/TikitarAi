@@ -41,8 +41,31 @@
     });
   });
 
+  /* Which columns each table carries, as a lookup rather than a list. `matchesGlobal` asks
+     this question once per rule per row, and `indexOf` over a 40-column array on 50,000
+     rows is a visible pause on every click.
+
+     Object.create(null), not {}: a column genuinely called "constructor" would otherwise
+     read as present on every table. */
+  var columnIndex = {};
+  Object.keys(payload.tables).forEach(function (name) {
+    var known = Object.create(null);
+    payload.tables[name].columns.forEach(function (column) { known[column] = true; });
+    columnIndex[name] = known;
+  });
+
   function tableMeta(name) {
     return payload.tables[name] || { columns: [], types: {}, rows: [] };
+  }
+
+  /* Whether a table has a column at all.
+
+     An unknown table answers "yes", which keeps an unrecognised name behaving exactly as it
+     did before this existed - a rule that then matches nothing is a visible empty panel,
+     where a rule silently skipped is a filter that quietly does nothing. */
+  function hasColumn(tableName, column) {
+    var known = columnIndex[tableName];
+    return !known || known[column] === true;
   }
 
   /* --------------------------------------------------------------------------------
@@ -60,9 +83,17 @@
      input, and only the widget itself knows which of its parts to untick. */
   var resetters = [];
 
-  function matchesGlobal(record) {
+  /* `tableName` is what makes one filter reach every related table (phase 39).
+
+     Each table is flattened with its own parents, so `Employee Master - Department` is a
+     real column on Salary and on Attendance - one rule narrows both. A table that does not
+     carry the column at all (a Budget at a different grain) **skips** the rule rather than
+     failing the row: treating a missing column as "no match" emptied that panel completely,
+     which read as a broken dashboard rather than as a filter that does not apply to it. */
+  function matchesGlobal(record, tableName) {
     for (var column in globalFilters) {
       if (!Object.prototype.hasOwnProperty.call(globalFilters, column)) continue;
+      if (!hasColumn(tableName, column)) continue;
       var rule = globalFilters[column];
       var value = record[column];
 
@@ -86,9 +117,12 @@
   function filteredRows(tableName, exceptPanelId) {
     var rows = datasets[tableName] || [];
     var active = crossFilter && crossFilter.panelId !== exceptPanelId ? crossFilter : null;
+    /* Clicking a bar narrows every table that carries the column clicked, and leaves the
+       ones that do not alone - the same rule the widgets follow. */
+    if (active && !hasColumn(tableName, active.column)) active = null;
 
     return rows.filter(function (record) {
-      if (!matchesGlobal(record)) return false;
+      if (!matchesGlobal(record, tableName)) return false;
       if (active && String(record[active.column]) !== String(active.value)) return false;
       return true;
     });
@@ -394,7 +428,16 @@
      Everything ticked and nothing ticked both mean *unfiltered* - `matchesGlobal` already
      treats an empty value list as "no rule", so there is no way to tick your way into an
      empty dashboard. */
-  function buildChoiceList(host, column, values) {
+  function buildChoiceList(host, column, values, resets) {
+    /* Closed until it is clicked (phase 37). A tick list of three hundred customers sitting
+       open is most of a screen spent on a control nobody has touched yet, so the summary
+       carries what is chosen and the list itself only unfolds when it is wanted. */
+    var panel = document.createElement("details");
+    panel.className = "choice-panel";
+
+    var summary = document.createElement("summary");
+    panel.appendChild(summary);
+
     var box = document.createElement("div");
     box.className = "choice-list";
 
@@ -424,6 +467,7 @@
 
     var readout = document.createElement("span");
     readout.className = "choice-count";
+    summary.appendChild(readout);
 
     function chosen() {
       return ticks.filter(function (tick) { return tick.checked; })
@@ -457,23 +501,121 @@
       apply();
     });
 
-    resetters.push(function () {
+    resets.push(function () {
       ticks.forEach(function (tick) { tick.checked = false; });
       refresh([]);
     });
 
     refresh([]);
-    host.appendChild(box);
-    host.appendChild(readout);
+    panel.appendChild(box);
+    host.appendChild(panel);
   }
 
-  function buildFilter(filter) {
-    var host = document.getElementById("filter-" + filter.panel_id);
-    if (!host) return;
+  /* The lowest and highest number a column holds.
+
+     A plain loop rather than `Math.min.apply(null, numbers)`: `apply` spreads the array
+     into arguments, and an argument list of 90,000 values - which `payload.ROW_LIMIT`
+     allows - throws a RangeError in several browsers. A slider that crashes the page on a
+     big file is not a smaller bug than a slow one. */
+  function numericExtent(tableName, column) {
+    var rows = datasets[tableName] || [];
+    var low = null;
+    var high = null;
+    for (var i = 0; i < rows.length; i++) {
+      var value = Number(rows[i][column]);
+      if (isNaN(value)) continue;
+      if (low === null || value < low) low = value;
+      if (high === null || value > high) high = value;
+    }
+    return { low: low === null ? 0 : low, high: high === null ? 0 : high };
+  }
+
+  /* A number filter with two handles (phase 39).
+
+     One handle could only ever say "show me the big ones". "Between 30,000 and 60,000" -
+     the middle of a salary band, an age group, last quarter's order sizes - was not
+     expressible at all, though `matchesGlobal`'s rule has carried both ends from the start.
+     Only the widget was sending `max: null`.
+
+     Two stacked sliders rather than one overlaid pair: overlapping two native inputs on one
+     track means only the handle on top can ever be grabbed, and the arrangement that fixes
+     that is a pile of pointer-events guesswork. Stacked, both are always reachable, and the
+     readout above them is what actually says what is chosen.
+
+     Either handle pushes the other rather than passing it, so the rule can never be the
+     empty "at least 60,000 and at most 30,000". */
+  function buildRangeFilter(host, column, tableName, resets) {
+    var extent = numericExtent(tableName, column);
+    var low = extent.low;
+    var high = extent.high;
+
+    var box = document.createElement("div");
+    box.className = "range-filter";
+
+    var readout = document.createElement("span");
+    readout.className = "range-readout";
+    box.appendChild(readout);
+
+    function makeSlider(startAt) {
+      var slider = document.createElement("input");
+      slider.type = "range";
+      slider.min = String(low);
+      slider.max = String(high);
+      slider.value = String(startAt);
+      slider.step = "any";
+      box.appendChild(slider);
+      return slider;
+    }
+
+    var fromSlider = makeSlider(low);
+    var toSlider = makeSlider(high);
+    fromSlider.setAttribute("aria-label", column + " from");
+    toSlider.setAttribute("aria-label", column + " to");
+
+    function show(from, to) {
+      readout.textContent = from.toLocaleString() + " to " + to.toLocaleString();
+    }
+
+    function apply(moved) {
+      var from = Number(fromSlider.value);
+      var to = Number(toSlider.value);
+      if (from > to) {
+        /* The handle the reader is holding wins; the other one is pushed along with it. */
+        if (moved === fromSlider) { to = from; toSlider.value = String(to); }
+        else { from = to; fromSlider.value = String(from); }
+      }
+      show(from, to);
+
+      /* A handle still at the end of its track is not a choice, so it is not a rule - the
+         chip bar would otherwise announce a filter the reader never set. */
+      var floor = from > low ? from : null;
+      var ceiling = to < high ? to : null;
+      if (floor === null && ceiling === null) delete globalFilters[column];
+      else globalFilters[column] = { kind: "range", min: floor, max: ceiling };
+      redrawAll();
+    }
+
+    fromSlider.addEventListener("input", function () { apply(fromSlider); });
+    toSlider.addEventListener("input", function () { apply(toSlider); });
+
+    resets.push(function () {
+      fromSlider.value = String(low);
+      toSlider.value = String(high);
+      show(low, high);
+    });
+
+    show(low, high);
+    host.appendChild(box);
+  }
+
+  /* One filter's widget. Every "put me back to nothing chosen" it needs is pushed onto
+     `resets` rather than straight onto the shared `resetters`, so the caller can hand the
+     same pair of functions to Clear all and to this filter's own Clear button. */
+  function buildFilterWidget(filter, host, resets) {
     var column = filter.column;
 
     if (filter.sub_type === "multiselect") {
-      buildChoiceList(host, column, distinctValues(filter.source_table, column));
+      buildChoiceList(host, column, distinctValues(filter.source_table, column), resets);
       return;
     }
 
@@ -493,41 +635,13 @@
         globalFilters[column] = { kind: "values", values: select.value ? [select.value] : [] };
         redrawAll();
       });
-      resetters.push(function () { select.value = ""; });
+      resets.push(function () { select.value = ""; });
       host.appendChild(select);
       return;
     }
 
     if (filter.sub_type === "range") {
-      var numbers = (datasets[filter.source_table] || [])
-        .map(function (record) { return Number(record[column]); })
-        .filter(function (value) { return !isNaN(value); });
-      var low = numbers.length ? Math.min.apply(null, numbers) : 0;
-      var high = numbers.length ? Math.max.apply(null, numbers) : 0;
-
-      var slider = document.createElement("input");
-      slider.type = "range";
-      slider.min = String(low);
-      slider.max = String(high);
-      slider.value = String(low);
-      slider.step = "any";
-
-      var readout = document.createElement("span");
-      readout.className = "range-readout";
-      readout.textContent = "from " + low.toLocaleString();
-
-      slider.addEventListener("input", function () {
-        var floor = Number(slider.value);
-        readout.textContent = "from " + floor.toLocaleString();
-        globalFilters[column] = { kind: "range", min: floor, max: null };
-        redrawAll();
-      });
-      resetters.push(function () {
-        slider.value = String(low);
-        readout.textContent = "from " + low.toLocaleString();
-      });
-      host.appendChild(slider);
-      host.appendChild(readout);
+      buildRangeFilter(host, column, filter.source_table, resets);
       return;
     }
 
@@ -540,8 +654,37 @@
           globalFilters[column] = { kind: "dates", from: from.value, to: to.value };
           redrawAll();
         });
-        resetters.push(function () { input.value = ""; });
+        resets.push(function () { input.value = ""; });
         host.appendChild(input);
+      });
+    }
+  }
+
+  /* Builds one filter and wires its own Clear button.
+
+     Clearing one filter is not Clear all with a smaller loop: the rule for *this* column has
+     to come out of `globalFilters` by name, because the widget going back to "nothing
+     ticked" is only what the reader sees - the rule is what the rows are tested against. */
+  function buildFilter(filter) {
+    var host = document.getElementById("filter-" + filter.panel_id);
+    if (!host) return;
+
+    var resets = [];
+    buildFilterWidget(filter, host, resets);
+
+    function clearThisFilter() {
+      delete globalFilters[filter.column];
+      resets.forEach(function (reset) { reset(); });
+    }
+
+    /* Clear all needs the widget put back too, so the same function serves both. */
+    resetters.push(clearThisFilter);
+
+    var button = document.getElementById("clear-" + filter.panel_id);
+    if (button) {
+      button.addEventListener("click", function () {
+        clearThisFilter();
+        redrawAll();
       });
     }
   }

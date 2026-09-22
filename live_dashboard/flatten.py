@@ -20,9 +20,21 @@ real foreign keys. A panel that needs a link nobody confirmed is reported by
 `model.panel_problems`, not silently joined on a guess - the requirement is explicit that
 relationships have one home, and this is not it.
 
-Tables the walk never reaches (a Calendar, a Budget - a different grain entirely) are
-embedded whole and separately rather than folded in, because folding them in would repeat
-every calendar column on every transaction row.
+**Every table is flattened, each on its own** (phase 39). Before that only one table was -
+the fact table - and its *siblings* were embedded raw: with Employee Master as the parent of
+both Salary and Attendance, a dashboard built on Salary left Attendance with no Department
+column at all, so a Department filter simply could not reach it. Now each table is walked
+child -> parent in its own right, so Salary and Attendance each carry `Employee Master -
+Department` and the one filter narrows both. No table is ever joined to a sibling, so no
+table's row count can be multiplied by this.
+
+A parent also carries **its own** columns a second time under the same prefixed name
+(`Employee Master - Department` beside `Department`). One duplicated column per parent
+column is cheap, and it is what makes the prefixed name mean the same thing on every table -
+including the parent itself, which would otherwise be the one table the filter missed.
+
+A table the walk never reaches from anywhere (a Calendar, a Budget - a different grain
+entirely) is simply a plan with no joins: embedded whole, decorated with nothing.
 """
 
 import logging
@@ -139,12 +151,19 @@ class FlattenPlan:
     Attributes:
         fact_table: the table whose rows survive one-for-one.
         joins: the masters to decorate it with, in the order they must be joined.
-        side_tables: tables the walk never reached, embedded separately.
+        self_prefixed: whether this table's own columns are carried a second time under
+            `Table - Column` names. True when something links *to* this table, because then
+            its columns already appear under that spelling on every child - and a filter
+            written against that spelling has to narrow this table too.
+        key_columns: the columns other tables link to this one by. Left out of the prefixed
+            duplicates for the same reason `_master_columns` leaves them out on a child:
+            two columns with identical values and no way to tell which to filter on.
     """
 
     fact_table: str
     joins: list[JoinStep] = field(default_factory=list)
-    side_tables: list[str] = field(default_factory=list)
+    self_prefixed: bool = False
+    key_columns: tuple[str, ...] = ()
 
     def describe(self) -> str:
         """One plain sentence naming what was joined, for the caption under the picker.
@@ -158,53 +177,12 @@ class FlattenPlan:
         return f"{self.fact_table}, with columns from {names} joined on."
 
 
-def detect_fact_table(relationships: list[Relationship], table_names: list[str],
-                      connection: duckdb.DuckDBPyConnection | None = None) -> str:
-    """Which table the dashboard should be built around.
-
-    The fact table is the one that *refers to* the most others - a sales line points at a
-    customer, a stock item and a date, while a customer master points at nothing. So the
-    count of appearances as `Relationship.child_table` is the signal, and it is a good one
-    precisely because the relationships were confirmed by hand.
-
-    Ties, and the no-relationships case, fall back to the largest table by row count: with
-    nothing else to go on, the biggest table is the one worth putting on a dashboard.
-
-    Returns an empty string when there are no tables at all, rather than raising - the view
-    shows its own "load some data first" message in that case.
-    """
-    if not table_names:
-        return ""
-
-    references: dict[str, int] = {name: 0 for name in table_names}
-    for relationship in relationships:
-        if relationship.child_table in references:
-            references[relationship.child_table] += 1
-
-    best = max(references.values())
-    candidates = [name for name in table_names if references[name] == best]
-
-    if len(candidates) == 1:
-        return candidates[0]
-
-    if connection is None:
-        return sorted(candidates)[0]
-
-    def rows(name: str) -> int:
-        try:
-            return row_count(connection, name)
-        except DataEngineError:
-            # A table that cannot be counted simply loses the tie-break; it is not a reason
-            # to fail the whole screen.
-            logger.exception("Could not count '%s' while detecting the fact table.", name)
-            return 0
-
-    return max(sorted(candidates), key=rows)
-
-
 def join_plan(fact_table: str, relationships: list[Relationship],
               table_names: list[str]) -> FlattenPlan:
-    """The masters reachable from the fact table, breadth-first, and what is left over.
+    """The masters reachable from this table, breadth-first.
+
+    Called once per table since phase 39, so "the fact table" here means only "the table
+    whose rows survive one-for-one in this plan" - every table gets a turn at being it.
 
     Breadth-first rather than depth-first so the shallowest path to a table wins: if a
     Category is reachable both directly and through a SubCategory, the direct link is the one
@@ -214,7 +192,15 @@ def join_plan(fact_table: str, relationships: list[Relationship],
     pointing at a third) would join the third twice and duplicate its columns; with it, the
     first path wins and the second is skipped.
     """
-    plan = FlattenPlan(fact_table=fact_table)
+    plan = FlattenPlan(
+        fact_table=fact_table,
+        self_prefixed=any(link.parent_table == fact_table and link.child_table in table_names
+                          for link in relationships),
+        key_columns=tuple(dict.fromkeys(
+            link.parent_column for link in relationships
+            if link.parent_table == fact_table
+        )),
+    )
     visited = {fact_table}
     alias_of = {fact_table: "fact"}
 
@@ -247,7 +233,6 @@ def join_plan(fact_table: str, relationships: list[Relationship],
             )
             frontier.append((parent, depth + 1))
 
-    plan.side_tables = [name for name in table_names if name not in visited]
     return plan
 
 
@@ -301,6 +286,45 @@ def _master_columns(connection: duckdb.DuckDBPyConnection, step: JoinStep,
     return pairs
 
 
+def _own_prefixed_columns(connection: duckdb.DuckDBPyConnection, plan: FlattenPlan,
+                         taken: set[str]) -> list[tuple[str, str]]:
+    """A parent's own columns, repeated under the `Table - Column` name its children use.
+
+    This is the small piece of duplication that makes one filter reach every table. A child
+    of Employee Master carries `Employee Master - Department` because of the join; Employee
+    Master itself carried only `Department`, so a filter written against the prefixed name
+    narrowed every table *except* the one the column actually came from.
+
+    Only for a table something links to - a table nobody references has no prefixed
+    spelling anywhere, so duplicating its columns would only make the page bigger.
+
+    Returns `(source_column, flattened_name)` pairs, like `_master_columns`.
+    """
+    if not plan.self_prefixed:
+        return []
+
+    try:
+        described = connection.execute(
+            f"SELECT * FROM {quote_identifier(plan.fact_table)} LIMIT 0"
+        ).description
+    except duckdb.Error:
+        logger.exception("Could not describe '%s'; leaving its own prefixed columns out.",
+                         plan.fact_table)
+        return []
+
+    pairs = []
+    for column_info in described or []:
+        column = column_info[0]
+        if column in plan.key_columns:
+            continue
+        flattened = vega_safe_name(f"{plan.fact_table}{COLUMN_SEPARATOR}{column}")
+        if flattened in taken:
+            continue
+        taken.add(flattened)
+        pairs.append((column, flattened))
+    return pairs
+
+
 def build_flatten_sql(connection: duckdb.DuckDBPyConnection, plan: FlattenPlan) -> str:
     """The one query that produces the embedded table.
 
@@ -319,9 +343,15 @@ def build_flatten_sql(connection: duckdb.DuckDBPyConnection, plan: FlattenPlan) 
             f"'{plan.fact_table}' couldn't be read, so the dashboard's data can't be built."
         ) from error
 
-    selected = [f"fact.*"]
+    selected = ["fact.*"]
     taken: set[str] = set()
     joins: list[str] = []
+
+    # First, so a master can never claim a name this table's own column already answers to.
+    selected.extend(
+        f"fact.{quote_identifier(column)} AS {quote_identifier(flattened)}"
+        for column, flattened in _own_prefixed_columns(connection, plan, taken)
+    )
 
     for step in plan.joins:
         pairs = _master_columns(connection, step, fact_rows, taken)
@@ -369,14 +399,27 @@ def flatten_main_table(connection: duckdb.DuckDBPyConnection, plan: FlattenPlan,
         ) from error
 
 
-def load_side_table(connection: duckdb.DuckDBPyConnection, table: str) -> pd.DataFrame:
-    """One unjoined table, embedded alongside the main one.
+def flatten_every_table(connection: duckdb.DuckDBPyConnection,
+                        relationships: list[Relationship],
+                        table_names: list[str]) -> tuple[dict[str, pd.DataFrame], str]:
+    """Every table the dashboard can draw from, each decorated with its own parents.
+
+    One plan per table rather than one plan for the page (phase 39). Each table keeps its
+    own row count - a table is only ever joined child -> parent, never to a sibling - and
+    each ends up carrying its parents' columns under the same `Employee Master - Department`
+    spelling, which is what lets a single filter narrow all of them.
+
+    Returns `(tables, description)`, the description being one sentence per table for the
+    caption that tells the user what the app joined.
 
     Raises:
-        DashboardDataError: if it can't be read.
+        DashboardDataError: if any one table cannot be assembled. Partial data would mean a
+            filter silently missing a table, which is the exact failure this phase removes.
     """
-    try:
-        return _safe_frame(connection.execute(f"SELECT * FROM {quote_identifier(table)}").df())
-    except duckdb.Error as error:
-        logger.exception("Could not read the side table '%s'.", table)
-        raise DashboardDataError(f"'{table}' couldn't be read for this dashboard.") from error
+    tables: dict[str, pd.DataFrame] = {}
+    sentences: list[str] = []
+    for name in table_names:
+        plan = join_plan(name, relationships, table_names)
+        tables[name] = flatten_main_table(connection, plan)
+        sentences.append(plan.describe())
+    return tables, " ".join(sentences)

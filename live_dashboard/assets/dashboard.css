@@ -106,13 +106,48 @@ body {
 }
 
 .filter { display: flex; flex-direction: column; gap: 6px; width: 210px; }
-.filter > label {
+.filter-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.filter-head > label {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
+
+/* Clears this one filter. Quiet until it is wanted: a row of loud buttons beside every
+   filter reads as the page's main controls, which they are not. */
+.filter-clear {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.filter-clear:hover { color: var(--accent); text-decoration: underline; }
+
+/* The tick list, closed until clicked. The summary shows what is chosen, so a shut filter
+   still says "3 of 240 selected" rather than hiding the fact that it is filtering. */
+.choice-panel {
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: var(--page-bg);
+}
+.choice-panel > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 8px 10px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.choice-panel > summary::-webkit-details-marker { display: none; }
+.choice-panel > summary::after { content: "\25be"; color: var(--text-muted); }
+.choice-panel[open] > summary::after { content: "\25b4"; }
+.choice-panel[open] > summary { border-bottom: 1px solid var(--panel-border); }
 .filter select, .filter input[type="date"] {
   font: inherit;
   width: 100%;
@@ -129,9 +164,6 @@ body {
    grows with the data: three values and three hundred must leave the filter row the same
    shape, or a long lookup pushes the whole dashboard down the page. */
 .choice-list {
-  border: 1px solid var(--panel-border);
-  border-radius: 6px;
-  background: var(--page-bg);
   max-height: 132px;
   overflow-y: auto;
   padding: 4px;
@@ -156,6 +188,12 @@ body {
   margin-bottom: 2px;
 }
 .choice-count, .range-readout { font-size: 11px; color: var(--text-muted); }
+
+/* Two handles, stacked (phase 39). The readout sits above them because it, not the
+   handles, is what actually says which band is chosen. */
+.range-filter { display: flex; flex-direction: column; gap: 4px; }
+.range-filter input[type="range"] { width: 100%; margin: 0; accent-color: var(--accent); }
+.range-readout { font-variant-numeric: tabular-nums; }
 
 .dash-main { flex: 1; padding: 16px 24px 32px; min-width: 0; }
 
@@ -194,7 +232,27 @@ body {
 .panel .chart-host { width: 100%; }
 .panel .vega-embed { display: block; width: 100%; }
 
-.panel h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+/* A panel asked for `width:full` takes the whole row even where another visual shares its
+   row number. `flex-basis: 100%` rather than a width, so it still shrinks inside the padding
+   the row already has. */
+.panel.panel-full { flex: 1 1 100%; }
+
+/* A panel asked for `width:half` stays half the row even when nothing shares its row
+   number - `flex-grow:0` stops it stretching into the empty space, unlike the default
+   panel which grows to fill whatever room a row-mate leaves it. `calc(50% - 8px)` splits
+   the row's 16px gap evenly so two half panels still sum to the full row width. */
+.panel.panel-half { flex: 0 0 calc(50% - 8px); max-width: calc(50% - 8px); }
+
+/* How big a card prints its number (phase 38). Cards ignored size entirely before then: the
+   one number a card exists to show was the same 30px whether it was the headline of the page
+   or one of four along the top. */
+.panel.card-small .card-value { font-size: 22px; }
+.panel.card-medium .card-value { font-size: 30px; }
+.panel.card-large .card-value { font-size: 44px; }
+
+/* Centred since phase 37: a column of left-aligned headings over charts that each centre
+   their own plot area reads as a page that was never laid out. */
+.panel h2 { margin: 0 0 10px; font-size: 14px; font-weight: 600; text-align: center; }
 .panel-note { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
 
 .card-value { font-size: 30px; font-weight: 600; line-height: 1.2; }
