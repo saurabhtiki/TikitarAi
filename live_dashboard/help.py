@@ -72,7 +72,8 @@ def capabilities_markdown(max_visuals: int) -> str:
 | Chart shapes | {shapes} | *"show this as a donut"* |
 | Ways to total a number | {totals} | *"show the average salary"* |
 | Table styles | {tables} | *"make it a drill-down by category, subcategory and item"* |
-| Several numbers on one chart | Up to {MAX_MEASURES_PER_CHART} numbers together; different units go on a second axis on the right | *"show min, average and max salary by department"* or *"salary as bars and headcount as a line"* |
+| Several numbers at once | Up to {MAX_MEASURES_PER_CHART} together on a chart (different units go on a second axis on the right) or as columns on a drill-down table | *"show min, average and max salary by department"* or *"a drill-down of sum of cost, sum of quantity and average price by category and item"* |
+| The Rows column | A drill-down counts the rows behind each group; it shows for a single total and hides once there are several | *"show the Rows column"*, *"drop the Rows column"* |
 | How it looks | **Data labels** on {labellable} (a pie shows each slice's percentage), **legend** {_listed(LEGEND_POSITIONS)}, **axis titles** on/off, **colour** from {_listed(NAMED_COLOURS)}, ****size {_listed(PANEL_SIZES)}, **width** {_listed(PANEL_WIDTHS)}, **card size** {_listed(CARD_SIZES)} | *"turn on data labels"*, *"make it medium"* |
 | Numbers written properly | **Currency** in any of {_listed(CURRENCY_CODES)} | *"show amounts in currency"* |
 | Filters | {filters}, down the left or across the top; a number filter has two handles | *"between 30,000 and 60,000"* |

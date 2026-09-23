@@ -451,6 +451,32 @@ class PanelSpec:
         """Whether this chart draws more than the one number every chart draws."""
         return bool(self.extra_measures)
 
+    def all_measures(self) -> list[dict]:
+        """Every number this panel totals, its own first, in the order they were asked for.
+
+        `measures_on` answers the same question for a chart, where the answer is split in
+        two because a chart has two axes. A drill-down table has none: each measure is a
+        column beside the last, so the order is the whole of the arrangement and the `axis`
+        a measure carries is ignored rather than removed - it is still a chart's word, and
+        the same panel might be turned back into a chart by the next round.
+        """
+        mine = [{"column": self.measure_column, "aggregation": self.aggregation,
+                 "axis": AXIS_LEFT}]
+        return mine + [dict(one) for one in self.extra_measures]
+
+    def wants_row_count(self) -> bool:
+        """Whether a drill-down prints the "Rows" column beside its totals.
+
+        Shown by default for a single total and hidden once there are several: one number
+        per group leaves room for the count of rows behind it, five do not - and a reader
+        who asked for five specific numbers did not ask for a sixth. `row_count` in the
+        properties overrides it either way, so neither answer is unreachable.
+        """
+        asked = self.properties.get("row_count")
+        if asked is not None:
+            return bool(asked)
+        return not self.extra_measures
+
     def height(self) -> int:
         """The panel's drawn height, already clamped by `clean_properties`.
 
@@ -565,8 +591,8 @@ def clean_properties(raw: str | dict | None) -> dict:
                 cleaned["height"] = max(MIN_PANEL_HEIGHT, min(int(float(text)), MAX_PANEL_HEIGHT))
             except ValueError:
                 logger.info("Ignoring an unreadable height %r in a panel's properties.", text)
-        elif name in {"labels", "data_labels", "axis_titles"}:
-            key_name = "labels" if name in {"labels", "data_labels"} else "axis_titles"
+        elif name in {"labels", "data_labels", "axis_titles", "row_count"}:
+            key_name = {"data_labels": "labels"}.get(name, name)
             word = text.lower()
             if word in {"yes", "true", "on", "1"}:
                 cleaned[key_name] = True
@@ -693,6 +719,13 @@ def property_problems(panel: "PanelSpec") -> str:
     asked for something and did not get it, and saying so is the difference between a
     setting that quietly does nothing and one that has a reason.
     """
+    is_drilldown = panel.visual_type == VISUAL_TABLE and panel.sub_type == TABLE_DRILLDOWN
+    if "row_count" in panel.properties and not is_drilldown:
+        # The Rows column counts the rows behind a group's total, and only a drill-down
+        # has groups. Said rather than dropped, for the reason the whole function exists.
+        return ("Only a drill-down table has a Rows column - it counts the rows behind "
+                "each group's total.")
+
     if panel.visual_type != VISUAL_CHART:
         if panel.properties.get("labels"):
             return "Only charts can print their numbers on themselves."
@@ -735,6 +768,8 @@ def properties_text(properties: dict) -> str:
         parts.append(f"labels:{'yes' if properties['labels'] else 'no'}")
     if "axis_titles" in properties:
         parts.append(f"axis_titles:{'yes' if properties['axis_titles'] else 'no'}")
+    if "row_count" in properties:
+        parts.append(f"row_count:{'yes' if properties['row_count'] else 'no'}")
     for name in ("legend", "colour", "size", "width", "card_size"):
         if name in properties:
             parts.append(f"{name}:{properties[name]}")
@@ -886,6 +921,13 @@ def panel_problems(
         return ""
 
     if panel.visual_type == VISUAL_TABLE:
+        if panel.extra_measures and panel.sub_type != TABLE_DRILLDOWN:
+            # A flat table prints the rows themselves, so there is nothing for a second
+            # total to be a total *of*. Said here rather than ignored: the columns were
+            # asked for, and a table that silently drops four of them is the bug this
+            # phase exists to fix.
+            return ("A flat table lists the rows themselves, so it has no totals to add "
+                    "a number to. A drill-down table can show several.")
         if not panel.source_columns:
             if panel.sub_type == TABLE_DRILLDOWN:
                 return ("Pick the columns this drill-down should group by, outermost "
@@ -914,6 +956,13 @@ def panel_problems(
             total = DASHBOARD_AGGREGATIONS.get(panel.aggregation, panel.aggregation)
             return (f"'{total}' is measured against a whole chart, so it can't be a "
                     "drill-down's total. Use a sum, an average or a count.")
+
+        # Several totals, one column each (phase 41). The same cap and the same column
+        # check a chart gets - the only difference is that a table has no axis to put one
+        # on, so `axis` is ignored rather than checked.
+        trouble = _extra_measure_problems(panel, missing)
+        if trouble:
+            return trouble
 
     # Cards, charts and drill-down tables all compute a number; a count needs no column.
     if panel.aggregation != AGG_COUNT and not panel.measure_column:
@@ -973,10 +1022,9 @@ def panel_problems(
                 total = DASHBOARD_AGGREGATIONS.get(panel.aggregation, panel.aggregation)
                 return (f"'{total}' is measured against the rest of this chart, so no "
                         "other number can share it.")
-            for one in panel.extra_measures:
-                column = str(one.get("column") or "")
-                if one.get("aggregation") != AGG_COUNT and missing(column):
-                    return _unreachable(column, panel.source_table)
+            trouble = _extra_measure_problems(panel, missing)
+            if trouble:
+                return trouble
 
         # A running total adds each category to the ones before it, so the order has to mean
         # something. Over unordered labels the climbing line is an accident of sorting.
@@ -987,6 +1035,23 @@ def panel_problems(
                 "date column, or switch it to a sum."
             )
 
+    return ""
+
+
+def _extra_measure_problems(panel: "PanelSpec", missing) -> str:
+    """The checks every extra measure gets, wherever it is drawn - or "".
+
+    Shared by charts and drill-down tables rather than written twice: a measure over a
+    column no confirmed link reaches is the same wrong answer on both, and the sentence the
+    user reads about it should be the same sentence.
+
+    `missing` is the caller's own "is this column out of reach" test, so this stays clear of
+    fetching the table's columns a second time.
+    """
+    for one in panel.extra_measures:
+        column = str(one.get("column") or "")
+        if one.get("aggregation") != AGG_COUNT and missing(column):
+            return _unreachable(column, panel.source_table)
     return ""
 
 

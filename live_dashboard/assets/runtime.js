@@ -255,7 +255,20 @@
      The note under the table says when the cap bit, so nothing is dropped silently. */
   var DRILLDOWN_ROW_LIMIT = 2000;
 
-  function drilldownGroups(rows, levels, measureColumn, aggregation) {
+  function drilldownMeasures(panel) {
+    /* The columns of totals a drill-down prints, as the payload carries them. A page
+       exported before phase 41 has one measure and no list, so one is built from the two
+       fields it does carry - the same file then opens showing what it always showed. */
+    if (panel.measures && panel.measures.length) return panel.measures;
+    return [{
+      column: panel.measure_column,
+      aggregation: panel.aggregation,
+      label: panel.measure_label || "Total",
+      is_count: panel.aggregation === "count"
+    }];
+  }
+
+  function drilldownGroups(rows, levels, measures) {
     /* The whole tree of a drill-down table: one node per group, each with its own total and
        its children below it. Pure arithmetic over plain objects and no DOM anywhere, which
        is what lets `tests/test_live_dashboard_runtime.py` run it in Node.
@@ -297,8 +310,13 @@
            row carries. */
         match: buckets[label].value,
         count: own.length,
-        value: aggregate(own, measureColumn, aggregation),
-        children: drilldownGroups(own, rest, measureColumn, aggregation)
+        /* One total per column asked for, in the order they were asked for. Each is the
+           same `aggregate` a card runs, over this group's rows and nothing else - so a
+           level's average is an average of that level, not an average of averages. */
+        values: measures.map(function (measure) {
+          return aggregate(own, measure.column, measure.aggregation);
+        }),
+        children: drilldownGroups(own, rest, measures)
       };
     });
   }
@@ -315,7 +333,7 @@
         var index = flat.length;
         flat.push({
           label: node.label, column: node.column, match: node.match,
-          count: node.count, value: node.value,
+          count: node.count, values: node.values,
           depth: depth, parent: parent, hasChildren: node.children.length > 0, open: false
         });
         walk(node.children, depth + 1, index);
@@ -360,16 +378,24 @@
     if (!host) return;
 
     var levels = panel.source_columns || [];
+    var measures = drilldownMeasures(panel);
+    /* Shown by default for a single total and dropped once there are several - the payload
+       has already decided, and `!== false` keeps an older page's Rows column. */
+    var showRowCount = panel.show_row_count !== false;
     var rows = filteredRows(panel.source_table, panel.panel_id);
-    var groups = drilldownGroups(rows, levels, panel.measure_column, panel.aggregation);
+    var groups = drilldownGroups(rows, levels, measures);
     var flat = drilldownRows(groups, DRILLDOWN_ROW_LIMIT);
 
     var table = document.createElement("table");
     table.className = "drilldown";
 
+    var headings = [levels.join(" / ")];
+    if (showRowCount) headings.push("Rows");
+    measures.forEach(function (measure) { headings.push(measure.label || "Total"); });
+
     var head = document.createElement("thead");
     var headRow = document.createElement("tr");
-    [levels.join(" / "), "Rows", panel.measure_label || "Total"].forEach(function (text, at) {
+    headings.forEach(function (text, at) {
       var cell = document.createElement("th");
       cell.textContent = text;
       if (at > 0) cell.className = "numeric";
@@ -402,17 +428,25 @@
       labelCell.appendChild(text);
       line.appendChild(labelCell);
 
-      var countCell = document.createElement("td");
-      countCell.className = "numeric";
-      countCell.textContent = entry.count.toLocaleString();
-      line.appendChild(countCell);
+      if (showRowCount) {
+        var countCell = document.createElement("td");
+        countCell.className = "numeric";
+        countCell.textContent = entry.count.toLocaleString();
+        line.appendChild(countCell);
+      }
 
-      var valueCell = document.createElement("td");
-      valueCell.className = "numeric";
-      valueCell.textContent = formatNumber(
-        entry.value, panel.number_format || "plain", panel.currency || ""
-      );
-      line.appendChild(valueCell);
+      measures.forEach(function (measure, at) {
+        var valueCell = document.createElement("td");
+        valueCell.className = "numeric";
+        /* A count is a number of rows, not an amount: on a page set to currency, "3" is
+           three rows and printing it as a price would be a plain lie. */
+        valueCell.textContent = formatNumber(
+          entry.values[at],
+          measure.is_count ? "plain" : (panel.number_format || "plain"),
+          panel.currency || ""
+        );
+        line.appendChild(valueCell);
+      });
 
       if (entry.hasChildren) {
         line.addEventListener("click", function () {

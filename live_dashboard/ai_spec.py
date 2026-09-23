@@ -238,6 +238,11 @@ _CORE_RULES = """Hard rules:
   ("Category, SubCategory, Item") - two to four of them - and it needs an `aggregation`
   and, unless that is "count", a `measure_column`, exactly like a chart. It shows one
   total per group, not the rows themselves. Use "flat" when the user wants the rows.
+- A "drilldown" table can total SEVERAL numbers - one column each, in the order asked for.
+  The first goes in `measure_column` + `aggregation` and the rest in `more_measures`,
+  exactly as on a chart; the axis is ignored here, because columns have no sides. Asked for
+  "sum of Cost, sum of Quantity, and the average, minimum and maximum of Price", write them
+  all. A "flat" table cannot: it lists rows, so it has no totals to add a number to.
 - Some sub-types need one more field, and are dropped without it:
   bar_stacked, bar_grouped and heatmap need `colour_by` (the second breakdown);
   combo needs a right-axis entry in `more_measures` (the number drawn as a line);
@@ -294,6 +299,9 @@ _DESIGN_RULES = """Design rules - follow these unless the user asks for somethin
   all on the LEFT with `more_measures` - they share a unit, so they must share an axis to
   be compared. Use "right" only when the units differ (rupees against a headcount),
   which is what a combo chart is.
+- On a drill-down table, write the totals in the order the user listed them - the first is
+  the leftmost column. Set "row_count:yes" only if they ask how many rows are behind each
+  group; a drill-down that lists its own totals does not need the count as well.
 - Use "width:full" for the one chart the page is really about, and for a wide table. Two
   half-width charts to a row is the ordinary case and needs no width at all.
 - Filter on a RELATED table's column rather than on one table's own column where both
@@ -479,6 +487,8 @@ def describe_properties_for_prompt() -> str:
         f"    size: {', '.join(PANEL_SIZES)} - how tall a chart is drawn\n"
         f"    width: {', '.join(PANEL_WIDTHS)} - full takes the whole row\n"
         f"    card_size: {', '.join(CARD_SIZES)} - how big a card prints its number\n"
+        "    row_count: yes or no - the 'Rows' column on a drill-down table, counting the "
+        "rows behind each group's total. Only on a drill-down.\n"
         "    border: yes or no; radius: 0 to 2"
     )
 
@@ -642,7 +652,9 @@ _FIELDS_BY_KIND: dict[str, frozenset[str]] = {
 #: level. A flat table keeps the shorter list - `aggregation` defaults to "sum" on every
 #: panel whether or not anything totals, so printing it on a flat table would advertise a
 #: field that changes nothing and invite a round to "fix" it.
-_DRILLDOWN_EXTRA_FIELDS = frozenset({"measure_column", "aggregation"})
+#: `more_measures` is here too since phase 41: a round that cannot see the four totals a
+#: drill-down already has would replace them with the one it was asked to add.
+_DRILLDOWN_EXTRA_FIELDS = frozenset({"measure_column", "aggregation", "more_measures"})
 
 
 def _panel_fields_for_prompt(panel: PanelSpec) -> str:
@@ -1063,6 +1075,20 @@ def _build_one(
             f"Skipped '{panel.display_title()}': '{panel.measure_column}' isn't a number, so "
             "it can't be totalled. Count unique would work over it if you meant to count it."
         )
+
+    # A drill-down's extra totals are columns of numbers exactly like its first one, so a
+    # text column among them is the same silent column of zeroes - four times over.
+    if sub_type == TABLE_DRILLDOWN:
+        numeric = _numeric_columns(frame)
+        for one in panel.extra_measures:
+            column = str(one.get("column") or "")
+            if one.get("aggregation") in TEXT_FRIENDLY_AGGREGATIONS:
+                continue
+            if column not in numeric:
+                return None, (
+                    f"Skipped '{panel.display_title()}': '{column}' isn't a number, so it "
+                    "can't be one of this table's totals."
+                )
 
     if bad_top_n:
         logger.info("A proposed panel had an unreadable top_n %r - showing everything.",
@@ -1549,6 +1575,12 @@ def describe_panel(panel: PanelSpec) -> str:
             total = DASHBOARD_AGGREGATIONS.get(panel.aggregation, panel.aggregation)
             what = "rows" if panel.aggregation == AGG_COUNT else panel.measure_column
             levels = " -> ".join(panel.source_columns) or "no levels yet"
+            if panel.extra_measures:
+                # Named one by one, like a chart's: the user asked for five totals, and
+                # "and 4 more" would not tell them whether they got the five they meant.
+                others = ", ".join(vega_spec.measure_label(one)
+                                   for one in panel.extra_measures)
+                what = f"{what}, with {others}"
             return (f"**{panel.display_title()}** - drill-down table of {total} of {what} "
                     f"by {levels} - row {panel.row_number}")
         return (f"**{panel.display_title()}** - table of "

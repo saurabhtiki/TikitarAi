@@ -1208,6 +1208,74 @@ def test_a_drilldown_on_the_page_is_described_to_the_next_round_with_its_number(
     assert AGG_SUM in described
 
 
+def test_a_drilldown_can_be_asked_for_several_totals(monkeypatch):
+    """The request that started phase 41: five numbers asked for, five numbers built. Before
+    this, `more_measures` was whitelisted to five chart shapes and a table's four extra
+    totals were dropped without a word."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[_drilldown(
+        more_measures="Quantity:sum; Amount:average; Amount:min; Amount:max"
+    )]))
+
+    assert warnings == []
+    panel = spec.panels[0]
+    assert [one["column"] for one in panel.all_measures()] == [
+        "Amount", "Quantity", "Amount", "Amount"
+    ]
+    assert [one["aggregation"] for one in panel.all_measures()] == [
+        AGG_SUM, AGG_SUM, "average", "minimum"
+    ]
+
+
+def test_a_drilldowns_extra_total_over_a_text_column_is_dropped(monkeypatch):
+    """The same guard the first total gets. A summed text column is a column of zeroes at
+    every level, and four of them is four times the lie."""
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[_drilldown(
+        more_measures="Customer - CustName:sum"
+    )]))
+
+    assert spec is None
+    assert warnings and "isn't a number" in warnings[0]
+
+
+def test_a_flat_table_asked_for_several_totals_is_dropped_with_a_sentence(monkeypatch):
+    spec, warnings, _ = _generate(monkeypatch, ProposedDashboard(panels=[_drilldown(
+        sub_type="flat", more_measures="Quantity:sum"
+    )]))
+
+    assert spec is None
+    assert warnings and "drill-down table can show several" in warnings[0]
+
+
+def test_a_drilldown_names_every_total_it_shows(monkeypatch):
+    """What the user reads before accepting a round. "and 3 more" would not tell them
+    whether the five numbers they asked for are the five they are about to get."""
+    spec, _, _ = _generate(monkeypatch, ProposedDashboard(panels=[_drilldown(
+        more_measures="Quantity:sum; Amount:average"
+    )]))
+    sentence = ai_spec.describe_panel(spec.panels[0])
+
+    assert "Sum of Amount" in sentence
+    assert "Sum of Quantity" in sentence and "Average of Amount" in sentence
+
+
+def test_a_drilldowns_totals_are_described_to_the_next_round(monkeypatch):
+    """`describe_spec_for_prompt` is the round's only memory: a drill-down whose extra
+    totals it cannot see comes back from "rename this table" with four columns missing."""
+    spec, _, _ = _generate(monkeypatch, ProposedDashboard(panels=[_drilldown(
+        more_measures="Quantity:sum"
+    )]))
+
+    described = ai_spec.describe_spec_for_prompt(spec)
+    assert "more_measures=" in described
+    assert "Quantity" in described
+
+
+def test_the_prompt_offers_the_rows_column_setting():
+    """A setting advertised in the prompt and dropped on arrival is the bug phase 38 was
+    written for; one the vocabulary never mentions cannot be asked for at all."""
+    assert "row_count" in ai_spec.describe_properties_for_prompt()
+
+
 def test_a_flat_table_is_not_described_with_an_aggregation_it_does_not_use():
     """`aggregation` defaults to "sum" on every panel whether or not anything totals, so
     printing it on a flat table would advertise a field that changes nothing - and phase 38

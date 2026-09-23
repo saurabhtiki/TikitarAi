@@ -525,3 +525,51 @@ def test_a_drilldown_has_no_search_box():
     assert "<input class=\"table-search\"" in html_export.build_dashboard_html(
         dashboard(flat), {"main": FRAME}
     )
+
+
+# --------------------------------------------------------------------------------------
+# Several totals on one drill-down (phase 41)
+# --------------------------------------------------------------------------------------
+
+
+def test_every_total_reaches_the_runtime_with_a_heading_of_its_own():
+    """The browser computes the numbers but not their names: the headings are built here so
+    a card and a drill-down of the same number read alike."""
+    panel = drilldown(extra_measures=[
+        {"column": "Amount", "aggregation": "average", "axis": m.AXIS_LEFT},
+        {"column": "", "aggregation": m.AGG_COUNT, "axis": m.AXIS_LEFT},
+    ])
+    entry = payload_of(html_export.build_dashboard_html(
+        dashboard(panel), {"main": FRAME}))["panels"][0]
+
+    assert [one["column"] for one in entry["measures"]] == ["Amount", "Amount", ""]
+    assert [one["label"] for one in entry["measures"]] == [
+        "Sum of Amount", "Average of Amount", "Count"
+    ]
+
+
+def test_a_count_column_is_marked_so_it_is_not_printed_as_money():
+    """A count is a number of rows, not an amount. On a page set to currency, "3" printed as
+    a price is a confident wrong answer - and the browser has the format but not the
+    reason, so the reason is decided here."""
+    panel = drilldown(
+        extra_measures=[{"column": "", "aggregation": m.AGG_COUNT, "axis": m.AXIS_LEFT}],
+        properties={"number_format": "currency", "currency": "INR"},
+    )
+    entry = payload_of(html_export.build_dashboard_html(
+        dashboard(panel), {"main": FRAME}))["panels"][0]
+
+    assert [one["is_count"] for one in entry["measures"]] == [False, True]
+
+
+def test_the_rows_column_is_decided_in_python_not_guessed_at_in_the_browser():
+    """One place decides, so the page and the sentence the user read about it agree."""
+    one = payload_of(html_export.build_dashboard_html(
+        dashboard(drilldown()), {"main": FRAME}))["panels"][0]
+    several = payload_of(html_export.build_dashboard_html(
+        dashboard(drilldown(extra_measures=[
+            {"column": "Amount", "aggregation": "average", "axis": m.AXIS_LEFT}
+        ])), {"main": FRAME}))["panels"][0]
+
+    assert one["show_row_count"] is True
+    assert several["show_row_count"] is False

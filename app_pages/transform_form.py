@@ -374,7 +374,7 @@ def _render_output(
 
     mode = st.radio(
         "Where should the answer go?",
-        options=["in_place", "new"],
+        options=["in_place", "new"],index=0,
         format_func=lambda value: (
             f"Update **{source_label}**" if value == "in_place" else "Save as a new table"
         ),

@@ -273,12 +273,13 @@ def test_a_column_named_after_a_javascript_builtin_is_still_matched():
 
 SALES = """
 var sales = [
-  {Category: "Food", Sub: "Fruit", Amount: 10},
-  {Category: "Food", Sub: "Fruit", Amount: 20},
-  {Category: "Food", Sub: "Bread", Amount: 5},
-  {Category: "Drink", Sub: "Tea", Amount: 70},
-  {Category: "", Sub: "Tea", Amount: 1}
+  {Category: "Food", Sub: "Fruit", Amount: 10, Qty: 1},
+  {Category: "Food", Sub: "Fruit", Amount: 20, Qty: 3},
+  {Category: "Food", Sub: "Bread", Amount: 5, Qty: 2},
+  {Category: "Drink", Sub: "Tea", Amount: 70, Qty: 7},
+  {Category: "", Sub: "Tea", Amount: 1, Qty: 9}
 ];
+var SUM_AMOUNT = [{column: "Amount", aggregation: "sum"}];
 """
 
 
@@ -290,10 +291,10 @@ def test_every_level_totals_the_rows_beneath_it():
     """The number a reader checks by hand. A level whose total is not its children's total
     is a pivot table that lies, and nothing in Python would ever see it."""
     answers = _drilldown("""
-    var tree = drilldownGroups(sales, ["Category", "Sub"], "Amount", "sum");
+    var tree = drilldownGroups(sales, ["Category", "Sub"], SUM_AMOUNT);
     console.log(JSON.stringify({
-      top: tree.map(function (node) { return [node.label, node.value, node.count]; }),
-      food: tree[2].children.map(function (node) { return [node.label, node.value]; })
+      top: tree.map(function (node) { return [node.label, node.values[0], node.count]; }),
+      food: tree[2].children.map(function (node) { return [node.label, node.values[0]]; })
     }));
     """)
 
@@ -306,11 +307,11 @@ def test_a_drilldown_can_use_any_total_a_card_can():
     """It computes exactly what a card computes, once per group - so the same `aggregate`
     answers both, and an average is an average of that group's rows and nothing else."""
     answers = _drilldown("""
-    var averages = drilldownGroups(sales, ["Category", "Sub"], "Amount", "average");
-    var counts = drilldownGroups(sales, ["Category", "Sub"], "", "count");
+    var averages = drilldownGroups(sales, ["Category", "Sub"], [{column: "Amount", aggregation: "average"}]);
+    var counts = drilldownGroups(sales, ["Category", "Sub"], [{column: "", aggregation: "count"}]);
     console.log(JSON.stringify({
-      foodAverage: averages[2].value,
-      foodCount: counts[2].value
+      foodAverage: averages[2].values[0],
+      foodCount: counts[2].values[0]
     }));
     """)
 
@@ -322,10 +323,10 @@ def test_the_deepest_level_is_a_group_too_not_the_raw_rows():
     """One shape rather than two: every row on the page is a group with a total, so a reader
     never has to work out whether the row they are looking at is a total or a record."""
     answers = _drilldown("""
-    var tree = drilldownGroups(sales, ["Category", "Sub"], "Amount", "sum");
+    var tree = drilldownGroups(sales, ["Category", "Sub"], SUM_AMOUNT);
     var fruit = tree[2].children[1];
     console.log(JSON.stringify({
-      label: fruit.label, value: fruit.value, count: fruit.count,
+      label: fruit.label, value: fruit.values[0], count: fruit.count,
       children: fruit.children.length
     }));
     """)
@@ -337,7 +338,7 @@ def test_the_rows_come_out_in_reading_order_each_knowing_its_parent():
     """What makes opening and closing a class toggle rather than a redraw: a row's parent is
     its position in this list, so closing a group hides everything under it in one pass."""
     answers = _drilldown("""
-    var tree = drilldownGroups(sales, ["Category", "Sub"], "Amount", "sum");
+    var tree = drilldownGroups(sales, ["Category", "Sub"], SUM_AMOUNT);
     var flat = drilldownRows(tree, 2000);
     console.log(JSON.stringify(flat.map(function (row) {
       return [row.label, row.depth, row.parent, row.hasChildren];
@@ -361,7 +362,7 @@ def test_the_row_cap_stops_a_level_over_a_column_with_thousands_of_values():
     answers = _run("""
     var many = [];
     for (var i = 0; i < 50; i++) many.push({Code: "C" + i, Amount: i});
-    var tree = drilldownGroups(many, ["Code"], "Amount", "sum");
+    var tree = drilldownGroups(many, ["Code"], [{column: "Amount", aggregation: "sum"}]);
     console.log(JSON.stringify({ groups: tree.length, capped: drilldownRows(tree, 10).length }));
     """, LIFTED_DRILLDOWN)
 
@@ -375,8 +376,8 @@ def test_a_drilldown_with_no_levels_builds_nothing_rather_than_throwing():
     that takes the rest of the page's JavaScript down with it."""
     answers = _drilldown("""
     console.log(JSON.stringify({
-      none: drilldownGroups(sales, [], "Amount", "sum").length,
-      missing: drilldownGroups(sales, null, "Amount", "sum").length
+      none: drilldownGroups(sales, [], SUM_AMOUNT).length,
+      missing: drilldownGroups(sales, null, SUM_AMOUNT).length
     }));
     """)
 
@@ -393,9 +394,9 @@ def test_a_category_named_after_a_javascript_builtin_is_one_group_like_any_other
       {Name: "__proto__", Amount: 5}, {Name: "__proto__", Amount: 5},
       {Name: "constructor", Amount: 3}, {Name: "Normal", Amount: 1}
     ];
-    var tree = drilldownGroups(odd, ["Name"], "Amount", "sum");
+    var tree = drilldownGroups(odd, ["Name"], [{column: "Amount", aggregation: "sum"}]);
     console.log(JSON.stringify(tree.map(function (node) {
-      return [node.label, node.count, node.value];
+      return [node.label, node.count, node.values[0]];
     })));
     """, LIFTED_DRILLDOWN)
 
@@ -407,10 +408,112 @@ def test_a_group_keeps_the_value_a_click_should_filter_on():
     it would empty the page. The raw value is kept beside the label for exactly that press."""
     answers = _run("""
     var rows = [{Code: 7, Amount: 1}, {Code: "", Amount: 2}];
-    var tree = drilldownGroups(rows, ["Code"], "Amount", "sum");
+    var tree = drilldownGroups(rows, ["Code"], [{column: "Amount", aggregation: "sum"}]);
     console.log(JSON.stringify(tree.map(function (node) {
       return [node.label, node.match];
     })));
     """, LIFTED_DRILLDOWN)
 
     assert answers == [["(blank)", None], ["7", 7]]
+
+
+# --------------------------------------------------------------------------------------
+# Several totals on one drill-down (phase 41)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_drilldown_totals_every_measure_it_was_given():
+    """The whole of phase 41: five numbers asked for, five columns of numbers back. Each is
+    the same `aggregate` a card runs over that group's rows, so the columns cannot disagree
+    with each other about which rows a group holds."""
+    answers = _drilldown("""
+    var measures = [
+      {column: "Amount", aggregation: "sum"},
+      {column: "Qty", aggregation: "sum"},
+      {column: "Amount", aggregation: "average"},
+      {column: "Amount", aggregation: "minimum"},
+      {column: "Amount", aggregation: "maximum"}
+    ];
+    var tree = drilldownGroups(sales, ["Category", "Sub"], measures);
+    console.log(JSON.stringify({
+      food: tree[2].values,
+      fruit: tree[2].children[1].values
+    }));
+    """)
+
+    # Food is 10 + 20 + 5; its Fruit branch is 10 + 20.
+    assert answers["food"] == [35, 6, 35 / 3, 5, 20]
+    assert answers["fruit"] == [30, 4, 15, 10, 20]
+
+
+def test_the_measures_stay_in_the_order_they_were_asked_for():
+    """The order *is* the arrangement - column one is the first total the user named. The
+    same five numbers in another order is a different table to read."""
+    answers = _drilldown("""
+    var forwards = drilldownGroups(sales, ["Category"], [
+      {column: "Amount", aggregation: "sum"}, {column: "Qty", aggregation: "sum"}
+    ]);
+    var backwards = drilldownGroups(sales, ["Category"], [
+      {column: "Qty", aggregation: "sum"}, {column: "Amount", aggregation: "sum"}
+    ]);
+    console.log(JSON.stringify({
+      forwards: forwards[2].values, backwards: backwards[2].values
+    }));
+    """)
+
+    assert answers["forwards"] == [35, 6]
+    assert answers["backwards"] == [6, 35]
+
+
+def test_a_count_measure_needs_no_column_of_its_own():
+    """"How many rows, and how much" is one of the commonest pairs asked for, and a count
+    has no column to total - the same exception a card already makes."""
+    answers = _drilldown("""
+    var tree = drilldownGroups(sales, ["Category"], [
+      {column: "", aggregation: "count"}, {column: "Amount", aggregation: "sum"}
+    ]);
+    console.log(JSON.stringify(tree[2].values));
+    """)
+
+    assert answers == [3, 35]
+
+
+def test_the_flattened_rows_carry_every_total_through():
+    """The renderer prints from the flat list, not the tree, so a measure that survives the
+    grouping and is lost in the flattening is a blank column on the page."""
+    answers = _drilldown("""
+    var tree = drilldownGroups(sales, ["Category", "Sub"], [
+      {column: "Amount", aggregation: "sum"}, {column: "Qty", aggregation: "maximum"}
+    ]);
+    console.log(JSON.stringify(drilldownRows(tree, 2000).map(function (row) {
+      return [row.label, row.values];
+    })));
+    """)
+
+    assert answers == [
+        ["(blank)", [1, 9]],
+        ["Tea", [1, 9]],
+        ["Drink", [70, 7]],
+        ["Tea", [70, 7]],
+        ["Food", [35, 3]],
+        ["Bread", [5, 2]],
+        ["Fruit", [30, 3]],
+    ]
+
+
+def test_a_page_exported_before_phase_41_still_draws_its_one_total():
+    """An older exported file carries `measure_column` and no list. It opens showing what it
+    always showed rather than a table of empty cells - the same promise phase 38's migration
+    made for a saved dashboard, kept here for a file already on someone's disk."""
+    answers = _run("""
+    var older = {measure_column: "Amount", aggregation: "sum", measure_label: "Sum of Amount"};
+    var newer = {measures: [{column: "Qty", aggregation: "sum", label: "Sum of Qty"}]};
+    console.log(JSON.stringify({
+      older: drilldownMeasures(older),
+      newer: drilldownMeasures(newer).length
+    }));
+    """, LIFTED_DRILLDOWN + ("drilldownMeasures",))
+
+    assert answers["older"] == [{"column": "Amount", "aggregation": "sum",
+                                "label": "Sum of Amount", "is_count": False}]
+    assert answers["newer"] == 1

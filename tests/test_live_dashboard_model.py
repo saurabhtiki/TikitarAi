@@ -236,6 +236,94 @@ def test_a_flat_table_still_ignores_the_measure_and_the_aggregation():
     assert m.panel_problems(flat, COLUMNS) == ""
 
 
+# ------------------------------------- several totals on a drill-down (phase 41)
+
+
+def test_a_drilldown_can_total_several_numbers():
+    """The phase's whole point. A chart puts its extra numbers on an axis; a table puts each
+    one in a column of its own, which is why the check had to leave the chart branch."""
+    panel = drilldown(extra_measures=[
+        {"column": "Region2", "aggregation": "average", "axis": m.AXIS_LEFT},
+        {"column": "Amount", "aggregation": "minimum", "axis": m.AXIS_RIGHT},
+    ])
+    assert m.panel_problems(panel, COLUMNS) == ""
+
+
+def test_a_drilldowns_extra_column_must_be_reachable_too():
+    """The same sentence a chart's extra measure gets, because it is the same mistake."""
+    panel = drilldown(extra_measures=m.clean_measures(
+        [{"column": "Nowhere", "aggregation": m.AGG_SUM, "axis": m.AXIS_LEFT}]
+    ))
+    assert "isn't reachable" in m.panel_problems(panel, COLUMNS)
+
+
+def test_a_flat_table_cannot_carry_extra_totals():
+    """A flat table prints the rows themselves, so there is nothing for a second total to be
+    a total of - and saying so is what stops four measures vanishing silently."""
+    flat = m.PanelSpec(
+        visual_type=m.VISUAL_TABLE, sub_type=m.TABLE_FLAT, source_table="main",
+        source_columns=["Amount"],
+        extra_measures=[{"column": "Amount", "aggregation": m.AGG_SUM, "axis": m.AXIS_LEFT}],
+    )
+    assert "drill-down table can show several" in m.panel_problems(flat, COLUMNS)
+
+
+def test_all_measures_lists_the_panels_own_first():
+    """The order is the arrangement: column one is the total the user named first."""
+    panel = drilldown(extra_measures=[
+        {"column": "Region2", "aggregation": "average", "axis": m.AXIS_LEFT},
+    ])
+    assert [one["column"] for one in panel.all_measures()] == ["Amount", "Region2"]
+    assert [one["aggregation"] for one in panel.all_measures()] == [m.AGG_SUM, "average"]
+
+
+def test_the_cap_counts_the_panels_own_measure():
+    """Four numbers in all, the same cap a chart has and for the same reason: past four the
+    reader is scanning columns rather than comparing them."""
+    asked = [{"column": "Amount", "aggregation": m.AGG_SUM, "axis": m.AXIS_LEFT}] * 6
+    panel = drilldown(extra_measures=m.clean_measures(asked))
+    assert len(panel.all_measures()) == m.MAX_MEASURES_PER_CHART
+
+
+def test_the_rows_column_shows_for_one_total_and_hides_for_several():
+    """The complaint that started the phase: a table asked for five numbers printed a sixth
+    column nobody asked for. One total leaves room for the count; five do not."""
+    assert drilldown().wants_row_count() is True
+    several = drilldown(extra_measures=[
+        {"column": "Amount", "aggregation": "average", "axis": m.AXIS_LEFT},
+    ])
+    assert several.wants_row_count() is False
+
+
+def test_asking_for_the_rows_column_overrides_either_default():
+    """Neither answer is unreachable, which is what makes it a setting rather than a rule."""
+    several = drilldown(
+        extra_measures=[{"column": "Amount", "aggregation": "average",
+                         "axis": m.AXIS_LEFT}],
+        properties={"row_count": True},
+    )
+    assert several.wants_row_count() is True
+    assert drilldown(properties={"row_count": False}).wants_row_count() is False
+
+
+def test_the_rows_column_setting_on_anything_else_is_reported():
+    """Only a drill-down has groups to count the rows of. Said rather than dropped, which is
+    the whole job of `property_problems`."""
+    flat = m.PanelSpec(
+        visual_type=m.VISUAL_TABLE, sub_type=m.TABLE_FLAT, source_table="main",
+        source_columns=["Amount"], properties={"row_count": True},
+    )
+    assert "drill-down" in m.property_problems(flat)
+    assert m.property_problems(drilldown(properties={"row_count": True})) == ""
+
+
+def test_row_count_round_trips_through_the_properties_text():
+    """`clean_properties` and `properties_text` are each other's inverse, or a setting is
+    lost the next time a round re-states the visual it is editing."""
+    assert m.clean_properties("row_count:no") == {"row_count": False}
+    assert m.properties_text({"row_count": True}) == "row_count:yes"
+
+
 def test_every_table_sub_type_has_a_label():
     """The catalog the AI is shown is rendered from these, so a sub-type with no label is a
     shape offered to the model as a bare keyword."""

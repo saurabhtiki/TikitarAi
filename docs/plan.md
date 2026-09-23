@@ -1,75 +1,84 @@
-# Phase 40 — Choose the model a round runs on, and a drill-down table
+# Phase 41 — Several totals on a drill-down table, and a Rows column that can go
 
-**Status: built.** Phase 39's plan is in git history.
+**Status: built.** Phase 40's plan is in git history.
 
-Two things the dashboard was missing, both small and both additive. What changed from the
-plan as written, and why:
+A drill-down table drew one number. Asked for *"Sum of Cost, Sum of Quantity, Average,
+Minimum and Maximum of Basic Cost by Category → Item → Vendor"*, it came back with the
+sum alone and four measures quietly gone — `extra_measures` existed since phase 38 but was
+whitelisted to five chart shapes, so a table had nowhere to put them and `clean_measures`
+never saw them. The same page also always printed a **Rows** column nobody asked for.
 
-- **The toggle names the model in the caption, not in its own label.** "Use my model instead
-  of the Light Model" stays the same sentence whichever provider is configured, and the
-  caption right below it already had the job of saying who reads the change.
-- **A drill-down needed no new `PanelSpec` field and so no migration.** `source_columns` is
-  read as the *levels*, `measure_column` + `aggregation` as the number totalled on each.
-- **The drill-down's arithmetic is three plain functions** (`drilldownGroups`,
-  `drilldownRows`, `toggleDrilldownRow`) rather than one renderer, so the totals a reader
-  would check by hand are run in Node by pytest instead of being asserted as source text.
-- **A drill-down has no search box.** It shows totals per group, not the rows a search would
-  look through, so the template leaves the input out rather than drawing a control that
-  finds nothing.
+Both are the same complaint: a drill-down shows what it decided to show rather than what
+was asked for. This phase gives it the columns.
 
-## 1. A toggle to pick the round's model
+What changed from the plan as written, and why:
 
-Rounds have been on the Light Model since phase 35, which is right for "make it horizontal"
-and wrong for "redesign the bottom half". Generate Dashboard already used the session's own
-model; this gives rounds the same choice without taking the cheap default away.
+- **The extra-measure check became a shared function rather than a second copy.**
+  `_extra_measure_problems` is called by the chart branch and the table branch, so a
+  measure over a column no confirmed link reaches gets the same sentence on both.
+- **The Rows column decides in Python, not in the browser.** `wants_row_count()` is the one
+  place, and the payload carries the answer - so the page and the sentence the user read
+  about it cannot disagree.
+- **A drill-down's extra totals go through the "isn't a number" guard too.** Its first one
+  always did; four more summed text columns would have been four more silent columns of
+  zeroes.
 
-- `app_pages/dashboard_view.py::_round_model` draws `st.toggle` beside the caption above
-  **Update the dashboard**, off by default, and returns the profile the round should use.
-- Shown only when there is a second model to switch to. `llm_session.session_profiles`
-  already excludes the Light Model, so a user whose only provider is the light one has no
-  active profile and sees no toggle — a switch with one position is a control that lies.
-- The chosen profile flows into `_render_open_dialog`, `_dialog_ask`, `_dialog_edit_visual`
-  and `_run_round`, so **both** dialogs move together: the per-visual Edit box is the same
-  round with "which one do you mean" already answered, and a toggle that moved only one of
-  them would be a setting that half applies.
-- `revise_dashboard` already takes any profile dict, so nothing in `ai_spec` changed.
-- Not saved into the Task (`session.LD_USE_ACTIVE_MODEL_KEY` is a plain widget key): which
-  model answered is a choice for this sitting, not a property of the dashboard.
+## 1. A drill-down can total several numbers
 
-## 2. Drill-down tables
+One column per measure, in the order they were asked for, the panel's own measure first.
 
-A second table style: rows grouped into collapsible layers with a total on each, the way an
-Excel pivot table's row grouping works — Category, then SubCategory, then Item.
+- `model.py`: the `extra_measures` check moves out of the chart branch into
+  `_extra_measure_problems`, called by charts as before and now by tables. A **flat** table
+  is refused with a sentence of its own ("a flat table lists the rows themselves"), a
+  drill-down accepts up to `MAX_MEASURES_PER_CHART` in all (4, its own included — the same
+  cap and the same reason: past four the reader is scanning, not comparing).
+- `axis` is a chart word. `clean_measures` keeps the field as it always did, and a table
+  simply ignores it: columns sit side by side, so there is no second side for one to go on.
+  Nothing new to save, and so no migration — a phase-40 drill-down has an empty list and
+  reads exactly as it always did.
+- The "that column isn't a number" guard in `ai_spec` already covers a drill-down's own
+  measure. It now covers its extra ones too: a summed text column is a silent column of
+  zeroes, and four of them is four times the lie.
 
-- `model.py`: `TABLE_DRILLDOWN`, `TABLE_SUB_TYPES`, `TABLE_LABELS`, `MIN_DRILLDOWN_LEVELS`
-  (2) and `MAX_DRILLDOWN_LEVELS` (4). `panel_problems` gains a drill-down branch: at least
-  two levels, at most four, every level a real column, and the same measure/aggregation
-  check a card gets — plus a refusal of `percent_of_total` and `running_total`, which are
-  measured against a chart's other bars and have no meaning over a tree of groups.
-- `ai_spec.py`: one `_CORE_RULES` bullet (`columns` are the levels, outermost first), one
-  `_DESIGN_RULES` line (drill rather than list where the data has a hierarchy),
-  `_FIELDS_BY_KIND` lets a table carry `measure_column` and `aggregation` so a round can see
-  its own drill-down, `describe_panel` reads *"drill-down table of Sum of Amount by Category
-  -> SubCategory"*, and the "that column isn't a number" guard now covers drill-downs too.
-- `runtime.js`: `renderTable` branches on `sub_type` so it stays the one entry point every
-  caller already uses. `drilldownGroups` builds the tree with the existing `aggregate`;
-  `drilldownRows` flattens it into printing order with each row's depth and parent;
-  `renderDrilldownTable` builds the rows once and `toggleDrilldownRow` opens and closes them
-  by CSS class rather than redrawing. Top level open, everything under it closed. Clicking a
-  leaf cross-filters on its own level, like a flat table's row.
-- `html_export.py` carries `measure_label` and `sub_type`; the template drops the search box
-  for a drill-down; `dashboard.css` adds the indent, the arrow and `.is-hidden`.
-- `help.py` lists the two table styles and says plainly that a drill-down has no search or
-  sort.
+## 2. The Rows column becomes a setting
+
+- A new `row_count` property (`yes`/`no`), whitelisted in `clean_properties` and offered in
+  `describe_properties_for_prompt`, so *"drop the Rows column"* is a round that works.
+- Its default is **shown for a single total, hidden once there are several**: one number per
+  group leaves room for the count, five do not. The property overrides either way, so
+  nothing is unreachable — `wants_row_count(panel)` is the one place that decides.
+- On a flat table the setting is meaningless, and `property_problems` says so rather than
+  dropping it silently.
+
+## 3. The browser draws the columns
+
+- `runtime.js`: `drilldownGroups(rows, levels, measures)` takes the list and each node carries
+  `values` (one per measure) instead of `value`. `drilldownRows` carries the list through.
+  `renderDrilldownTable` prints one `<th>` per measure from the labels Python built, and a
+  Rows column only when the payload asks for one.
+- A count column is printed plain even on a currency panel: `₹4` rows is not a price.
+- `html_export.py` carries `measures` (column, aggregation, label, whether it is a count)
+  and `show_row_count`, built from `vega_spec.measure_title`/`measure_label` so a card and a
+  drill-down of the same number read alike.
+
+## 4. The AI knows it can
+
+- `_CORE_RULES`: the drill-down bullet gains "extra totals go in `more_measures`, one column
+  each, and the axis is ignored".
+- `_FIELDS_BY_KIND`: `_DRILLDOWN_EXTRA_FIELDS` gains `more_measures`, so a round can see the
+  measures the table already has and add to them rather than replacing them.
+- `describe_panel` names every total on a drill-down, the way it already names a chart's.
+- `help.py`: the "several numbers" row says tables too, and the "not yet" list keeps only
+  what is still true.
 
 **Known limits (v1)**
-- No search and no sorting on a drill-down; a flat table keeps both.
-- Groups are ordered by label, not by size. A pivot table does the same: the reader is
-  looking a category up, not reading a leaderboard.
-- `DRILLDOWN_ROW_LIMIT` caps the page at 2,000 group rows, and the note under the table says
-  when the cap bit.
+- Still no search and no sorting on a drill-down, and groups are still ordered by label.
+- Every measure shares the panel's one number format (counts excepted). Per-column formats
+  would need a format per measure, which is a field per measure for a rare want.
+- Four totals in all, the panel's own included.
 
 ## Done when
-`uv run pytest` is green, and by hand: turn the toggle on and the caption and spinner name
-your own model; ask for *"a drill-down table of sales by category and subcategory"* and it
-appears, opens and closes, and its totals match the same numbers on a card.
+`uv run pytest` is green, and by hand: the original request — *"a drill-down table showing
+Sum of Cost Amount, Sum of Quantity, Average, Minimum and Maximum of Basic Cost p.u. by
+Category → Item Category Code → ItemName → VendorName"* — comes back with five columns, no
+Rows column, and every level's totals matching a card over the same filter.

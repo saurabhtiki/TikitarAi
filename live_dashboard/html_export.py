@@ -173,6 +173,27 @@ def _measure_label(panel: PanelSpec) -> str:
     return vega_spec.measure_title(panel)
 
 
+def _drilldown_measures(panel: PanelSpec) -> list[dict]:
+    """Every column of totals a drill-down prints, the panel's own first.
+
+    `is_count` rides along because a count is not in the panel's unit: on a page set to
+    currency, "3 rows" would otherwise print as a price. The browser has the format but not
+    the reason, so the reason is decided here.
+    """
+    measures = []
+    for at, measure in enumerate(panel.all_measures()):
+        aggregation = str(measure.get("aggregation") or "")
+        measures.append({
+            "column": str(measure.get("column") or ""),
+            "aggregation": aggregation,
+            # The panel's own measure is titled the way a card is titled, so the two read
+            # alike; the extras go through the label every legend already uses.
+            "label": _measure_label(panel) if at == 0 else vega_spec.measure_label(measure),
+            "is_count": aggregation == AGG_COUNT,
+        })
+    return measures
+
+
 def _panel_for_template(panel: PanelSpec, problem: str) -> dict:
     """One panel flattened into what the template needs.
 
@@ -212,10 +233,13 @@ def _panel_for_payload(panel: PanelSpec, spec: DashboardSpec,
     }
 
     if panel.visual_type == VISUAL_TABLE and panel.sub_type == TABLE_DRILLDOWN:
-        # The column heading over a drill-down's totals - "Sum of Amount". Built here rather
-        # than in the browser so a card and a drill-down of the same number read alike, and
-        # so the aggregation's label lives in exactly one place (`vega_spec.measure_title`).
+        # The column headings over a drill-down's totals - "Sum of Amount", "Average of
+        # Price". Built here rather than in the browser so a card and a drill-down of the
+        # same number read alike, and so the aggregation's label lives in exactly one place
+        # (`vega_spec.measure_title`).
         entry["measure_label"] = _measure_label(panel)
+        entry["measures"] = _drilldown_measures(panel)
+        entry["show_row_count"] = panel.wants_row_count()
 
     if panel.visual_type == VISUAL_CHART:
         entry["spec"] = vega_spec.build_vega_spec(
