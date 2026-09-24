@@ -125,7 +125,7 @@ def _parse_iso_then_day_first(series: pd.Series) -> pd.Series:
     still_needed = parsed.isna() & series.notna()
     if not still_needed.any():
         return parsed
-    rest = pd.to_datetime(series[still_needed], errors="coerce", dayfirst=True)
+    rest = pd.to_datetime(series[still_needed], errors="coerce", dayfirst=True, format="mixed")
     try:
         # The two passes can come back at different precisions (seconds vs microseconds),
         # and writing the finer into the coarser raises instead of filling the gaps.
