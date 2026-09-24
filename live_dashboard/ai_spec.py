@@ -235,7 +235,7 @@ _CORE_RULES = """Hard rules:
   way round.
 - A table names the columns it shows in `columns`.
 - A "drilldown" table is different: `columns` is the LEVELS to group by, outermost first
-  ("Category, SubCategory, Item") - two to four of them - and it needs an `aggregation`
+  ("Category, SubCategory, Item") - two to eight of them - and it needs an `aggregation`
   and, unless that is "count", a `measure_column`, exactly like a chart. It shows one
   total per group, not the rows themselves. Use "flat" when the user wants the rows.
 - A "drilldown" table can total SEVERAL numbers - one column each, in the order asked for.
@@ -652,7 +652,7 @@ _FIELDS_BY_KIND: dict[str, frozenset[str]] = {
 #: level. A flat table keeps the shorter list - `aggregation` defaults to "sum" on every
 #: panel whether or not anything totals, so printing it on a flat table would advertise a
 #: field that changes nothing and invite a round to "fix" it.
-#: `more_measures` is here too since phase 41: a round that cannot see the four totals a
+#: `more_measures` is here too since phase 41: a round that cannot see the eight totals a
 #: drill-down already has would replace them with the one it was asked to add.
 _DRILLDOWN_EXTRA_FIELDS = frozenset({"measure_column", "aggregation", "more_measures"})
 
@@ -1077,7 +1077,7 @@ def _build_one(
         )
 
     # A drill-down's extra totals are columns of numbers exactly like its first one, so a
-    # text column among them is the same silent column of zeroes - four times over.
+    # text column among them is the same silent column of zeroes - eight times over.
     if sub_type == TABLE_DRILLDOWN:
         numeric = _numeric_columns(frame)
         for one in panel.extra_measures:

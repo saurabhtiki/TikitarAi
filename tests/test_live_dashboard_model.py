@@ -280,7 +280,7 @@ def test_all_measures_lists_the_panels_own_first():
 def test_the_cap_counts_the_panels_own_measure():
     """Four numbers in all, the same cap a chart has and for the same reason: past four the
     reader is scanning columns rather than comparing them."""
-    asked = [{"column": "Amount", "aggregation": m.AGG_SUM, "axis": m.AXIS_LEFT}] * 6
+    asked = [{"column": "Amount", "aggregation": m.AGG_SUM, "axis": m.AXIS_LEFT}] * 9
     panel = drilldown(extra_measures=m.clean_measures(asked))
     assert len(panel.all_measures()) == m.MAX_MEASURES_PER_CHART
 

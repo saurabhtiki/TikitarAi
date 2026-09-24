@@ -877,6 +877,31 @@ def selection_field(panel: PanelSpec) -> str:
     return panel.group_by
 
 
+#: Bar shapes with one slot per category, which the browser lets scroll once the slots no
+#: longer fit. Lines, areas and scatters are continuous, so squeezing them loses nothing.
+_SCROLLING_BARS = frozenset(
+    {CHART_BAR, CHART_BAR_HORIZONTAL, CHART_BAR_STACKED, CHART_BAR_GROUPED}
+)
+
+
+def scroll_hint(panel: PanelSpec) -> dict | None:
+    """How the browser should grow a bar chart so every category stays readable.
+
+    Returns None for shapes that never scroll. Otherwise the field whose distinct values
+    are the categories, the side they run along, the pixels one slot needs, and (for
+    grouped bars) the field that splits each category into side-by-side bars.
+    """
+    if panel.sub_type not in _SCROLLING_BARS or not panel.group_by:
+        return None
+    grouped = panel.sub_type == CHART_BAR_GROUPED and bool(panel.colour_by)
+    return {
+        "field": panel.group_by,
+        "axis": "y" if panel.sub_type == CHART_BAR_HORIZONTAL else "x",
+        "slot": 18 if grouped else 28,
+        "series_field": panel.colour_by if grouped else "",
+    }
+
+
 def build_vega_spec(
     panel: PanelSpec,
     palette_name: str = PALETTE_DEFAULT,

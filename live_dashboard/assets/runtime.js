@@ -572,11 +572,45 @@
     }
   }
 
+  /* A bar chart with more categories than fit grows past its panel and the panel scrolls,
+     rather than squeezing every bar to a sliver. Vega-Lite sizes to the container once, so
+     the size is set on the view after each refill, when the category count is known. */
+  function fitChartToScroll(panel, view, rows) {
+    var hint = panel.scroll;
+    var host = document.getElementById("chart-" + panel.panel_id);
+    if (!hint || !host) return;
+
+    var categories = {};
+    var series = {};
+    rows.forEach(function (row) {
+      categories[row[hint.field]] = true;
+      if (hint.series_field) series[row[hint.series_field]] = true;
+    });
+    var slots = Object.keys(categories).length *
+      (hint.series_field ? Math.max(1, Object.keys(series).length) : 1);
+    var needed = slots * hint.slot + 80; /* room for the axis labels */
+
+    if (hint.axis === "x") {
+      host.style.overflowX = "auto";
+      var available = host.clientWidth;
+      view.width(Math.max(available, needed));
+    } else {
+      var base = panel.spec.height || 300;
+      host.style.overflowY = "auto";
+      host.style.maxHeight = (base + 8) + "px";
+      view.height(Math.max(base, needed));
+    }
+    view.runAsync();
+  }
+
   function renderChart(panel) {
     var view = views[panel.panel_id];
     if (!view) return;
-    view.data("source", filteredRows(panel.source_table, panel.panel_id));
-    view.runAsync();
+    var rows = filteredRows(panel.source_table, panel.panel_id);
+    view.data("source", rows);
+    view.runAsync().then(function () {
+      fitChartToScroll(panel, view, rows);
+    });
   }
 
   function redrawAll() {
@@ -949,8 +983,11 @@
       vegaEmbed(host, spec, { actions: false, renderer: "canvas" })
         .then(function (result) {
           views[panel.panel_id] = result.view;
-          result.view.data("source", filteredRows(panel.source_table, panel.panel_id));
-          result.view.runAsync();
+          var startRows = filteredRows(panel.source_table, panel.panel_id);
+          result.view.data("source", startRows);
+          result.view.runAsync().then(function () {
+            fitChartToScroll(panel, result.view, startRows);
+          });
 
           if (panel.select_field) {
             result.view.addSignalListener("picked", function (name, value) {

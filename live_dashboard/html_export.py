@@ -252,6 +252,7 @@ def _panel_for_payload(panel: PanelSpec, spec: DashboardSpec,
             panel, spec.palette, THEME_DARK, date_columns
         )["config"]
         entry["select_field"] = vega_spec.selection_field(panel)
+        entry["scroll"] = vega_spec.scroll_hint(panel)
 
     return entry
 

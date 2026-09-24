@@ -138,9 +138,9 @@ AXIS_LEFT = "left"
 AXIS_RIGHT = "right"
 MEASURE_AXES = (AXIS_LEFT, AXIS_RIGHT)
 
-#: How many numbers one chart may draw, the first included. Four is already a busy chart;
+#: How many numbers one chart may draw, the first included. Eight is already a busy chart;
 #: past that the bars are too thin to compare, which is the only reason to draw them.
-MAX_MEASURES_PER_CHART = 4
+MAX_MEASURES_PER_CHART = 8
 
 #: The shapes that can draw more than one number. A pie has one whole to divide, a
 #: histogram one spread to show, a heatmap one number per cell, and a box plot's single
@@ -693,7 +693,7 @@ def clean_measures(raw) -> list[dict]:
 
         cleaned.append({"column": column, "aggregation": aggregation, "axis": axis})
 
-    # The panel's own measure is the first of the four, so the extras stop one short.
+    # The panel's own measure is the first of the eight, so the extras stop one short.
     if len(cleaned) > MAX_MEASURES_PER_CHART - 1:
         logger.info("Keeping only the first %d extra measures of %d.",
                     MAX_MEASURES_PER_CHART - 1, len(cleaned))
