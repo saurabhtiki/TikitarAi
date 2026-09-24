@@ -1219,10 +1219,10 @@ def test_a_drilldown_can_be_asked_for_several_totals(monkeypatch):
     assert warnings == []
     panel = spec.panels[0]
     assert [one["column"] for one in panel.all_measures()] == [
-        "Amount", "Quantity", "Amount", "Amount"
+        "Amount", "Quantity", "Amount", "Amount", "Amount"
     ]
     assert [one["aggregation"] for one in panel.all_measures()] == [
-        AGG_SUM, AGG_SUM, "average", "minimum"
+        AGG_SUM, AGG_SUM, "average", "minimum", "maximum"
     ]
 
 

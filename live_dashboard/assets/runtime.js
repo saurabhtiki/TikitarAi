@@ -586,9 +586,12 @@
       categories[row[hint.field]] = true;
       if (hint.series_field) series[row[hint.series_field]] = true;
     });
-    var slots = Object.keys(categories).length *
+    var shown = Object.keys(categories).length;
+    if (hint.limit) shown = Math.min(shown, hint.limit);
+    var slots = shown *
       (hint.series_field ? Math.max(1, Object.keys(series).length) : 1);
-    var needed = slots * hint.slot + 80; /* room for the axis labels */
+    /* Room for the axis labels, capped because browsers refuse canvases past ~32,000px. */
+    var needed = Math.min(slots * hint.slot + 80, 30000);
 
     if (hint.axis === "x") {
       host.style.overflowX = "auto";

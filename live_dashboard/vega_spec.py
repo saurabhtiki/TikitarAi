@@ -899,6 +899,8 @@ def scroll_hint(panel: PanelSpec) -> dict | None:
         "axis": "y" if panel.sub_type == CHART_BAR_HORIZONTAL else "x",
         "slot": 18 if grouped else 28,
         "series_field": panel.colour_by if grouped else "",
+        # A Top N chart draws only N of the categories, however many the data holds.
+        "limit": int(panel.top_n or 0),
     }
 
 
