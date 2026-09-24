@@ -12,6 +12,7 @@ import io
 import re
 import pandas as pd
 import streamlit as st
+from utils.dates import EXCEL_WRITER_DATE_FORMATS, excel_ready, show_dataframe
 
 st.set_page_config(page_title="Dataset Merge Tool", layout="wide")
 
@@ -157,8 +158,8 @@ def dedupe_and_rename(left_df, right_df, left_keys, right_keys,
 
 def to_excel_bytes(df: pd.DataFrame, log_rows=None) -> bytes:
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Merged_Data")
+    with pd.ExcelWriter(output, engine="openpyxl", **EXCEL_WRITER_DATE_FORMATS) as writer:
+        excel_ready(df).to_excel(writer, index=False, sheet_name="Merged_Data")
         if log_rows:
             log_df = pd.DataFrame(log_rows)
             log_df.to_excel(writer, index=False, sheet_name="Merge_Log")
@@ -216,7 +217,7 @@ if st.session_state.datasets:
             "Columns": df.shape[1],
             "Status": "Used in merge" if name in st.session_state.used_datasets else "Available",
         })
-    st.dataframe(pd.DataFrame(inv_rows), width='stretch', hide_index=True)
+    show_dataframe(pd.DataFrame(inv_rows), width='stretch', hide_index=True)
 
     # --------------------------------------------------------------------
     # Step 2: Preview
@@ -225,7 +226,7 @@ if st.session_state.datasets:
     for name, df in st.session_state.datasets.items():
         used_tag = " ✅ (already merged)" if name in st.session_state.used_datasets else ""
         with st.expander(f"📄 {name}{used_tag}  —  {df.shape[0]} rows × {df.shape[1]} cols"):
-            st.dataframe(df.head(20), width='stretch')
+            show_dataframe(df.head(20), width='stretch')
             st.caption("Column dtypes: " + ", ".join(f"{c} ({t})" for c, t in df.dtypes.astype(str).items()))
 else:
     st.info("Upload at least one Excel file to get started.")
@@ -485,7 +486,7 @@ if st.session_state.working_df is not None:
     st.header("Current merged result")
     wdf = st.session_state.working_df
     st.write(f"**{st.session_state.working_label}** — {wdf.shape[0]} rows × {wdf.shape[1]} columns")
-    st.dataframe(wdf, width='stretch')
+    show_dataframe(wdf, width='stretch')
 
     action_cols = st.columns(2)
     with action_cols[0]:

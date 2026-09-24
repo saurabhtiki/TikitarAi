@@ -16,6 +16,7 @@ from pandas.api.types import is_string_dtype
 
 from cleaner.exceptions import ExportError
 from cleaner.naming import CLEANING_LOG_SHEET_NAME
+from utils.dates import EXCEL_WRITER_DATE_FORMATS, excel_ready
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,9 @@ def column_width(series: pd.Series, header: str) -> int:
 
 
 def write_sheet(writer: pd.ExcelWriter, sheet_name: str, frame: pd.DataFrame) -> None:
+    """One table as a sheet. Dates stay real dates, shown as dd-mm-yyyy by the writer's
+    `EXCEL_WRITER_DATE_FORMATS`."""
+    frame = excel_ready(frame)
     frame.to_excel(writer, sheet_name=sheet_name, index=False, na_rep="")
     worksheet = writer.sheets[sheet_name]
 
@@ -107,7 +111,7 @@ def build_workbook(
 
     buffer = io.BytesIO()
     try:
-        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        with pd.ExcelWriter(buffer, engine="xlsxwriter", **EXCEL_WRITER_DATE_FORMATS) as writer:
             for sheet_name, frame in tables:
                 write_sheet(writer, sheet_name, frame)
             write_sheet(writer, CLEANING_LOG_SHEET_NAME, _log_frame(log or {}))

@@ -42,6 +42,7 @@ from meetings.model import (
     evaluation_buckets_to_text,
 )
 from sidebar import render_sidebar
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -559,7 +560,7 @@ def _render_table_setup(meeting: Meeting, user_id: int, item: AgendaItem) -> Non
             st.error(str(error), icon=":material/error:")
             return
 
-        st.dataframe(frame.head(5), width="stretch", hide_index=True)
+        show_dataframe(frame.head(5), width="stretch", hide_index=True)
 
         editable = st.multiselect(
             "Columns the invitee fills in",
@@ -855,7 +856,7 @@ def _render_consolidated(meeting: Meeting, invitees: list[dict]) -> None:
             summaries[invitee["invitee_id"]] = parsed
 
     st.caption("Rows are agenda items, columns are invitees. Nothing here calls the model.")
-    st.dataframe(
+    show_dataframe(
         matrix.consolidated_frame(meeting, invitees, summaries),
         width="stretch",
         hide_index=True,
@@ -879,7 +880,7 @@ def _render_evaluation_matrix(meeting: Meeting, invitees: list[dict], fields: li
         return
 
     st.caption("Extracted when each chat closed. Use Generate status or Re-extract to refresh.")
-    st.dataframe(
+    show_dataframe(
         matrix.evaluation_frame(fields, invitees, answers),
         width="stretch",
         hide_index=True,
@@ -920,7 +921,7 @@ def _render_table_comparisons(meeting: Meeting, invitees: list[dict]) -> None:
             st.error(str(error), icon=":material/error:")
             continue
 
-        st.dataframe(
+        show_dataframe(
             matrix.table_comparison_frame(table, column, invitees, responses),
             width="stretch",
             hide_index=True,

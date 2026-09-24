@@ -3,6 +3,7 @@ import utils.recon_core as rc
 import io
 import pandas as pd
 from datetime import datetime
+from utils.dates import show_dataframe
 
 
 
@@ -90,9 +91,9 @@ if st.session_state.get("reco_ok"):
                             f"**Unreconciled 3B rows:** {len(res['unreconciled_3b'])}")
 
                 with st.expander(f"Preview unreconciled {tax} — Purchase Register rows"):
-                    st.dataframe(res["unreconciled_books"].head(50), width='stretch')
+                    show_dataframe(res["unreconciled_books"].head(50), width='stretch')
                 with st.expander(f"Preview unreconciled {tax} — 3B GST rows"):
-                    st.dataframe(res["unreconciled_3b"].head(50), width='stretch')
+                    show_dataframe(res["unreconciled_3b"].head(50), width='stretch')
 
         itc_df = pd.read_excel(
             io.BytesIO(st.session_state["updated_gst3b_bytes"]),
@@ -100,7 +101,7 @@ if st.session_state.get("reco_ok"):
             header=3,
         )
         st.subheader("ITC Availability — updated counts")
-        st.dataframe(itc_df["ITC Availability"].value_counts().rename_axis("ITC Availability").reset_index(name="Count"), width='content')
+        show_dataframe(itc_df["ITC Availability"].value_counts().rename_axis("ITC Availability").reset_index(name="Count"), width='content')
 
         st.subheader("⬇️:green[Download Results]")
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")

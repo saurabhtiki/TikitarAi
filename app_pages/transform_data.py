@@ -43,6 +43,7 @@ from transform.pipeline import (
 )
 from transform.registry import get_operation, operations_by_category
 from transform.workspace import NamedFrame, frame_names
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +207,7 @@ def _render_tables(workspace: dict[str, NamedFrame]) -> None:
 def _render_one_table(held: NamedFrame) -> None:
     shown = held.frame.head(session.PREVIEW_ROWS)
     st.caption(f":red[{held.source_label} - {held.shape_label}]")
-    st.dataframe(shown, key=f"tf_preview_{held.name}", width="stretch", hide_index=True)
+    show_dataframe(shown, key=f"tf_preview_{held.name}", width="stretch", hide_index=True)
     if len(held.frame) > len(shown):
         st.caption(
             f":red[Showing {len(shown):,} of {len(held.frame):,} rows. "
@@ -237,7 +238,7 @@ def _render_column_details(held: NamedFrame) -> None:
             )
             return
 
-        st.dataframe(
+        show_dataframe(
             stats,
             key=f"tf_stats_{held.name}",
             width="stretch",
@@ -556,7 +557,7 @@ def _render_preview(workspace: dict[str, NamedFrame], step: dict | None) -> None
         st.warning(warning, icon=":material/info:")
 
     st.caption(f":red[{len(frame):,} row(s), {len(frame.columns):,} column(s)]")
-    st.dataframe(
+    show_dataframe(
         frame.head(session.DIALOG_PREVIEW_ROWS),
         key="tf_step_preview",
         width="stretch",
@@ -757,7 +758,7 @@ def _render_ai_preview(workspace: dict[str, NamedFrame], steps: list[dict]) -> N
     st.caption(
         f":red[{report[-1].output_name}: {len(frame):,} row(s), {len(frame.columns):,} column(s)]"
     )
-    st.dataframe(
+    show_dataframe(
         frame.head(session.DIALOG_PREVIEW_ROWS),
         key="tf_ai_preview_table",
         width="stretch",

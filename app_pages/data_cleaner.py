@@ -50,6 +50,7 @@ from cleaner.steps import (
 )
 from engine import session as engine_session
 from sidebar import render_sidebar
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -903,7 +904,7 @@ def _show_reshape_preview(table: session.TableState, action: str, result, warnin
         st.warning(warning, icon=":material/error:")
 
     st.caption(f"Preview — {len(result):,} row(s) × {len(result.columns):,} column(s).")
-    st.dataframe(
+    show_dataframe(
         display.arrow_safe(result.head(PREVIEW_ROWS_IN_DIALOG)),
         key=f"dc_reshape_preview_{action}_{table.table_id}",
         width="stretch",
@@ -1960,7 +1961,7 @@ def _render_preview(table: session.TableState, cleaned) -> None:
     #if len(cleaned) > session.PREVIEW_ROWS:
         #st.caption(f"Showing the first {session.PREVIEW_ROWS:,} of {len(cleaned):,} rows.")
     shown, as_text = display.to_arrow_safe(cleaned)
-    st.dataframe(
+    show_dataframe(
         shown,
         key=f"dc_preview_{table.table_id}",
         width="stretch",
@@ -1974,7 +1975,7 @@ def _render_preview(table: session.TableState, cleaned) -> None:
         )
 
     with st.expander("Column details", icon=":material/analytics:"):
-        st.dataframe(
+        show_dataframe(
             profiling.column_stats(cleaned, declared_types=pipeline.declared_column_types(table.steps)),
             key=f"dc_stats_{table.table_id}",
             width="stretch",

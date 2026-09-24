@@ -1,4 +1,4 @@
-"""Column-level operations: change type, drop, rename, split, take part of a code.
+"""Column-level operations: change type, drop, rename, split, combine, take part of a code.
 
 `change_dtype` is the most important entry in the whole catalog and the reason it is listed
 first. `cleaner.loaders` reads every uploaded cell as text on purpose, so that a leading
@@ -11,6 +11,7 @@ actually is — visibly and replayably, never silently.
 import logging
 
 import pandas as pd
+from pandas.api.types import is_datetime64_any_dtype, is_float_dtype
 
 from transform.exceptions import InvalidStepParamsError
 from transform.ops_common import (
@@ -22,6 +23,7 @@ from transform.ops_common import (
     to_numeric,
     unique_column_name,
 )
+from utils.dates import format_date_value
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,19 @@ DTYPE_CHOICES = ["number", "whole number", "date", "text", "true/false"]
 
 #: How a split column's pieces are handed back.
 SPLIT_MODES = ["all pieces into new columns", "one piece only"]
+
+#: What goes between combined values, named rather than typed: a lone space typed into a
+#: text box is invisible, and "nothing" is otherwise an empty box that looks unfilled.
+JOINERS = {
+    "space": " ",
+    "dash (-)": "-",
+    "comma (, )": ", ",
+    "slash (/)": "/",
+    "underscore (_)": "_",
+    "nothing": "",
+}
+OTHER_JOINER = "my own"
+JOINER_CHOICES = [*JOINERS, OTHER_JOINER]
 
 
 # --------------------------------------------------------------------------------------
@@ -251,6 +266,83 @@ def validate_split_column(columns_by_role: dict, params: dict) -> None:
 
 def required_split_column(params: dict) -> dict[str, list[str]]:
     return {"source": [str(params.get("column", ""))]}
+
+
+# --------------------------------------------------------------------------------------
+# combine_columns
+# --------------------------------------------------------------------------------------
+
+
+def apply_combine_columns(frames_by_role: dict, params: dict) -> tuple[pd.DataFrame, list[str]]:
+    """Joins two or more columns into one new column - `split_column` in reverse.
+
+    Name `Ravi` and Surname `Kumar` joined by a space give `Ravi Kumar`. A blank piece is
+    left out rather than joined, so `Ravi` with no surname is `Ravi` - not `Ravi ` with a
+    trailing space, or `Ravi-` with a dangling dash. A row with every piece blank is blank.
+    """
+    frame = source_frame(frames_by_role)
+    columns = [str(column) for column in params.get("columns", [])]
+    if len(columns) < 2:
+        raise InvalidStepParamsError("Choose at least two columns to combine.")
+    require_columns(frame, columns, "Combine columns")
+    joiner = _joiner(params)
+
+    pieces = pd.DataFrame({position: _as_text(frame[column]) for position, column in enumerate(columns)})
+    combined = pieces.apply(
+        lambda row: joiner.join(piece for piece in row if isinstance(piece, str) and piece),
+        axis=1,
+    )
+    result = frame.copy()
+    new_name = unique_column_name(result, str(params.get("new_column") or " ".join(columns)))
+    result[new_name] = combined.where(combined != "").astype("string")
+    return result, []
+
+
+def _joiner(params: dict) -> str:
+    """The text that goes between the values.
+
+    Raises:
+        InvalidStepParamsError: for an unknown choice, or "my own" with nothing typed.
+    """
+    choice = params.get("joiner", "space")
+    if choice == OTHER_JOINER:
+        typed = str(params.get("custom_joiner") or "")
+        if not typed:
+            raise InvalidStepParamsError("Type what should go between the values.")
+        return typed
+    if choice not in JOINERS:
+        raise InvalidStepParamsError(f"'{choice}' isn't a joiner this step knows.")
+    return JOINERS[choice]
+
+
+def _as_text(series: pd.Series) -> pd.Series:
+    """One column as tidy text: `5` not `5.0`, `03-04-2025` not `2025-04-03 00:00:00`."""
+    if is_datetime64_any_dtype(series):
+        return series.map(lambda value: format_date_value(value) if pd.notna(value) else pd.NA)
+    if is_float_dtype(series):
+        return series.map(
+            lambda value: pd.NA if pd.isna(value) else (str(int(value)) if float(value).is_integer() else str(value))
+        )
+    return series.astype("string").str.strip()
+
+
+def describe_combine_columns(step: dict) -> str:
+    params = step.get("params", {})
+    columns = ", ".join(params.get("columns", []))
+    choice = params.get("joiner", "space")
+    joiner = f"'{params.get('custom_joiner', '')}'" if choice == OTHER_JOINER else choice
+    named = f" as {params['new_column']}" if params.get("new_column") else ""
+    return f"Combined {columns} with {joiner} between{named}"
+
+
+def validate_combine_columns(columns_by_role: dict, params: dict) -> None:
+    if len(params.get("columns") or []) < 2:
+        raise InvalidStepParamsError("Choose at least two columns to combine.")
+    _joiner(params)
+
+
+def required_combine_columns(params: dict) -> dict[str, list[str]]:
+    return {"source": [str(column) for column in params.get("columns", [])]}
 
 
 # --------------------------------------------------------------------------------------

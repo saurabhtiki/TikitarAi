@@ -10,6 +10,7 @@ import logging
 import re
 import warnings
 
+import numpy as np
 import pandas as pd
 from pandas.api.types import is_datetime64_any_dtype, is_numeric_dtype, is_string_dtype
 
@@ -98,16 +99,42 @@ def parse_datetime_series(series: pd.Series, date_format: str | None = None) -> 
     """Parses a text column into dates, returning the parsed series and the index of
     values that were present before but couldn't be read.
 
-    `date_format`, when given, is applied strictly; otherwise pandas infers it.
+    `date_format`, when given, is applied strictly. Otherwise ISO dates (`2025-04-03`) are
+    read first, since they can only mean one thing, and pandas infers the format of the
+    rest **day-first** - this app's users write `03-04-2025` for the 3rd of April, and
+    month-first would read it as the 4th of March and fail outright on `13-04-2025`.
     """
     was_present = series.notna()
     with warnings.catch_warnings():
         # Mixed or ambiguous formats warn per-column; the failure count reported back to
         # the user is the actionable signal, so the warning itself is noise here.
         warnings.simplefilter("ignore")
-        parsed = pd.to_datetime(series, errors="coerce", format=date_format)
+        if date_format:
+            parsed = pd.to_datetime(series, errors="coerce", format=date_format)
+        else:
+            parsed = _parse_iso_then_day_first(series)
     failed = series.index[was_present & parsed.isna()]
     return parsed, failed
+
+
+def _parse_iso_then_day_first(series: pd.Series) -> pd.Series:
+    """Dates with no stated format: ISO ones as ISO, the rest guessed day-first."""
+    if is_datetime64_any_dtype(series):
+        return series
+    parsed = pd.to_datetime(series, errors="coerce", format="ISO8601")
+    still_needed = parsed.isna() & series.notna()
+    if not still_needed.any():
+        return parsed
+    rest = pd.to_datetime(series[still_needed], errors="coerce", dayfirst=True)
+    try:
+        # The two passes can come back at different precisions (seconds vs microseconds),
+        # and writing the finer into the coarser raises instead of filling the gaps.
+        parsed = parsed.astype(np.result_type(parsed.dtype, rest.dtype))
+    except (TypeError, ValueError, AttributeError) as error:
+        # A time zone on one side only: nothing to line up, so assign as it stands.
+        logger.debug("Could not line up date precisions for '%s': %s", series.name, error)
+    parsed[still_needed] = rest
+    return parsed
 
 
 DATE_FORMAT_CHOICES: list[tuple[str, str | None]] = [

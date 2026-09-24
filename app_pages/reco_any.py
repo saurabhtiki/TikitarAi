@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 
 import utils.recon_core_reco as rc
+from utils.dates import show_dataframe
 
 st.set_page_config(page_title="Universal Reconciliation Tool", layout="wide")
 
@@ -25,12 +26,12 @@ with col1:
     #get dataframe from uploaded file and display it in an expander
     with st.expander("Preview Left dataset",key="left_preview"):
         leftdata=pd.read_excel(left_file) if left_file else None
-        st.dataframe(leftdata, width='stretch')
+        show_dataframe(leftdata, width='stretch')
 with col2:
     right_file = st.file_uploader("Right dataset (data on 'Sheet1')", type=["xlsx"], key="right_upload")
     with st.expander("Preview Right dataset",key="right_preview"):
         rightdata=pd.read_excel(right_file) if right_file else None
-        st.dataframe(rightdata, width='stretch')
+        show_dataframe(rightdata, width='stretch')
 st.write("To Replace values in mapping columns before matching, upload a Replace Values file (optional). "
         "Every match of REPLACE found in a mapping-column value is substituted with REPLACE WITH before matching (e.g. 'PVT.' → 'PRIVATE').")
 cols1,cols2=st.columns(2,border=True,vertical_alignment="center")
@@ -224,13 +225,13 @@ if st.session_state.get("ran_ok"):
             )
 
             with st.expander(f"Preview reconciled — Left rows ({label})"):
-                st.dataframe(res["reconciled_left"].head(50), width='stretch')
+                show_dataframe(res["reconciled_left"].head(50), width='stretch')
             with st.expander(f"Preview reconciled — Right rows ({label})"):
-                st.dataframe(res["reconciled_right"].head(50), width='stretch')
+                show_dataframe(res["reconciled_right"].head(50), width='stretch')
             with st.expander(f"Preview unreconciled — Left rows ({label})"):
-                st.dataframe(res["unreconciled_left"].head(50), width='stretch')
+                show_dataframe(res["unreconciled_left"].head(50), width='stretch')
             with st.expander(f"Preview unreconciled — Right rows ({label})"):
-                st.dataframe(res["unreconciled_right"].head(50), width='stretch')
+                show_dataframe(res["unreconciled_right"].head(50), width='stretch')
 
     st.subheader("⬇️ :green[Download Results]")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -33,6 +33,7 @@ from engine.exceptions import DataEngineError
 from engine.relationships import Relationship
 from llm import session as llm_session
 from llm import suggestions as llm_suggestions
+from utils.dates import dates_as_text, show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +234,7 @@ def render_upload_report(tables: list[session.EngineTable]) -> None:
         ],
         columns=["Table", "From", "Rows", "Columns"],
     )
-    st.dataframe(summary, key="de_tables_summary", width="stretch", hide_index=True)
+    show_dataframe(summary, key="de_tables_summary", width="stretch", hide_index=True)
     st.caption("The names under **Table** are what you'll refer to when you ask questions.")
 
     _render_remove_buttons(tables)
@@ -241,7 +242,7 @@ def render_upload_report(tables: list[session.EngineTable]) -> None:
     for table in tables:
         with st.expander(f"Preview {table.table_name}", icon=":material/table:"):
             try:
-                st.dataframe(
+                show_dataframe(
                     session.preview(table.table_name),
                     key=f"de_preview_{table.table_id}",
                     width="stretch",
@@ -418,10 +419,10 @@ def _render_offending_rows(check) -> None:
     if check.orphan_count > len(frame):
         st.caption(f"Showing the first {len(frame):,} of {check.orphan_count:,} {label} rows.")
 
-    st.dataframe(frame, key=f"de_offending_{check.relationship.label}", width="stretch", hide_index=True)
+    show_dataframe(frame, key=f"de_offending_{check.relationship.label}", width="stretch", hide_index=True)
     st.download_button(
         "Download these rows as CSV",
-        data=frame.to_csv(index=False).encode("utf-8"),
+        data=dates_as_text(frame).to_csv(index=False).encode("utf-8"),
         file_name="rows_to_fix.csv",
         mime="text/csv",
         key=f"de_offending_download_{check.relationship.label}",

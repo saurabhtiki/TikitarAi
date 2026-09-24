@@ -39,6 +39,7 @@ from reports import db as reports_db
 from reports import session as reports_session
 from reports.exceptions import ReportDataError
 from sidebar import render_sidebar
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -213,7 +214,7 @@ def _render_message(message: ChatMessage, index: int) -> None:
                 st.caption(f":orange[{warning}]")
 
         if routing.OUTPUT_DATAFRAME in message.outputs and message.frame is not None:
-            st.dataframe(message.frame, key=f"cr_frame_{index}", width="stretch", hide_index=True)
+            show_dataframe(message.frame, key=f"cr_frame_{index}", width="stretch", hide_index=True)
 
         if message.text:
             st.markdown(message.text)

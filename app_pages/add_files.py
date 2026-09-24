@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 from datetime import datetime
+from utils.dates import EXCEL_WRITER_DATE_FORMATS, excel_ready, show_dataframe
 
 st.set_page_config(page_title="Add Files", layout="wide")
 
@@ -64,11 +65,11 @@ if submitted:
 
         if all_dfs:
             combined = pd.concat(all_dfs, ignore_index=True)
-            st.dataframe(combined, width="stretch")
+            show_dataframe(combined, width="stretch")
 
             output = BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                combined.to_excel(writer, index=False, sheet_name="Combined")
+            with pd.ExcelWriter(output, engine="openpyxl", **EXCEL_WRITER_DATE_FORMATS) as writer:
+                excel_ready(combined).to_excel(writer, index=False, sheet_name="Combined")
             output.seek(0)
 
             st.download_button(

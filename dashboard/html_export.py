@@ -61,6 +61,7 @@ from dashboard.images import item_png
 from dashboard.model import UNTITLED_REPORT, Report, link_problems, walk
 from dashboard.pinned_tables import PREVIEW_ROWS
 from dashboard.rich_text import sanitize_comment
+from utils.dates import dates_as_text
 
 logger = logging.getLogger(__name__)
 
@@ -94,9 +95,9 @@ def frame_to_html(frame: pd.DataFrame) -> str:
 
     The one edit to pandas' output is dropping the inline `text-align` it always writes
     onto the header row: an inline style beats a stylesheet, so leaving it there would let
-    pandas override whichever preset the user chose.
+    pandas override whichever preset the user chose. Dates are written dd-mm-yyyy.
     """
-    shown = frame.head(PREVIEW_ROWS)
+    shown = dates_as_text(frame.head(PREVIEW_ROWS))
     return _HEADER_ALIGN_PATTERN.sub("<tr>", shown.to_html(index=False, escape=True, border=0, na_rep=""))
 
 

@@ -25,6 +25,7 @@ import io
 import pandas as pd
 import streamlit as st
 
+from utils.dates import EXCEL_WRITER_DATE_FORMATS, excel_ready, show_dataframe
 from utils.generic_pdf_extractor import extract_pdf_to_json
 
 st.set_page_config(page_title="PDF -> Excel Extractor", layout="wide")
@@ -96,7 +97,7 @@ if pdf_files:
             "example_value": [_ci_example_value(k) for k in all_keys],
         }
     )
-    st.dataframe(keys_df, width='stretch', height=300)
+    show_dataframe(keys_df, width='stretch', height=300)
 
     # Starter mapping built directly from this batch's own keys, so it
     # always matches whatever PDFs were just uploaded.
@@ -128,7 +129,7 @@ if pdf_files:
         mapping_df = pd.read_excel(mapping_file, usecols=[0, 1])
         mapping_df.columns = ["output_column", "json_key"]
         mapping_df = mapping_df.dropna(subset=["output_column"])
-    st.dataframe(mapping_df, width='stretch')
+    show_dataframe(mapping_df, width='stretch')
 
 # ---------------------------------------------------------------------------
 # Step 4: Generate output
@@ -161,11 +162,11 @@ if extracted and mapping_df is not None:
                 )
 
         out_df = pd.DataFrame(rows)
-        st.dataframe(out_df, width='stretch')
+        show_dataframe(out_df, width='stretch')
 
         out_buf = io.BytesIO()
-        with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-            out_df.to_excel(writer, index=False, sheet_name="Extracted Data")
+        with pd.ExcelWriter(out_buf, engine="openpyxl", **EXCEL_WRITER_DATE_FORMATS) as writer:
+            excel_ready(out_df).to_excel(writer, index=False, sheet_name="Extracted Data")
         st.download_button(
             "Download Output Excel",
             data=out_buf.getvalue(),

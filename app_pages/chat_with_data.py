@@ -82,6 +82,7 @@ from engine import session
 from engine.exceptions import CalculatedColumnError, DataEngineError
 from llm import session as llm_session
 from sidebar import render_sidebar
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -493,7 +494,7 @@ def _dialog_show_data(payload: dict) -> None:
 
     shown = f" — first {len(frame)} shown" if len(frame) < rows else ""
     st.caption(f"{rows} row(s) x {len(frame.columns)} column(s){shown}.")
-    st.dataframe(frame, key="an_show_data_frame", width="stretch", hide_index=True)
+    show_dataframe(frame, key="an_show_data_frame", width="stretch", hide_index=True)
 
     if st.button(
         "Close", key="an_show_data_close_button", width="stretch", help="Back to the chat."
@@ -527,7 +528,7 @@ def _dialog_chat_type_schema(payload: dict) -> None:
 
     for position, table in enumerate(chat_type.tables):
         st.markdown(f"**{table.table_name}**")
-        st.dataframe(
+        show_dataframe(
             pd.DataFrame(
                 {
                     "Column": table.column_names,
@@ -552,7 +553,7 @@ def _dialog_chat_type_schema(payload: dict) -> None:
     ]
     if described:
         st.markdown("**Column meanings**")
-        st.dataframe(
+        show_dataframe(
             pd.DataFrame(
                 {
                     "Table": [saved.table for saved in described],
@@ -665,7 +666,7 @@ def _render_message(message: ChatMessage, index: int) -> None:
             _render_chart_controls(message, index)
 
         if routing.OUTPUT_DATAFRAME in message.outputs and message.frame is not None:
-            st.dataframe(message.frame, key=f"an_frame_{index}", width="stretch", hide_index=True)
+            show_dataframe(message.frame, key=f"an_frame_{index}", width="stretch", hide_index=True)
             _render_generate_chart_button(message, index)
 
         if message.text:

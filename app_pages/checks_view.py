@@ -63,6 +63,7 @@ from checks.model import (
 from dashboard import session as dashboard_session
 from engine import session as engine_session
 from llm import session as llm_session
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -661,7 +662,7 @@ def _render_results(check: Check, frame: pd.DataFrame, user_id: int) -> None:
     if shown.empty:
         st.info("No records to show for that filter.", icon=":material/info:")
     else:
-        st.dataframe(shown.head(PREVIEW_ROWS), width="stretch", key=f"ck_result_{check.check_id}")
+        show_dataframe(shown.head(PREVIEW_ROWS), width="stretch", key=f"ck_result_{check.check_id}")
         if len(shown) > PREVIEW_ROWS:
             st.caption(f"Showing the first {PREVIEW_ROWS} of {len(shown)} rows. The report keeps all of them.")
         # `shown` whole, not the previewed head: a chart of the first 500 of 20,000 breaches

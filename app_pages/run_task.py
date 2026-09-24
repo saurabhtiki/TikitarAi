@@ -74,6 +74,7 @@ from sidebar import render_sidebar
 from tasks import db as tasks_db
 from tasks.exceptions import TaskStorageError
 from tasks.model import Task
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +160,7 @@ def _dialog_schema(payload: dict) -> None:
             on_click="ignore",
             help="A CSV with these column headings and no rows, ready to fill in.",
         )
-        st.dataframe(
+        show_dataframe(
             pd.DataFrame(
                 {
                     "Column": [column.name for column in table.columns],

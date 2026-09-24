@@ -52,6 +52,7 @@ from report_items.model import (
     freeze_run,
     source_id_for,
 )
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,7 @@ def _dialog_show_data(payload: dict) -> None:
 
     shown = f" — first {len(frame)} shown" if len(frame) < rows else ""
     st.caption(f"{rows} row(s) x {len(frame.columns)} column(s){shown}.")
-    st.dataframe(frame, key="ri_show_data_frame", width="stretch", hide_index=True)
+    show_dataframe(frame, key="ri_show_data_frame", width="stretch", hide_index=True)
 
     if st.button(
         "Close",
@@ -603,7 +604,7 @@ def _render_results(item: ReportItem, frame: pd.DataFrame, persona: str, user_id
             icon=":material/info:",
         )
     else:
-        st.dataframe(frame.head(PREVIEW_ROWS), width="stretch", key=f"ri_result_{item.item_id}")
+        show_dataframe(frame.head(PREVIEW_ROWS), width="stretch", key=f"ri_result_{item.item_id}")
         if len(frame) > PREVIEW_ROWS:
             st.caption(
                 f"Showing the first {PREVIEW_ROWS} of {len(frame):,} rows. The report keeps all of them."

@@ -104,6 +104,7 @@ from dashboard.model import (
 from dashboard.rich_text import sanitize_comment
 from dashboard.theme_db import ThemeStorageError
 from engine import session as engine_session
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +188,7 @@ def _render_item_output(item: PinnedItem, key_prefix: str) -> None:
         # unreadable on screen, and a person who sees 500 rows with no note has no way to
         # know there were 12,000. The Excel download is not cut — see `excel_export`.
         shown = item.frame.head(pinned_tables.PREVIEW_ROWS)
-        st.dataframe(shown, key=f"{key_prefix}_frame", width="stretch", hide_index=True)
+        show_dataframe(shown, key=f"{key_prefix}_frame", width="stretch", hide_index=True)
         if len(item.frame) > len(shown):
             st.caption(
                 f":red[Showing {len(shown):,} of {len(item.frame):,} rows. "

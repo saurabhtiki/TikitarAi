@@ -36,6 +36,7 @@ from dashboard.exceptions import ReportExportError
 from dashboard.images import PNG_HEIGHT, PNG_SCALE, item_png
 from dashboard.model import UNTITLED_REPORT, Report, walk
 from dashboard.rich_text import TextRun, to_runs, sanitize_comment
+from utils.dates import EXCEL_WRITER_DATE_FORMATS, excel_ready
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +401,7 @@ def _write_subsection(writer: pd.ExcelWriter, sheet_name: str, subsection, forma
         cursor = _write_picture(worksheet, cursor, item, formats)
 
         if item.has_table():
-            frame = item.frame
+            frame = excel_ready(item.frame)
             check_limits(sheet_name, frame)
             _check_sheet_height(sheet_name, cursor + len(frame) + 1)
             frame.to_excel(writer, sheet_name=sheet_name, index=False, na_rep="", startrow=cursor)
@@ -444,7 +445,7 @@ def build_report_workbook(report: Report) -> bytes:
     buffer = io.BytesIO()
 
     try:
-        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        with pd.ExcelWriter(buffer, engine="xlsxwriter", **EXCEL_WRITER_DATE_FORMATS) as writer:
             formats = _build_formats(writer.book)
 
             contents = _contents_frame(report, sheet_names)

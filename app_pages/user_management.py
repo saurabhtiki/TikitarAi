@@ -7,6 +7,7 @@ from auth.db import create_user, delete_user, get_user_by_id, list_users, update
 from auth.exceptions import AuthDatabaseError, DuplicateEmailError, ProtectedAccountError
 from auth.service import require_role
 from sidebar import render_sidebar
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,7 @@ if profile is not None:
         st.session_state["um_users_table"] = {"selection": {"rows": [], "columns": []}}
 
     st.caption("Select a row to edit or delete that user.")
-    selection = st.dataframe(
+    selection = show_dataframe(
         users_df,
         key="um_users_table",
         hide_index=True,

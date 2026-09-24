@@ -10,6 +10,7 @@ raw really is what the file contained. Typing then happens as an explicit, repla
 """
 
 import csv
+import datetime
 import io
 import logging
 import zipfile
@@ -19,6 +20,7 @@ import pandas as pd
 from openpyxl.utils.exceptions import InvalidFileException
 
 from cleaner.exceptions import FileParseError, SheetNotFoundError, UnsupportedFileTypeError
+from utils.dates import format_date_value
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +191,7 @@ def _read_excel(file_bytes: bytes, file_name: str, sheet_name: str | None) -> pd
         frame = pd.read_excel(
             io.BytesIO(file_bytes),
             sheet_name=target,
-            dtype=str,
+            dtype=object,
             keep_default_na=False,
             na_values=[""],
             engine="openpyxl",
@@ -197,7 +199,30 @@ def _read_excel(file_bytes: bytes, file_name: str, sheet_name: str | None) -> pd
     except _WORKBOOK_READ_ERRORS as error:
         logger.exception("Could not read sheet '%s' from %s.", target, file_name)
         raise FileParseError(f"Sheet '{target}' in '{file_name}' couldn't be read.") from error
-    return _normalise_columns(frame)
+    return _normalise_columns(_cells_as_text(frame))
+
+
+def _cells_as_text(frame: pd.DataFrame) -> pd.DataFrame:
+    """Every cell of a workbook sheet as text, with date cells written as dd-mm-yyyy.
+
+    Read as `dtype=str`, a real Excel date comes out as pandas' own `2025-04-03 00:00:00`
+    - not what the sheet shows, and not what the user typed. So the sheet is read as it is
+    stored and each date cell is written out the way this app's users write dates
+    (`03-04-2025`), keeping the time only when there is one. Everything else becomes text
+    exactly as `dtype=str` would have made it, blanks staying blank.
+    """
+    result = frame.copy()
+    for position in range(len(result.columns)):
+        column = result.iloc[:, position]
+        # Built as `object` on purpose: `.map` would re-infer the type, turning a sheet's
+        # whole number 1 into the float 1.0 and so the text "1.0".
+        cells = pd.Series(
+            [format_date_value(cell) if isinstance(cell, datetime.date) else cell for cell in column],
+            index=column.index,
+            dtype=object,
+        )
+        result.isetitem(position, cells.astype(str))
+    return result
 
 
 def _normalise_columns(frame: pd.DataFrame) -> pd.DataFrame:

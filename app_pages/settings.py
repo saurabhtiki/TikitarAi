@@ -20,6 +20,7 @@ from llm.db import (
 from llm.exceptions import LLMDatabaseError
 from llm.models import parse_model_names
 from sidebar import photo_data_uri, render_sidebar
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -450,7 +451,7 @@ def _render_llm_section(current_profile: dict) -> None:
         st.session_state["settings_llm_table"] = {"selection": {"rows": [], "columns": []}}
 
     st.caption("Select a row to edit, delete, or set/unset it as your default or light model.")
-    selection = st.dataframe(
+    selection = show_dataframe(
         profiles_df,
         key="settings_llm_table",
         hide_index=True,
