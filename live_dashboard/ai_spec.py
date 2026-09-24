@@ -67,7 +67,6 @@ from analyst.charts import (
     CHART_PIE,
     CHART_SCATTER,
     SORT_AUTOMATIC,
-    SORT_LABELS,
     SORT_LARGEST,
 )
 from live_dashboard import payload
@@ -88,6 +87,7 @@ from live_dashboard.model import (
     CHART_HISTOGRAM,
     DASHBOARD_AGGREGATIONS,
     DASHBOARD_CHART_LABELS,
+    DASHBOARD_SORT_LABELS,
     DEFAULT_CURRENCY,
     DashboardSpec,
     FILTER_DROPDOWN,
@@ -278,7 +278,9 @@ _DESIGN_RULES = """Design rules - follow these unless the user asks for somethin
   opens only the branch they care about. Use "flat" when the rows themselves are the point.
 - Propose at most 12 visuals unless the user asks for more.
 - Sort a bar chart "largest" so the biggest bar comes first, unless it is broken down by a
-  date, where "automatic" keeps the dates in order.
+  date, where "automatic" keeps the dates in order. When the breakdown is month-year TEXT
+  such as "Apr-2024" (words sort alphabetically, not in time), use sort "date" so the bars
+  run oldest to newest - the same when the user asks for the months "in date order".
 - Use "bar_horizontal" when the breakdown is long text: customer, product and employee
   names overlap badly on an upright bar.
 - Use "pie" or "donut" only for a breakdown with a handful of categories. For anything
@@ -458,7 +460,7 @@ def describe_catalog_for_prompt() -> str:
         f"{key} ({label})" for key, label in DASHBOARD_AGGREGATIONS.items()
     ))
     lines.append("Sort orders: " + ", ".join(
-        f"{key} ({label})" for key, label in SORT_LABELS.items()
+        f"{key} ({label})" for key, label in DASHBOARD_SORT_LABELS.items()
     ))
     lines.append(describe_properties_for_prompt())
     return "\n".join(lines)
@@ -922,9 +924,9 @@ def _resolve_sort(proposed: ProposedPanel) -> str:
     """The sort order, falling back to the default. Never a reason to drop a row: the order
     of the bars is visible at a glance and changed in one click."""
     wanted = _key(proposed.sort)
-    if wanted in SORT_LABELS:
+    if wanted in DASHBOARD_SORT_LABELS:
         return wanted
-    for key, label in SORT_LABELS.items():
+    for key, label in DASHBOARD_SORT_LABELS.items():
         if _key(label) == wanted:
             return key
     if wanted:

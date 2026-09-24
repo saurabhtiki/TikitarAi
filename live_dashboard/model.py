@@ -46,6 +46,7 @@ from analyst.charts import (
     CHART_SCATTER,
     DEFAULT_CHART_HEIGHT,
     PALETTE_DEFAULT,
+    SORT_LABELS,
     SORT_LARGEST,
 )
 from live_dashboard.exceptions import DashboardStorageError
@@ -212,6 +213,16 @@ DASHBOARD_AGGREGATIONS: dict[str, str] = {
     AGG_LAST: "Last value",
     AGG_PERCENT_OF_TOTAL: "Percentage of total",
     AGG_RUNNING_TOTAL: "Running total",
+}
+
+# Sort by date: the breakdown column holds month-year text such as "Apr-2024", which sorts as
+# words (Apr, Aug, Dec ...) rather than as time. This order reads each label as a date and
+# lines the bars up oldest to newest. Declared here rather than added to `analyst.charts`'
+# `SORT_LABELS`, which Chat with Data shares - the same reason the totals above are.
+SORT_DATE = "date"
+DASHBOARD_SORT_LABELS: dict[str, str] = {
+    **SORT_LABELS,
+    SORT_DATE: "By date (oldest first, for labels like Apr-2024)",
 }
 
 # Counting rows and counting different values are meaningful for text and dates as well as

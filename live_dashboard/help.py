@@ -79,6 +79,7 @@ def capabilities_markdown(max_visuals: int) -> str:
 | Filters | {filters}, down the left or across the top; a number filter has two handles | *"between 30,000 and 60,000"* |
 | One filter across related tables | A column from a linked table shows up on every table it reaches, as "Table - Column" | *"filter on Employee Master - Department"* |
 | Tidying up | Sorting, top N, layout, renaming, removing | *"sort largest first"*, *"only the top 10"*, *"rename it to Monthly spend"* |
+| Months in date order | Month-year labels like Apr-2024 sort as words; **by date** puts them oldest to newest | *"sort the bars by date"* |
 
 **Not yet**
 

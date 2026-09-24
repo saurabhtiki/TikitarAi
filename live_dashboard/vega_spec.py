@@ -23,6 +23,7 @@ The vocabulary - chart kinds, aggregations, sorts, palettes - is imported from
 words and the same colours as the charts they see inside the app.
 """
 
+import json
 import logging
 
 from analyst.charts import (
@@ -70,6 +71,7 @@ from live_dashboard.model import (
     LEGEND_NONE,
     NAMED_COLOURS,
     PanelSpec,
+    SORT_DATE,
     THEME_DARK,
     TRANSFORM_AGGREGATIONS,
 )
@@ -134,6 +136,19 @@ _AXIS_WORDS: dict[str, str] = {
 #: The column a transform aggregation leaves its answer in. Leading underscore so it cannot
 #: collide with a real column: `flatten` prefixes its own names with the table they came from.
 TRANSFORM_FIELD = "_measure"
+
+#: Where `SORT_DATE` keeps each row's date, as a number the bars can be ordered by. Underscore
+#: for the same reason as `TRANSFORM_FIELD`.
+DATE_SORT_FIELD = "_sort_date"
+
+#: The ways a month-year (or plain date) label is read by `SORT_DATE`, tried in order until
+#: one fits the whole label. "Apr-2024", "April 2024", "Apr-24", "2024-04", "04-2024",
+#: "30-04-2024" and an ISO date all land on the right month; anything else has no date and
+#: is left at the end rather than guessed at.
+_DATE_LABEL_FORMATS = (
+    "%b-%Y", "%B-%Y", "%b %Y", "%B %Y", "%b-%y", "%Y-%m", "%m-%Y",
+    "%d-%m-%Y", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S",
+)
 
 #: The colours a heatmap runs through. A sequential scheme rather than the chart palette,
 #: because a heatmap's colour is a *quantity* - the palette's categorical colours would put
@@ -399,12 +414,14 @@ def _transform_aggregation(panel: PanelSpec) -> list[dict]:
             {"window": [{"op": operation, "field": measure, "as": TRANSFORM_FIELD}],
              "groupby": groups,
              "frame": [None, None]},
-            {"aggregate": [{"op": "max", "field": TRANSFORM_FIELD, "as": TRANSFORM_FIELD}],
+            {"aggregate": [{"op": "max", "field": TRANSFORM_FIELD, "as": TRANSFORM_FIELD},
+                           *_date_sort_operations(panel)],
              "groupby": groups},
         ]
 
     totals = [
-        {"aggregate": [{"op": "sum", "field": measure, "as": TRANSFORM_FIELD}],
+        {"aggregate": [{"op": "sum", "field": measure, "as": TRANSFORM_FIELD},
+                       *_date_sort_operations(panel)],
          "groupby": groups},
     ]
 
@@ -435,6 +452,40 @@ def _transform_aggregation(panel: PanelSpec) -> list[dict]:
     ]
 
 
+def _date_sort_expression(column: str) -> str:
+    """A Vega expression turning one label into a number of milliseconds, or null.
+
+    Written out per format because Vega expressions have no local variables. `timeParse` gives
+    a date only when the format fits the whole label - "Apr-2024" against "%b-%y" fails
+    rather than reading "20" as the year - so the first format that fits is the one used.
+    """
+    text = f"toString(datum[{json.dumps(column)}])"
+    parsed = [f"timeParse({text}, {json.dumps(form)})" for form in _DATE_LABEL_FORMATS]
+    expression = "null"
+    for attempt in reversed(parsed):
+        expression = f"({attempt} ? time({attempt}) : {expression})"
+    return expression
+
+
+def _date_sort_transforms(panel: PanelSpec) -> list[dict]:
+    """The step that puts each row's date beside it, when the bars are sorted by date."""
+    if panel.sort != SORT_DATE or not panel.group_by:
+        return []
+    return [{"calculate": _date_sort_expression(panel.group_by), "as": DATE_SORT_FIELD}]
+
+
+def _date_sort_operations(panel: PanelSpec) -> list[dict]:
+    """What an `aggregate` must also carry so the date survives being totalled.
+
+    An `aggregate` replaces its rows with the group keys and the totals asked for, so the date
+    column would vanish and the bars would have nothing to be ordered by. Every row in a
+    category holds the same label, so `min` is simply that label's date.
+    """
+    if panel.sort != SORT_DATE or not panel.group_by:
+        return []
+    return [{"op": "min", "field": DATE_SORT_FIELD, "as": DATE_SORT_FIELD}]
+
+
 def _category_sort(panel: PanelSpec, measure_channel: str) -> object:
     """How the categories are ordered, as Vega-Lite's `sort` value.
 
@@ -453,6 +504,8 @@ def _category_sort(panel: PanelSpec, measure_channel: str) -> object:
         return "ascending"
     if panel.sort == SORT_ORIGINAL:
         return None
+    if panel.sort == SORT_DATE:
+        return {"field": DATE_SORT_FIELD, "op": "min"}
     if panel.sort == SORT_AUTOMATIC:
         return None if panel.sub_type in _ORDERED_KINDS else f"-{measure_channel}"
     logger.info("Unknown sort '%s' in a panel - leaving the order alone.", panel.sort)
@@ -767,7 +820,8 @@ def _aggregate_every_measure(panel: PanelSpec) -> list[dict]:
             operations.append({"op": vega_aggregate(measure["aggregation"]),
                                "field": measure["column"], "as": name})
 
-    return [{"aggregate": operations, "groupby": [panel.group_by]}]
+    return [{"aggregate": operations + _date_sort_operations(panel),
+             "groupby": [panel.group_by]}]
 
 
 def _measure_layer(panel: PanelSpec, names: list[str], mark: dict, colour_scale: dict,
@@ -938,7 +992,7 @@ def build_vega_spec(
         mark = "bar"
 
     encoding = _encode_chart(panel, palette, date_columns)
-    transforms = _chart_transforms(panel)
+    transforms = _date_sort_transforms(panel) + _chart_transforms(panel)
 
     spec: dict = {
         "$schema": "https://vega.github.io/schema/vega-lite/v5.json",

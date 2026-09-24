@@ -325,3 +325,83 @@ def test_taking_the_legend_away_still_draws_the_chart(tmp_path):
                          properties={"legend": "none"}), tmp_path)
 
     assert any(mark["count"] for mark in drawn["marks"])
+
+
+# ------------------------------------------------------------------ phase 43: sort by date
+
+MONTH = "Month-Year"
+QUANTITY = "Invoiced Quantity"
+
+#: Deliberately out of order, and in an order that is neither alphabetical nor by size - the
+#: shape of the chart that prompted this sort.
+MONTHLY = [
+    {MONTH: "Sep-2025", QUANTITY: 3.0, CATEGORY: "A"},
+    {MONTH: "Feb-2026", QUANTITY: 4.0, CATEGORY: "A"},
+    {MONTH: "Apr-2024", QUANTITY: 1.0, CATEGORY: "B"},
+    {MONTH: "Jul-2025", QUANTITY: 13.0, CATEGORY: "B"},
+    {MONTH: "Apr-2024", QUANTITY: 2.0, CATEGORY: "A"},
+    {MONTH: "May-2024", QUANTITY: 3.0, CATEGORY: "A"},
+    {MONTH: "Dec-2023", QUANTITY: 2.0, CATEGORY: "A"},
+]
+OLDEST_FIRST = ["Dec-2023", "Apr-2024", "May-2024", "Jul-2025", "Sep-2025", "Feb-2026"]
+
+
+def _monthly(**overrides) -> m.PanelSpec:
+    settings = dict(sub_type=m.CHART_BAR, measure_column=QUANTITY, group_by=MONTH,
+                    sort=m.SORT_DATE, title="Total Quantity by Month-Year")
+    settings.update(overrides)
+    return _panel(**settings)
+
+
+def test_month_year_labels_are_ordered_by_date_not_by_the_word(tmp_path):
+    drawn = _draw(_monthly(), MONTHLY, tmp_path)
+
+    assert drawn["domains"]["x"] == OLDEST_FIRST
+
+
+def test_sort_by_date_survives_a_transform_total_and_a_top_n(tmp_path):
+    """Two ways the date column could be lost on the way: an `aggregate` replaces its rows,
+    and a Top N ranks them first."""
+    medians = _draw(_monthly(aggregation="median"), MONTHLY, tmp_path)
+    top = _draw(_monthly(top_n="2"), MONTHLY, tmp_path)
+    percent = _draw(_monthly(aggregation="percent_of_total"), MONTHLY, tmp_path)
+
+    assert medians["domains"]["x"] == OLDEST_FIRST
+    # The two biggest months, shown oldest first rather than biggest first.
+    assert top["domains"]["x"] == ["Jul-2025", "Feb-2026"]
+    assert percent["domains"]["x"] == OLDEST_FIRST
+
+
+def test_sort_by_date_orders_a_horizontal_and_a_stacked_chart_too(tmp_path):
+    flat = _draw(_monthly(sub_type=m.CHART_BAR_HORIZONTAL), MONTHLY, tmp_path)
+    stacked = _draw(_monthly(sub_type=m.CHART_BAR_STACKED, colour_by=CATEGORY),
+                    MONTHLY, tmp_path)
+
+    assert flat["domains"]["y"] == OLDEST_FIRST
+    assert stacked["domains"]["x"] == OLDEST_FIRST
+
+
+def test_sort_by_date_orders_a_chart_with_several_numbers(tmp_path):
+    panel = _monthly(extra_measures=[{"column": QUANTITY, "aggregation": "max",
+                                      "axis": "left"}])
+
+    assert _draw(panel, MONTHLY, tmp_path)["domains"]["x"] == OLDEST_FIRST
+
+
+def test_sort_by_date_reads_the_other_usual_month_layouts(tmp_path):
+    for labels in (["2024-04", "2023-12", "2025-07"],
+                   ["04-2024", "12-2023", "07-2025"],
+                   ["April 2024", "December 2023", "July 2025"],
+                   ["30-04-2024", "31-12-2023", "31-07-2025"],
+                   ["2024-04-30", "2023-12-31", "2025-07-31"]):
+        rows = [{MONTH: label, QUANTITY: 1.0} for label in labels]
+        drawn = _draw(_monthly(), rows, tmp_path)
+
+        assert drawn["domains"]["x"] == [labels[1], labels[0], labels[2]], labels
+
+
+def test_without_sort_by_date_the_same_months_are_not_in_order(tmp_path):
+    """The control: proves the tests above can fail, rather than passing on lucky data."""
+    drawn = _draw(_monthly(sort=m.SORT_LARGEST), MONTHLY, tmp_path)
+
+    assert drawn["domains"]["x"] != OLDEST_FIRST
