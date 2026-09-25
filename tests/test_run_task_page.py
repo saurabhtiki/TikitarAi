@@ -171,13 +171,41 @@ class TestWhoMayRunOne:
         assert not app.exception
         assert [button for button in app.button if button.key == f"rt_open_{task_id}"]
 
-    def test_only_this_account_s_tasks_are_listed(self, tmp_path, monkeypatch):
+    def test_another_account_s_tasks_are_listed_with_the_owner(self, tmp_path, monkeypatch):
+        """Phase 48: a small internal team, so anyone may run anyone's report."""
         app, task_id = _app(tmp_path, monkeypatch)
         create_user("other@example.com", "Other", "Passw0rd!x", "normal_user")
 
         app.session_state["user_id"] = 2
         app.run()
 
+        assert [button for button in app.button if button.key == f"rt_open_{task_id}"]
+        assert "· by you" not in _texts(app)
+        assert "· by " in _texts(app)
+
+    def test_another_account_can_open_and_run_it(self, tmp_path, monkeypatch):
+        app, task_id = _app(tmp_path, monkeypatch)
+        create_user("other@example.com", "Other", "Passw0rd!x", "normal_user")
+        app.session_state["user_id"] = 2
+        app.run()
+
+        _open(app, task_id)
+        _upload(app, [("salary.csv", SALARY_CSV, "text/csv")])
+        app.checkbox(key="rt_rewrite_comments").set_value(False).run()
+        app.button(key="rt_run").click().run()
+
+        assert not app.exception
+        assert app.session_state["rt_report"].sections[0].subsections[0].items[0].frame is not None
+
+    def test_search_finds_a_task_by_its_owner(self, tmp_path, monkeypatch):
+        app, task_id = _app(tmp_path, monkeypatch)
+        create_user("other@example.com", "Ravi", "Passw0rd!x", "normal_user")
+        ravis = save_task(2, _task(name="Ravi's stock count"))
+        app.run()
+
+        app.text_input(key="rt_search").set_value("ravi").run()
+
+        assert [button for button in app.button if button.key == f"rt_open_{ravis.task_id}"]
         assert not [button for button in app.button if button.key == f"rt_open_{task_id}"]
 
 
@@ -442,6 +470,29 @@ class TestUpdatingTheReport:
         assert not app.exception
         assert "This month" in load_task(task_id, 1).report.sections[0].subsections[0].items[-1].embed_html
         assert "Saved the notes, pictures and pasted HTML" in _texts(app)
+
+    def test_only_the_owner_may_save_into_the_report(self, tmp_path, monkeypatch):
+        """Phase 48: anyone may run it and edit this run's copy; changing it is the owner's."""
+        app, task_id = _app(tmp_path, monkeypatch, task=_task_with_block())
+        create_user("other@example.com", "Ravi", "Passw0rd!x", "normal_user")
+        app.session_state["user_id"] = 2
+        app.run()
+        _open(app, task_id)
+        _upload(app, [("salary.csv", SALARY_CSV, "text/csv")])
+        app.checkbox(key="rt_rewrite_comments").set_value(False).run()
+        app.button(key="rt_run").click().run()
+        app.segmented_control(key="rt_output_view").set_value("Update").run()
+
+        button = app.button(key="db_update_save")
+
+        assert not app.exception
+        assert button.disabled
+        assert "can save changes into this report" in button.help
+
+    def test_the_owner_s_save_button_is_enabled(self, tmp_path, monkeypatch):
+        app, _task_id = self._ran(tmp_path, monkeypatch)
+
+        assert not app.button(key="db_update_save").disabled
 
     def test_an_untouched_item_keeps_exactly_what_it_had(self, tmp_path, monkeypatch):
         app, task_id = self._ran(tmp_path, monkeypatch)

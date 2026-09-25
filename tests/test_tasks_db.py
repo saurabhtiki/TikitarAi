@@ -13,7 +13,17 @@ from checks.model import CheckSet, add_check
 from dashboard.model import Report
 from engine.relationships import Relationship
 from report_items.model import KIND_COLUMN, add_item
-from tasks.db import delete_task, init_tasks_table, list_tasks, load_task, save_task
+from tasks.db import (
+    delete_task,
+    init_tasks_table,
+    list_all_tasks,
+    list_tasks,
+    load_task,
+    load_task_for_run,
+    owner_label,
+    save_task,
+    task_owner,
+)
 from tasks.exceptions import TaskStorageError
 from tasks.model import Task, capture
 
@@ -137,6 +147,51 @@ class TestOwnership:
         save_task(1, _task("Mine"), db_path=db_path)
 
         assert [row["name"] for row in list_tasks(2, db_path=db_path)] == []
+
+
+class TestSharedForRunning:
+    """Phase 48: anyone may run anyone's report; only the owner may change it."""
+
+    def test_every_account_s_tasks_are_listed_with_their_owner(self, db_path):
+        save_task(1, _task("Admin's"), db_path=db_path)
+        save_task(2, _task("Second's"), db_path=db_path)
+
+        rows = {row["name"]: row for row in list_all_tasks(db_path=db_path)}
+
+        assert rows["Second's"]["owner_name"] == "Second"
+        assert rows["Admin's"]["user_id"] == 1
+        assert "task_json" not in rows["Second's"]
+
+    def test_the_owner_label_is_you_for_your_own(self, db_path):
+        save_task(2, _task(), db_path=db_path)
+        row = list_all_tasks(db_path=db_path)[0]
+
+        assert owner_label(row, 2) == "you"
+        assert owner_label(row, 1) == "Second"
+
+    def test_another_account_can_load_it_to_run(self, db_path):
+        saved = save_task(1, _task(), db_path=db_path)
+
+        loaded = load_task_for_run(saved.task_id, db_path=db_path)
+
+        assert loaded.persona == "You are a finance controller."
+        assert task_owner(saved.task_id, db_path=db_path)["user_id"] == 1
+
+    def test_another_account_still_cannot_save_over_it(self, db_path):
+        saved = save_task(1, _task(), db_path=db_path)
+        borrowed = load_task_for_run(saved.task_id, db_path=db_path)
+        borrowed.persona = "Changed by someone else."
+
+        with pytest.raises(TaskStorageError, match="No task"):
+            save_task(2, borrowed, db_path=db_path)
+
+        assert load_task(saved.task_id, 1, db_path=db_path).persona == "You are a finance controller."
+
+    def test_a_missing_task_says_so(self, db_path):
+        with pytest.raises(TaskStorageError, match="no longer exists"):
+            load_task_for_run(999, db_path=db_path)
+        with pytest.raises(TaskStorageError, match="no longer exists"):
+            task_owner(999, db_path=db_path)
 
 
 class TestDeleting:

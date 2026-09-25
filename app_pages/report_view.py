@@ -1264,7 +1264,11 @@ EMPTY_UPDATE = (
 )
 
 
-def _render_update_view(report: Report, on_save: Callable[[Report], None] | None = None) -> None:
+def _render_update_view(
+    report: Report,
+    on_save: Callable[[Report], None] | None = None,
+    save_blocked: str | None = None,
+) -> None:
     """Every placed item's note, picture and pasted HTML, editable for this run.
 
     Content only, never structure — see the phase plan. A run rebuilds the arrangement
@@ -1296,7 +1300,7 @@ def _render_update_view(report: Report, on_save: Callable[[Report], None] | None
 
     if on_save is not None:
         st.divider()
-        _render_save_authored(report, on_save)
+        _render_save_authored(report, on_save, save_blocked)
 
 
 def _render_update_item(number: str, item: PinnedItem) -> None:
@@ -1316,12 +1320,15 @@ def _render_update_item(number: str, item: PinnedItem) -> None:
         _render_content_editors(item, result_help=UPDATE_COMMENT_HELP)
 
 
-def _render_save_authored(report: Report, on_save: Callable[[Report], None]) -> None:
+def _render_save_authored(
+    report: Report, on_save: Callable[[Report], None], save_blocked: str | None = None
+) -> None:
     """The one button that carries this run's edits back into the saved report.
 
     Deliberately not automatic. A run's edits are usually about this month's copy, and
     rewriting the saved recipe every time somebody fixed a typo in a downloaded report would
-    be the wrong default — so the report is only changed when this is pressed.
+    be the wrong default — so the report is only changed when this is pressed. Greyed out
+    with `save_blocked` as its reason for anyone but the report's owner.
     """
     st.caption(
         ":red[The edits above already apply to this run's preview and downloads. Saving "
@@ -1332,7 +1339,9 @@ def _render_save_authored(report: Report, on_save: Callable[[Report], None]) -> 
         key="db_update_save",
         icon=":material/save:",
         type="primary",
-        help=(
+        disabled=save_blocked is not None,
+        help=save_blocked
+        or (
             "Write the notes, pictures and pasted HTML above back into the saved report. "
             "Comments only stay put on a run with **Rewrite the comments** cleared — with it "
             "ticked, the next run drafts them again."
@@ -2082,6 +2091,7 @@ def render_report_output(
     *,
     key: str = "rt_output_view",
     on_save: Callable[[Report], None] | None = None,
+    save_blocked: str | None = None,
 ) -> None:
     """The finished report, with no structure editor: read it, fix it, then download it.
 
@@ -2095,7 +2105,9 @@ def render_report_output(
     this run and are not the user's to type, but its note, its picture and its pasted HTML
     came out of the skeleton and nothing in a run can produce them. `on_save` is the button
     that writes those back into the saved report — the caller's, because this module must not
-    import `tasks`, and the Run page is the one that knows which Task is open.
+    import `tasks`, and the Run page is the one that knows which Task is open. `save_blocked`,
+    when given, greys that button out and is the reason shown on it (phase 48: only a
+    report's owner may change it, though anyone may run it and edit this run's copy).
 
     The same renderers the workspace uses, so what previews here is what downloads there.
     The toggle takes its own key — `db_view` holds one of three different options, and a
@@ -2121,7 +2133,7 @@ def render_report_output(
     if view == "Download":
         _render_download(report, empty)
     elif view == "Update":
-        _render_update_view(report, on_save)
+        _render_update_view(report, on_save, save_blocked)
     else:
         _render_preview(report, empty)
 

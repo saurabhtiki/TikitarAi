@@ -751,6 +751,70 @@ def adopt_transform_tables(frames: dict[str, pd.DataFrame]) -> tuple[list[Engine
     return list(adopted.values()), warnings
 
 
+def adopt_for_report(
+    frames: dict[str, pd.DataFrame], declared_types: dict[str, dict[str, str]]
+) -> tuple[list[EngineTable], list[str]]:
+    """Loads Transform Data's finished tables as a Report's Current files (phase 47).
+
+    `frames` is keyed by the **report's** table name each one fills - the user said which
+    in the send dialog - so no table remap is needed on the Reports page.
+
+    Loaded the way an upload is, not the way `adopt_transform_tables` loads for a chat:
+    each frame goes back to text (`loading.raw_from_frame`) and through
+    `prepare_declared_table` with the report's saved types, and what that found is kept
+    in `load_outcomes()`. So the Reports page's match check reports a sent table in the
+    very words it uses for an uploaded one, and a column that won't read as its saved type
+    is refused rather than slipped through.
+
+    Replaces what Transform Data sent last time, and any table already loaded under one
+    of these names - an upload of last month's Sales must not sit beside this month's.
+
+    Returns:
+        `(tables now loaded, warnings)`.
+    """
+    existing = get_tables()
+    wanted = {name.strip().lower() for name in frames}
+    kept = {
+        table_id: table
+        for table_id, table in existing.items()
+        if not table.from_transform and table.table_name.strip().lower() not in wanted
+    }
+    _drop_removed(existing, kept)
+
+    adopted = dict(kept)
+    warnings: list[str] = []
+    for table_name, frame in (frames or {}).items():
+        if frame is None or not len(frame.columns):
+            warnings.append(f"'{table_name}' has no columns, so it wasn't loaded.")
+            continue
+        try:
+            raw = loading.raw_from_frame(frame)
+            declared = _declared_for(declared_types, table_name)
+            source = f"'{table_name}' from Transform Data"
+            if declared:
+                prepared, semantic, outcome = loading.prepare_declared_table(raw, declared, source=source)
+                load_outcomes()[table_name] = outcome
+            else:
+                prepared, semantic = loading.prepare_raw_frame(raw, source=source)
+            table_id = f"transform::{table_name}"
+            adopted[table_id] = _register(
+                table_id,
+                table_name,
+                f"Transform Data - {table_name}",
+                prepared,
+                semantic,
+                from_transform=True,
+            )
+        except (TableLoadError, DataEngineError) as error:
+            logger.exception("Could not load '%s' from Transform Data for a report.", table_name)
+            warnings.append(f"'{table_name}': {error}")
+
+    st.session_state[DE_TABLES_KEY] = adopted
+    bump_rebuild()
+    logger.info("Loaded %d table(s) from Transform Data as a report's Current files.", len(frames or {}))
+    return list(adopted.values()), warnings
+
+
 # --------------------------------------------------------------------------------------
 # Derived views
 # --------------------------------------------------------------------------------------

@@ -23,6 +23,7 @@ work on it with no idea they are doing anything different.
 import copy
 import logging
 
+import pandas as pd
 import streamlit as st
 
 from auth.db import get_user_by_id
@@ -87,6 +88,25 @@ def open_task(task: Task) -> None:
     chat_types_session.forget_upload()
     engine_session.reload_uploaded_tables()
     logger.info("Opened task '%s' to run.", task.display_name())
+
+
+def receive_sent_tables(task: Task, frames: dict[str, pd.DataFrame]) -> list[str]:
+    """Opens `task` with Transform Data's tables loaded as its Current files (phase 47).
+
+    `frames` is keyed by the report's own table names. The task is opened only if it isn't
+    already the open one - reopening would drop files this person already uploaded for it
+    - and the last run's result goes either way, since it was for last month's files.
+
+    Returns warnings for any table that couldn't be loaded; the rest are loaded regardless.
+    """
+    open_task_now = current_task()
+    if open_task_now is None or open_task_now.task_id != task.task_id:
+        open_task(task)
+    else:
+        clear_result()
+    _tables, warnings = engine_session.adopt_for_report(frames, declared_types())
+    logger.info("Sent %d table(s) from Transform Data to task '%s'.", len(frames), task.display_name())
+    return warnings
 
 
 def close_task() -> None:

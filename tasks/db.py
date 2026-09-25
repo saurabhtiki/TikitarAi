@@ -2,7 +2,10 @@
 
 Follows `checks/db.py` and `chat_types/db.py` exactly: a short-lived connection per call
 (connections aren't safe to share across Streamlit's per-session threads), and every read or
-write scoped to the owning `user_id`, so one account cannot open another's Tasks.
+write scoped to the owning `user_id`, so one account cannot open another's Tasks. The
+exceptions are reads only: `load_dashboard_spec` (phase 46), and `list_all_tasks`,
+`load_task_for_run` and `task_owner` (phase 48), which let anyone *run* any report. Every
+write - `save_task`, `delete_task` - stays scoped to the owner.
 
 One name per account. Saving a Task whose name is already taken **updates that one**, rather
 than hitting the unique index with an error the user can do nothing useful about — the same
@@ -18,6 +21,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
+from live_dashboard.model import DashboardSpec
 from tasks.exceptions import TaskStorageError
 from tasks.model import Task, from_json, to_json
 from utils.env import get_data_dir
@@ -115,6 +119,90 @@ def load_task(task_id: int, user_id: int, db_path: Path | str = DEFAULT_DB_PATH)
     return from_json(
         row["task_json"], task_id=row["task_id"], name=row["name"], description=row["description"] or ""
     )
+
+
+def list_all_tasks(db_path: Path | str = DEFAULT_DB_PATH) -> list[dict]:
+    """Every account's Tasks, newest edit first, each with its owner's name (phase 48).
+
+    Feeds the Reports picker, where anyone may run any report. Like `list_tasks` it leaves
+    the JSON out. `owner_name` is blank for a Task whose owner row is somehow missing, rather
+    than the Task vanishing from the list.
+    """
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT tasks.task_id, tasks.user_id, tasks.name, tasks.description, "
+            "tasks.created_at, tasks.updated_at, COALESCE(users.name, '') AS owner_name "
+            "FROM tasks LEFT JOIN users ON users.user_id = tasks.user_id "
+            "ORDER BY tasks.updated_at DESC;"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def owner_label(row: dict, user_id: int) -> str:
+    """"you" for your own Task, else its owner's name - for a `list_all_tasks` row."""
+    if row.get("user_id") == user_id:
+        return "you"
+    return row.get("owner_name") or "someone else"
+
+
+def load_task_for_run(task_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> Task:
+    """Reads any account's Task, **to run it** (phase 48).
+
+    Not scoped to `user_id`, on purpose: this is a small internal team and anyone may run any
+    report. Changing it is still the owner's alone - `save_task` and `delete_task` refuse
+    everyone else, whatever a page lets through.
+
+    Raises:
+        TaskStorageError: if there is no such Task, or its JSON can't be read.
+    """
+    with _get_connection(db_path) as connection:
+        row = connection.execute("SELECT * FROM tasks WHERE task_id = ?;", (int(task_id),)).fetchone()
+    if row is None:
+        raise TaskStorageError("This report no longer exists. Its owner may have deleted it.")
+    return from_json(
+        row["task_json"], task_id=row["task_id"], name=row["name"], description=row["description"] or ""
+    )
+
+
+def task_owner(task_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> dict:
+    """`{"user_id", "owner_name"}` of a Task, so a page can tell whether you may change it.
+
+    Raises:
+        TaskStorageError: if there is no such Task, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT tasks.user_id, COALESCE(users.name, '') AS owner_name "
+            "FROM tasks LEFT JOIN users ON users.user_id = tasks.user_id WHERE tasks.task_id = ?;",
+            (int(task_id),),
+        ).fetchone()
+    if row is None:
+        raise TaskStorageError("This report no longer exists. Its owner may have deleted it.")
+    return dict(row)
+
+
+def load_dashboard_spec(task_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> DashboardSpec:
+    """Reads only the dashboard saved with a Task, **for any account** (phase 46).
+
+    The one read here not scoped to `user_id`, on purpose. A report's saved data is already
+    shared with everyone (`reports/db.py`), and its dashboard is a picture of that data, so
+    anyone who can chat with it may see it. The rest of the recipe - SQL, checks, persona -
+    is never returned from here and stays with its owner.
+
+    Raises:
+        TaskStorageError: if there is no such Task, or its JSON can't be read.
+    """
+    with _get_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT task_id, name, description, task_json FROM tasks WHERE task_id = ?;",
+            (int(task_id),),
+        ).fetchone()
+    if row is None:
+        raise TaskStorageError("This report no longer exists, so it has no dashboard to show.")
+    task = from_json(
+        row["task_json"], task_id=row["task_id"], name=row["name"], description=row["description"] or ""
+    )
+    return task.dashboard_spec
 
 
 def save_task(user_id: int, task: Task, db_path: Path | str = DEFAULT_DB_PATH) -> Task:

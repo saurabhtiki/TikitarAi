@@ -30,6 +30,7 @@ import logging
 import streamlit as st
 
 from analyst import pipeline, routing
+from app_pages import dashboard_viewer
 from analyst.session import ChatMessage, ROLE_ASSISTANT
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
@@ -130,6 +131,18 @@ def _render_report_row(row: dict) -> None:
             help="Opens this report's saved data and starts a new conversation about it.",
         ):
             _open(task_id, str(row.get("name") or ""))
+
+        # Phase 46: the dashboard saved with the report, over this same data. Offered here
+        # too because this list is everyone's, while the Reports list is only the owner's.
+        if st.button(
+            "Dashboard",
+            key=f"cr_dashboard_{task_id}",
+            icon=":material/dashboard:",
+            help="View or download this report's dashboard with the data above. View only.",
+        ):
+            dashboard_viewer.open_viewer(
+                task_id, str(row.get("name") or ""), back_page="app_pages/chat_with_reports.py"
+            )
 
 
 def _refreshed_line(row: dict) -> str:

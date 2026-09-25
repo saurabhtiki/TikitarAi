@@ -29,7 +29,11 @@ from cleaner.exceptions import DataCleanerError
 from engine import session as engine_session
 from llm import session as llm_session
 from sidebar import render_sidebar
+from runner import session as runner_session
+from tasks import db as tasks_db
+from tasks.exceptions import TaskStorageError
 from transform import ai_parse
+from transform import report_handoff
 from transform import db as transform_db
 from transform import session
 from transform.exceptions import PipelineStorageError, TransformError
@@ -52,13 +56,18 @@ logger = logging.getLogger(__name__)
 PICK_CATEGORY_KEY = "tf_pick_category"
 PICK_OPERATION_KEY = "tf_pick_operation"
 
-# Which pages can receive the transformed tables, and where each one lives. Chat with Data
-# is the only consumer so far (it's the only page with an adoption path into the Data
-# Engine) — add an entry here when a future page grows one. The same constant the Data
-# Cleaner keeps, for the same reason.
+# Which pages can receive the transformed tables, and where each one lives. Add an entry
+# here when a future page grows an adoption path into the Data Engine. The same constant
+# the Data Cleaner keeps, for the same reason.
 EXPORT_DESTINATIONS: dict[str, str] = {
     "Chat with Data": "app_pages/chat_with_data.py",
+    # Phase 47. Not a plain hand-off: a report expects particular files, so this one opens
+    # a dialog asking which file each table is before anything is sent.
+    "Reports": "app_pages/run_task.py",
 }
+
+#: The menu choice that opens the send dialog rather than switching straight away.
+REPORTS_DESTINATION = "Reports"
 
 try:
     profile = get_user_by_id(st.session_state["user_id"])
@@ -1524,6 +1533,10 @@ def _render_export_menu(workspace: dict[str, NamedFrame], chosen: list[str]) -> 
     if destination is None:
         return
 
+    if destination == REPORTS_DESTINATION:
+        session.open_dialog("send_report")
+        st.rerun(scope="app")
+
     frames = {name: workspace[name].frame for name in chosen if name in workspace}
     adopted, warnings = engine_session.adopt_transform_tables(frames)
     for warning in warnings:
@@ -1533,6 +1546,120 @@ def _render_export_menu(workspace: dict[str, NamedFrame], chosen: list[str]) -> 
 
     engine_session.refresh_dictionary()
     st.switch_page(EXPORT_DESTINATIONS[destination])
+
+
+@st.dialog("Send to a report", width="large", on_dismiss=session.close_dialog)
+def _render_send_report_dialog(workspace: dict[str, NamedFrame], user_id: int) -> None:
+    """Phase 47: the ticked tables become a report's Current files, with no download.
+
+    Asks the one thing a report needs that Chat with Data doesn't: which of the report's
+    files each table is. A column the report expects and the table lacks stops the send
+    here, where a Rename step can fix it - see `transform.report_handoff`.
+    """
+    chosen = [name for name in st.session_state.get(session.TF_EXPORT_KEY) or [] if name in workspace]
+    if not chosen:
+        st.info("Tick at least one table under Download first.", icon=":material/info:")
+        return
+
+    try:
+        saved = tasks_db.list_all_tasks()
+    except TaskStorageError as error:
+        logger.exception("Could not list saved reports for user %s.", user_id)
+        st.error(str(error), icon=":material/error:")
+        return
+    if not saved:
+        st.info(
+            "There are no saved reports yet. A report is built once in **Report builder**.",
+            icon=":material/info:",
+        )
+        return
+
+    # Anyone's report, as on the Reports page (phase 48), so each carries its owner's name.
+    names = {int(row["task_id"]): f"{row['name']} · by {tasks_db.owner_label(row, user_id)}" for row in saved}
+    task_id = st.selectbox(
+        "Report",
+        options=list(names),
+        format_func=lambda value: names[value],
+        key="tf_form_send_task",
+        help="The report whose Current files these tables become. You run it on the next screen.",
+    )
+    try:
+        task = tasks_db.load_task_for_run(task_id)
+    except TaskStorageError as error:
+        logger.exception("Could not load report %s for user %s.", task_id, user_id)
+        st.error(str(error), icon=":material/error:")
+        return
+
+    expected = task.schema.table_names()
+    if not expected:
+        st.warning(
+            "This report was saved without any file schema, so there is nothing to send to. "
+            "Open it in Report builder and save it again with the files loaded.",
+            icon=":material/warning:",
+        )
+        return
+
+    assignments = {}
+    for source in chosen:
+        options = [report_handoff.NOT_SENT, *expected]
+        default = report_handoff.default_target(source, expected, len(chosen))
+        assignments[source] = st.selectbox(
+            f"“{source}” is which of the report's files?",
+            options=options,
+            index=options.index(default),
+            key=f"tf_form_send_target_{task_id}_{source}",
+            help="Pick the report's file this table replaces, or leave it out.",
+        )
+
+    frames = {name: workspace[name].frame for name in chosen}
+    problems = report_handoff.send_problems(assignments, frames, task.schema)
+    for problem in problems:
+        st.error(problem, icon=":material/error:")
+
+    still_to_upload = report_handoff.unsent_files(assignments, task.schema)
+    if still_to_upload and not problems:
+        st.caption(
+            ":red[Still to upload on the Reports page: "
+            + ", ".join(still_to_upload) + ".]"
+        )
+
+    send_column, cancel_column = st.columns(2)
+    with send_column:
+        send = st.button(
+            "Send and open the report",
+            key="tf_form_send_go",
+            type="primary",
+            icon=":material/send:",
+            width="stretch",
+            disabled=bool(problems),
+            help="Load these tables as the report's Current files and go to the Reports page to run it.",
+        )
+    with cancel_column:
+        if st.button("Cancel", key="tf_form_send_cancel", icon=":material/close:", width="stretch",
+                     help="Close without sending anything."):
+            session.close_dialog()
+            st.rerun(scope="app")
+
+    if not send:
+        return
+
+    sent = {
+        target: workspace[source].frame
+        for source, target in assignments.items()
+        if target != report_handoff.NOT_SENT
+    }
+    warnings = runner_session.receive_sent_tables(task, sent)
+    for warning in warnings:
+        st.warning(warning, icon=":material/error:")
+    if len(warnings) >= len(sent):
+        return
+
+    runner_session.queue_flash(
+        f"Loaded {len(sent) - len(warnings)} table(s) from Transform Data into "
+        f"“{task.display_name()}”. Check Step 2, then press Run task."
+    )
+    session.close_dialog()
+    st.switch_page(EXPORT_DESTINATIONS[REPORTS_DESTINATION])
 
 
 def _render_download_button(workspace: dict[str, NamedFrame], chosen: list[str]) -> None:
@@ -1643,5 +1770,7 @@ if profile is not None:
             _render_edit_dialog(workspace)
         elif pending == "delete":
             _render_delete_dialog()
+        elif pending == "send_report":
+            _render_send_report_dialog(workspace, user_id)
 
         _render_export(workspace)

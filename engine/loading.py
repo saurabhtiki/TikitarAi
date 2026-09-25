@@ -298,3 +298,44 @@ def prepare_cleaned_frame(
     and potentially disagreeing with the cleaning log the user just read.
     """
     return frame, semantic_types(frame, declared=declared_types)
+
+
+def raw_from_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """A typed frame written back out as the all-text frame an upload would have read.
+
+    Phase 47's hand-off from Transform Data to a Report. A report's saved types are
+    applied **to text** (`prepare_declared_table`), because whether a column can be read as
+    a date is a question about the text. Turning the finished table back into text first
+    means a table sent from Transform Data is loaded exactly as the same table downloaded
+    and uploaded again would be - same checks, same refusals, same match report.
+
+    Dates are written `yyyy-mm-dd`, which reads back with no day/month doubt. A float
+    column holding only whole numbers is written without `.0`, so an id of 7 stays `7` and
+    still joins to its master. Blanks stay blank.
+    """
+    raw = pd.DataFrame(index=frame.index)
+    for column in frame.columns:
+        series = frame[column]
+        if pd.api.types.is_datetime64_any_dtype(series):
+            with_time = bool(((series.dropna() - series.dropna().dt.normalize()) != pd.Timedelta(0)).any())
+            text = series.dt.strftime("%Y-%m-%d %H:%M:%S" if with_time else "%Y-%m-%d")
+        elif pd.api.types.is_float_dtype(series) and _whole_numbers(series):
+            text = series.map(lambda value: None if pd.isna(value) else str(int(value)))
+        else:
+            text = series.map(lambda value: None if _is_blank(value) else str(value))
+        raw[str(column)] = text.astype(object).where(series.notna(), None)
+    return raw.reset_index(drop=True)
+
+
+def _whole_numbers(series: pd.Series) -> bool:
+    values = series.dropna()
+    finite = values.abs() != float("inf")
+    return bool(len(values)) and bool(finite.all()) and bool((values == values.round()).all())
+
+
+def _is_blank(value) -> bool:
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        # A list or dict in a cell: pandas can't say, and it certainly isn't blank.
+        return False

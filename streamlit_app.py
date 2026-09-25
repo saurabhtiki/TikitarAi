@@ -133,6 +133,14 @@ else:
                 title="Chat with reports",
                 icon=":material/forum:",
             ),
+            # Hidden: opened by the Dashboard button on the two pages above (phase 46), and
+            # meaningless without the report that button names.
+            st.Page(
+                "app_pages/report_dashboard.py",
+                title="Report dashboard",
+                icon=":material/dashboard:",
+                visibility="hidden",
+            ),
         ],
         "Utilities": [
             st.Page("app_pages/data_cleaner.py", title="Data cleaner", icon="🧹"),

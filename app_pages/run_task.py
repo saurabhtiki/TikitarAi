@@ -16,7 +16,9 @@ Two screens, in the order requirement 8.1 asks for.
 **The picker.** A search box over the saved Tasks, then one line each with **Run** and
 **Schema** — a compact list because an account can hold hundreds of them. Schema opens the dialog
 §8.1 step 2 asks for, listing the expected files, every column's type, the links and the
-column meanings, so the user knows what to upload before they upload it.
+column meanings, so the user knows what to upload before they upload it. Chat and
+**Dashboard** (phase 46) open the data the last run saved, so they need no upload at all;
+the dashboard is view and download only, and is also offered under a freshly run report.
 
 **The run screen.** Upload, then the match report (§8.1 step 4, `chat_types.matching`, which
 is the schema matcher this stage needed and already had), then the remap controls where it
@@ -52,7 +54,7 @@ import pandas as pd
 import streamlit as st
 
 from analyst import session as chat_session
-from app_pages import report_view, setup_view
+from app_pages import dashboard_viewer, report_view, setup_view
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
 from auth.service import is_authenticated
@@ -242,7 +244,7 @@ def _render_picker(user_id: int) -> None:
     st.markdown("#### Pick a task to run")
 
     try:
-        saved = tasks_db.list_tasks(user_id)
+        saved = tasks_db.list_all_tasks()
     except TaskStorageError as error:
         logger.exception("Could not list saved tasks for user %s.", user_id)
         st.error(str(error), icon=":material/error:")
@@ -250,7 +252,7 @@ def _render_picker(user_id: int) -> None:
 
     if not saved:
         st.info(
-            "You have no saved tasks yet. A task is built once in **Report builder** — the "
+            "There are no saved tasks yet. A task is built once in **Report builder** — the "
             "setup, the report items, the checks and the report — and run here every month.",
             icon=":material/info:",
         )
@@ -267,8 +269,8 @@ def _render_picker(user_id: int) -> None:
         query = st.text_input(
             "Search tasks",
             key="rt_search",
-            placeholder="Search by name or description",
-            help="Type part of a task's name or description. Every word you type has to appear.",
+            placeholder="Search by name, description or owner",
+            help="Type part of a task's name, description or owner. Every word you type has to appear.",
             label_visibility="collapsed",
         )
     with sort_column:
@@ -315,9 +317,10 @@ def _render_picker(user_id: int) -> None:
 
 
 def _filter_tasks(saved: list[dict], query: str) -> list[dict]:
-    """The rows whose name or description contains every word typed, case-insensitively.
+    """The rows whose name, description or owner contains every word typed, case-insensitively.
 
-    Word-by-word rather than whole-string so "sales aug" finds "August sales report".
+    Word-by-word rather than whole-string so "sales aug" finds "August sales report", and
+    "anna" finds every report Anna owns.
     """
     words = query.lower().split()
     if not words:
@@ -325,7 +328,10 @@ def _filter_tasks(saved: list[dict], query: str) -> list[dict]:
     return [
         row
         for row in saved
-        if all(word in f"{row['name']} {row.get('description') or ''}".lower() for word in words)
+        if all(
+            word in f"{row['name']} {row.get('description') or ''} {row.get('owner_name') or ''}".lower()
+            for word in words
+        )
     ]
 
 
@@ -350,11 +356,11 @@ def _datasets_with_data() -> dict[int, dict]:
 def _render_task_row(user_id: int, row: dict, datasets: dict[int, dict]) -> None:
     """One saved Task as a single line: what it is, and the two buttons that open it."""
     task_id = row["task_id"]
-    name_column, saved_column, run_column, schema_column, chat_column = st.columns(
-        [5, 2, 2, 2, 2], vertical_alignment="center"
+    name_column, saved_column, run_column, schema_column, chat_column, dashboard_column = st.columns(
+        [5, 2, 2, 2, 2, 2.4], vertical_alignment="center"
     )
     with name_column:
-        st.markdown(f"**{row['name']}**")
+        st.markdown(f"**{row['name']}** · by {tasks_db.owner_label(row, user_id)}")
         if row.get("description"):
             st.caption(row["description"])
     with saved_column:
@@ -387,7 +393,30 @@ def _render_task_row(user_id: int, row: dict, datasets: dict[int, dict]) -> None
                 st.rerun(scope="app")
     with chat_column:
         _render_chat_button(task_id, row["name"], datasets.get(int(task_id)))
+    with dashboard_column:
+        _render_dashboard_button(task_id, row["name"], datasets.get(int(task_id)))
     st.divider()
+
+
+def _render_dashboard_button(task_id: int, name: str, saved: dict | None) -> None:
+    """Opens the report's saved dashboard over its latest data (phase 46). View only.
+
+    Disabled until the report has been run once, for the reason the Chat button is: the
+    dashboard is drawn from the data a run saves, and before that there is none.
+    """
+    if st.button(
+        "Dashboard",
+        key=f"rt_dashboard_{task_id}",
+        icon=":material/dashboard:",
+        width="stretch",
+        disabled=saved is None,
+        help=(
+            "Run this report once and its dashboard will show here with that data."
+            if saved is None
+            else f"View or download this report's dashboard. {dashboard_viewer.refreshed_line(saved)}."
+        ),
+    ):
+        dashboard_viewer.open_viewer(task_id, name, back_page="app_pages/run_task.py")
 
 
 def _render_chat_button(task_id: int, name: str, saved: dict | None) -> None:
@@ -428,9 +457,12 @@ def _render_chat_button(task_id: int, name: str, saved: dict | None) -> None:
 
 
 def _load_task(task_id: int, user_id: int) -> Task | None:
-    """Reads one saved Task, or says why it couldn't. None means don't act on it."""
+    """Reads one saved Task - anyone's, since anyone may run it - or says why it couldn't.
+
+    None means don't act on it.
+    """
     try:
-        return tasks_db.load_task(task_id, user_id)
+        return tasks_db.load_task_for_run(task_id)
     except TaskStorageError as error:
         logger.exception("Could not load task %s for user %s.", task_id, user_id)
         st.error(str(error), icon=":material/error:")
@@ -737,6 +769,25 @@ def _render_summary(result) -> None:
                     st.caption(f":orange[{note}]")
 
 
+def _save_blocked_reason(user_id: int, task: Task) -> str | None:
+    """Why this person can't save into the report, or None when they own it (phase 48).
+
+    Anyone may run anyone's report, but only its owner may change it. An unsaved Task has no
+    owner to check, and `_save_authored_into_task` already explains that case when pressed.
+    A failed lookup blocks the button rather than letting a press fail later.
+    """
+    if task.task_id is None:
+        return None
+    try:
+        owner = tasks_db.task_owner(task.task_id)
+    except TaskStorageError as error:
+        logger.exception("Could not find the owner of task %s.", task.task_id)
+        return str(error)
+    if owner["user_id"] == user_id:
+        return None
+    return f"Only {owner['owner_name'] or 'its owner'} can save changes into this report."
+
+
 def _save_authored_into_task(user_id: int, task: Task, report) -> None:
     """Carries this run's notes, pictures and pasted HTML back into the saved report.
 
@@ -754,6 +805,14 @@ def _save_authored_into_task(user_id: int, task: Task, report) -> None:
             "Save it in Report builder first.",
             icon=":material/error:",
         )
+        return
+
+    # Checked again on the press, not only on the button: `save_task` matches by name within
+    # the saver's own account, so someone else's "Monthly sales" saved here would overwrite a
+    # report of that name the saver owns rather than being refused.
+    blocked = _save_blocked_reason(user_id, task)
+    if blocked is not None:
+        st.error(blocked, icon=":material/lock:")
         return
 
     written = dashboard_model.copy_authored_content(report, task.report)
@@ -777,6 +836,26 @@ def _save_authored_into_task(user_id: int, task: Task, report) -> None:
         f"“{task.display_name()}”. The next run starts with them."
     )
     st.rerun(scope="app")
+
+
+def _render_run_dashboard(task: Task) -> None:
+    """The report's dashboard with the numbers just run, behind a switch (phase 46).
+
+    Drawn here rather than by sending the user to the viewer page, because leaving this page
+    unmounts the uploader and would drop the files they just loaded. Off by default: drawing
+    it flattens the whole month's data, which nobody should wait for just to read the report.
+    """
+    if not task.dashboard_spec.panels or task.task_id is None:
+        return
+
+    st.divider()
+    if st.toggle(
+        "Show the dashboard",
+        key="rt_show_dashboard",
+        help="Draw this report's dashboard with the data from this run. View and download only - "
+        "it is changed in Report builder.",
+    ):
+        dashboard_viewer.render_saved_dashboard(task.task_id, task.display_name(), key_prefix="rt_run_dash")
 
 
 def _render_clear_files(loaded_tables: list[engine_session.EngineTable]) -> None:
@@ -934,7 +1013,9 @@ if profile is not None:
             report_view.render_report_output(
                 dashboard_session.get_report(),
                 on_save=lambda report: _save_authored_into_task(user_id, task, report),
+                save_blocked=_save_blocked_reason(user_id, task),
             )
+            _render_run_dashboard(task)
 
         if loaded_tables:
             st.divider()
