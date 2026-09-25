@@ -74,18 +74,28 @@ _SEEDED_FOR_KEY = "tf_form_seeded_for"
 _INPUT_PREFIX = f"{FORM_PREFIX}input_"
 
 
-def preset_source_table(table_name: str) -> None:
+def preset_source_table(
+    table_name: str, operation: str | None = None, params: dict | None = None
+) -> None:
     """Empties the form and points its `source` picker at one table.
 
     For the shortcut buttons that open the dialog already aimed at a job — "Fix headers" on
-    an uploaded table, and anything like it later. Everything is cleared first, including
-    `_SEEDED_FOR_KEY`, so a form left over from a different operation cannot leak a parameter
-    that happens to share a name; `seed_form` then fills in that operation's own defaults on
-    the run that draws the dialog.
+    an uploaded table, "Store as numbers" on columns still held as text. Everything is
+    cleared first, including `_SEEDED_FOR_KEY`, so a form left over from a different
+    operation cannot leak a parameter that happens to share a name; `seed_form` then fills
+    in that operation's own defaults on the run that draws the dialog.
+
+    `params` pre-fills some of those boxes. It needs `operation` too, and marks the form as
+    already seeded for it - otherwise `seed_form` would take the boxes for leftovers from
+    another operation and clear them before they were drawn.
     """
     for key in [key for key in st.session_state if str(key).startswith(FORM_PREFIX)]:
         st.session_state.pop(key, None)
     st.session_state[f"{_INPUT_PREFIX}source"] = table_name
+    if operation and params:
+        st.session_state[_SEEDED_FOR_KEY] = operation
+        for name, value in params.items():
+            st.session_state[_key(name)] = value
 
 
 def seed_form(spec: OperationSpec, existing_step: TransformStep | None) -> None:

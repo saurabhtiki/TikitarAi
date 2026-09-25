@@ -1,5 +1,7 @@
 import pandas as pd
 
+from cleaner import profiling
+
 from cleaner.profiling import (
     DATE_SAMPLE_ROWS,
     DEFAULT_DATE_FORMAT,
@@ -272,3 +274,31 @@ def test_an_already_converted_column_still_previews():
     _, parsed, present, _ = best_date_format(already)
 
     assert parsed == present == 2
+
+
+class TestColumnsStoredAsText:
+    def test_numbers_and_dates_held_as_text_are_found(self):
+        frame = pd.DataFrame(
+            {
+                "quantity": ["2", "4", "1"],
+                "sold_on": ["03-04-2025", "05-04-2025", "06-04-2025"],
+                "item": ["Pen", "Ink", "Pad"],
+            }
+        )
+        stats = profiling.column_stats(frame)
+
+        assert profiling.columns_stored_as_text(frame, stats) == {
+            "quantity": profiling.NUMERIC,
+            "sold_on": profiling.DATE,
+        }
+
+    def test_columns_already_stored_as_numbers_or_dates_are_not(self):
+        frame = pd.DataFrame(
+            {
+                "quantity": [2.0, 4.0, 1.0],
+                "sold_on": pd.to_datetime(["2025-04-03", "2025-04-05", "2025-04-06"]),
+            }
+        )
+        stats = profiling.column_stats(frame)
+
+        assert profiling.columns_stored_as_text(frame, stats) == {}

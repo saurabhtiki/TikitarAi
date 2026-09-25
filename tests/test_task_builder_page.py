@@ -649,6 +649,57 @@ class TestSavingAndOpening:
         assert app.session_state["ck_set"].persona == "You are a finance controller."
 
 
+class TestDescriptionsComeBack:
+    """"What the columns mean" was saved with the Task and never restored, so every visit
+    meant typing it all again."""
+
+    def _describe(self, app, column, description):
+        entries = app.session_state[engine_session.DE_DICTIONARY_KEY]
+        for entry in entries:
+            if entry.column == column:
+                entry.description = description
+                entry.synonyms = ["salary"]
+        app.session_state[engine_session.DE_DICTIONARY_KEY] = entries
+        app.run()
+
+    def _description_of(self, app, column):
+        return next(
+            (entry.description, entry.synonyms)
+            for entry in app.session_state[engine_session.DE_DICTIONARY_KEY]
+            if entry.column == column
+        )
+
+    def test_a_reopened_task_describes_its_columns_once_the_file_is_loaded(self, tmp_path, monkeypatch):
+        app = _loaded(tmp_path, monkeypatch)
+        self._describe(app, "basic", "Monthly basic pay")
+        app.button(key="tb_save_task").click().run()
+        task_id = list_tasks(1)[0]["task_id"]
+
+        app.button(key="tb_start_over_button").click().run()
+        _open_saved(app, task_id)
+        app.session_state[engine_session.STEP_UPLOAD] = True
+        app.run()
+        app.file_uploader(key=engine_session.DE_UPLOADER_KEY).set_value(
+            [("salary.csv", SALARY_CSV, "text/csv")]
+        )
+        load_uploaded_files(app)
+
+        assert self._description_of(app, "basic") == ("Monthly basic pay", ["salary"])
+        assert self._description_of(app, "bonus") == ("", [])
+
+    def test_a_task_opened_with_its_file_already_loaded_describes_it_at_once(self, tmp_path, monkeypatch):
+        app = _loaded(tmp_path, monkeypatch)
+        self._describe(app, "basic", "Monthly basic pay")
+        app.button(key="tb_save_task").click().run()
+        task_id = list_tasks(1)[0]["task_id"]
+        self._describe(app, "basic", "")
+
+        _switch(app)
+        _open_saved(app, task_id)
+
+        assert self._description_of(app, "basic")[0] == "Monthly basic pay"
+
+
 class TestStartOver:
     def test_it_clears_the_tasks_report_along_with_everything_else(self, tmp_path, monkeypatch):
         app = _view(_loaded(tmp_path, monkeypatch), "Report-Items")

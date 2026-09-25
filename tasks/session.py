@@ -21,6 +21,7 @@ import streamlit as st
 from checks import session as checks_session
 from dashboard import session as dashboard_session
 from engine import session as engine_session
+from engine.exceptions import DataEngineError
 from live_dashboard import session as live_dashboard_session
 from report_items import session as report_items_session
 from tasks.exceptions import TaskStorageError
@@ -223,12 +224,27 @@ def capture_task() -> Task:
     )
 
 
+def _restore_descriptions(task: Task) -> None:
+    """Puts the Task's "What the columns mean" back, on whichever tables are or will be loaded.
+
+    The one piece of the saved schema that *is* restored on open: a description is the
+    user's own writing about a column, not a claim about this month's data, so there is
+    nothing to check it against first. Never raises - a Task that opens without its
+    descriptions is still a Task, and the failure is logged.
+    """
+    try:
+        engine_session.hold_saved_descriptions(task.schema.restored_dictionary())
+    except DataEngineError:
+        logger.exception("Could not restore the column descriptions of '%s'.", task.display_name())
+
+
 def load_task(task: Task) -> None:
     """Puts a saved Task back on screen, ready to edit.
 
     What comes back is the **recipe**: the persona, the report items, the criteria and the
-    report's arrangement. What deliberately does *not* happen is applying the saved schema to
-    the data currently loaded, or replaying the column steps against it — that is requirement
+    report's arrangement, and the column descriptions (`_restore_descriptions`). What
+    deliberately does *not* happen is applying the rest of the saved schema to the data
+    currently loaded, or replaying the column steps against it — that is requirement
     8's Run a Task, and doing half of it here would leave the session in a state neither
     stage owns. Every restored item carries its SQL, so one press per item re-runs it.
 
@@ -249,6 +265,7 @@ def load_task(task: Task) -> None:
     checks_session.replace_set(task.checks)
     dashboard_session.set_report(task.report)
     live_dashboard_session.replace_spec(task.dashboard_spec)
+    _restore_descriptions(task)
 
     # Fingerprinted from the Task itself rather than from `capture_task()`, which cannot run
     # yet: the three fields above are still queued. It is the same value capture will produce

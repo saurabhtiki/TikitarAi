@@ -31,6 +31,7 @@ DE_TABLES_KEY = "de_tables"
 DE_RELATIONSHIPS_KEY = "de_relationships"
 DE_CANDIDATES_KEY = "de_candidates"
 DE_DICTIONARY_KEY = "de_dictionary"
+DE_HELD_DESCRIPTIONS_KEY = "de_held_descriptions"
 DE_STATEMENTS_KEY = "de_calculated_statements"
 DE_UPLOADER_KEY = "de_uploader"
 DE_DIALOG_KEY = "de_open_dialog"
@@ -772,17 +773,42 @@ def semantic_types_by_table() -> dict[str, dict[str, str]]:
     return {table.table_name: table.semantic_types for table in get_tables().values()}
 
 
+def hold_saved_descriptions(entries: list) -> None:
+    """Keeps a saved Task's column descriptions until the tables they describe are loaded.
+
+    A Task is usually opened *before* its files are uploaded, so there is nothing yet to
+    write its descriptions onto - and seeding the dictionary directly would not help, since
+    the first upload rebuilds it against only the tables loaded so far and drops the rest.
+    Held here, each description lands the moment its own table appears (`refresh_dictionary`)
+    and is then let go, so a description the user later clears stays cleared.
+    """
+    st.session_state[DE_HELD_DESCRIPTIONS_KEY] = [
+        entry for entry in entries if entry.description.strip() or entry.synonyms
+    ]
+    refresh_dictionary()
+
+
 def refresh_dictionary() -> list:
     """Rebuilds the dictionary against the current schema, keeping typed descriptions.
 
     Called after anything that changes the columns — a new upload, a rebuild, an added
     calculated column — so the grid always matches the tables, without the user losing
     what they have already written.
+
+    Descriptions held from an opened Task (`hold_saved_descriptions`) go in after the ones
+    on screen, so for a column they both describe the Task's wins - opening a Task means
+    wanting what it saved.
     """
+    held = st.session_state.get(DE_HELD_DESCRIPTIONS_KEY, [])
     entries = dictionary.build_dictionary(
-        connection(), table_names(), semantic_types_by_table(), existing=get_dictionary()
+        connection(), table_names(), semantic_types_by_table(), existing=get_dictionary() + held
     )
     set_dictionary(entries)
+    if held:
+        landed = {entry.key for entry in entries}
+        st.session_state[DE_HELD_DESCRIPTIONS_KEY] = [
+            entry for entry in held if entry.key not in landed
+        ]
     return entries
 
 
@@ -915,6 +941,7 @@ def reset_engine() -> None:
         DE_RELATIONSHIPS_KEY,
         DE_CANDIDATES_KEY,
         DE_DICTIONARY_KEY,
+        DE_HELD_DESCRIPTIONS_KEY,
         DE_STATEMENTS_KEY,
         DE_DIALOG_KEY,
         DE_PENDING_STEPS_KEY,

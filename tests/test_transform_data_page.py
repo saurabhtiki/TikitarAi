@@ -567,6 +567,68 @@ class TestFixHeaders:
 
 
 # --------------------------------------------------------------------------------------
+# Numbers and dates that are still held as text
+# --------------------------------------------------------------------------------------
+
+#: Quantity looks numeric and sold_on looks like dates, but an upload holds both as text.
+STOCK_CSV = b"item,quantity,sold_on\nPen,2.567,03-04-2025\nInk,4.1,05-04-2025\nPad,1.25,06-04-2025\n"
+
+
+class TestStoredAsText:
+    """Column details said `numeric` for Quantity, and Round then refused it as not numeric -
+    both true, one about the values and one about how they are stored."""
+
+    def _stock(self, tmp_path, monkeypatch):
+        return _upload_and_load(_make_app(tmp_path, monkeypatch), ("stock.csv", STOCK_CSV))
+
+    def test_the_type_says_stored_as_text(self, tmp_path, monkeypatch):
+        app = self._stock(tmp_path, monkeypatch)
+
+        details = app.dataframe[-1].value
+        types = dict(zip(details["column"], details["column_type"], strict=True))
+        assert types["quantity"] == "numeric (stored as text)"
+        assert types["sold_on"] == "date (stored as text)"
+        assert "stored as text" not in types["item"]
+
+    def test_it_names_the_columns_and_why_they_matter(self, tmp_path, monkeypatch):
+        app = self._stock(tmp_path, monkeypatch)
+
+        assert any("quantity" in item.value and "Round" in item.value for item in app.caption)
+
+    def test_store_as_numbers_opens_the_fix_step_with_the_columns_chosen(self, tmp_path, monkeypatch):
+        app = self._stock(tmp_path, monkeypatch)
+
+        app.button(key="tf_store_numbers_stock").click().run()
+
+        assert not app.exception
+        assert _state(app, session.TF_DIALOG_KEY, None) == "add"
+        assert app.multiselect(key="tf_form_columns").value == ["quantity"]
+
+    def test_store_as_dates_opens_change_type_set_to_date(self, tmp_path, monkeypatch):
+        app = self._stock(tmp_path, monkeypatch)
+
+        app.button(key="tf_store_dates_stock").click().run()
+
+        assert not app.exception
+        assert app.multiselect(key="tf_form_columns").value == ["sold_on"]
+        assert app.selectbox(key="tf_form_target_type").value == "date"
+
+    def test_once_stored_as_numbers_round_works_and_the_button_goes(self, tmp_path, monkeypatch):
+        app = self._stock(tmp_path, monkeypatch)
+        app.button(key="tf_store_numbers_stock").click().run()
+        app.button(key="tf_commit_step").click().run()
+        assert _steps(app)[0]["operation"] == "fix_numeric_text"
+
+        assert not [button for button in app.button if button.key == "tf_store_numbers_stock"]
+
+    def test_a_file_of_only_words_offers_nothing(self, tmp_path, monkeypatch):
+        words = b"customer,city\nAcme,Pune\nBolt,Delhi\n"
+        app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("customers.csv", words))
+
+        assert not [button for button in app.button if button.key.startswith("tf_store_numbers")]
+
+
+# --------------------------------------------------------------------------------------
 # Phase 27: saved pipelines, and the Chat with Data handoff
 # --------------------------------------------------------------------------------------
 

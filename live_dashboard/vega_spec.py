@@ -235,6 +235,10 @@ _DARK_CONFIG = {
              "domainColor": "#475569", "tickColor": "#475569"},
     "legend": {"labelColor": "#cbd5e1", "titleColor": "#e2e8f0"},
     "title": {"color": "#e2e8f0"},
+    # Data labels are text marks, and a text mark with no colour of its own is drawn in
+    # Vega's default black - invisible on this background. A label that takes its colour
+    # from a colour channel (a pie slice's share) still does; this is only the fallback.
+    "text": {"color": "#e2e8f0"},
     "view": {"stroke": "transparent"},
 }
 
@@ -244,6 +248,7 @@ _LIGHT_CONFIG = {
              "domainColor": "#cbd5e1", "tickColor": "#cbd5e1"},
     "legend": {"labelColor": "#475569", "titleColor": "#1e293b"},
     "title": {"color": "#1e293b"},
+    "text": {"color": "#1e293b"},
     "view": {"stroke": "transparent"},
 }
 

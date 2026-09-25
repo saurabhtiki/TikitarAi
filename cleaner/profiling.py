@@ -431,6 +431,26 @@ def column_stats(
     )
 
 
+def columns_stored_as_text(frame: pd.DataFrame, stats: pd.DataFrame) -> dict[str, str]:
+    """The columns that look like numbers or dates but are still held as text.
+
+    `column_stats` names a column by what its values *look like*, so `25, 40, 12` held as
+    text reads `numeric` - true of the values, but a step that needs a real number (Round,
+    say) checks how the column is stored and refuses it. This is the gap between the two,
+    `{column: NUMERIC or DATE}`, so a page can say so and offer the step that closes it.
+    """
+    stored_as_text: dict[str, str] = {}
+    for column, column_type in zip(stats["column"], stats["column_type"], strict=True):
+        if column not in frame.columns:
+            continue
+        series = frame[column]
+        if column_type == NUMERIC and not is_numeric_dtype(series):
+            stored_as_text[column] = NUMERIC
+        elif column_type == DATE and not is_datetime64_any_dtype(series):
+            stored_as_text[column] = DATE
+    return stored_as_text
+
+
 def text_columns(frame: pd.DataFrame) -> list[str]:
     """Columns the text-cleanup actions can operate on.
 

@@ -213,11 +213,13 @@ def _render_one_table(held: NamedFrame) -> None:
             f":red[Showing {len(shown):,} of {len(held.frame):,} rows. "
             f"The download has all of them.]"
         )
-    _render_column_details(held)
+    stats = _render_column_details(held)
+    if stats is not None:
+        _render_stored_as_text(held, stats)
     _render_fix_headers(held)
 
 
-def _render_column_details(held: NamedFrame) -> None:
+def _render_column_details(held: NamedFrame):
     """One row per column: type, how much is filled, how varied, a few example values.
 
     The same panel Data Cleaner shows, and for the same reason: the preview only shows the
@@ -227,19 +229,29 @@ def _render_column_details(held: NamedFrame) -> None:
 
     Folded away rather than dropped on a failure: a profile that can't be computed is a
     reason to hide one panel, not to take the table's preview down with it.
+
+    A column whose values look like numbers but are still held as text says so in its Type -
+    `numeric (stored as text)` - because a plain `numeric` there is exactly what made a
+    refused Round look like a bug. Returns the stats, or None when they couldn't be computed.
     """
     with st.expander("Column details", icon=":material/analytics:"):
         try:
             stats = profiling.column_stats(held.frame)
+            stored_as_text = profiling.columns_stored_as_text(held.frame, stats)
         except Exception:
             logger.exception("Could not profile the columns of '%s'.", held.name)
             st.caption(
                 ":red[These columns couldn't be summarised. The table above is unaffected.]"
             )
-            return
+            return None
 
+        shown = stats.copy()
+        shown["column_type"] = [
+            f"{column_type} (stored as text)" if column in stored_as_text else column_type
+            for column, column_type in zip(shown["column"], shown["column_type"], strict=True)
+        ]
         show_dataframe(
-            stats,
+            shown,
             key=f"tf_stats_{held.name}",
             width="stretch",
             hide_index=True,
@@ -256,6 +268,70 @@ def _render_column_details(held: NamedFrame) -> None:
             },
         )
         st.caption(":red[Counted over every row in this table, not just the preview above.]")
+    return stats
+
+
+def _render_stored_as_text(held: NamedFrame, stats) -> None:
+    """One-click fixes for columns that look like numbers or dates but are held as text.
+
+    Uploads arrive as text on purpose (so leading zeros survive), which means Round, Percentage
+    of total and the rest refuse a Quantity column that *looks* numeric everywhere else on the
+    screen. Each button opens the ordinary Add-a-step box with the step and the columns already
+    chosen, so the fix is still a step - it replays next month like any other.
+    """
+    try:
+        stored_as_text = profiling.columns_stored_as_text(held.frame, stats)
+    except (KeyError, ValueError, TypeError):
+        logger.exception("Could not work out which columns of '%s' are held as text.", held.name)
+        return
+    numbers = [column for column, kind in stored_as_text.items() if kind == profiling.NUMERIC]
+    dates = [column for column, kind in stored_as_text.items() if kind == profiling.DATE]
+    if not numbers and not dates:
+        return
+
+    if numbers:
+        st.caption(
+            f":red[{', '.join(numbers)}: look like numbers but are stored as text, so Round and "
+            f"the other number steps will skip them until they are stored as numbers.]"
+        )
+    if dates:
+        st.caption(
+            f":red[{', '.join(dates)}: look like dates but are stored as text, so date steps "
+            f"may not read them until they are stored as dates.]"
+        )
+
+    number_column, date_column = st.columns(2)
+    if numbers:
+        number_column.button(
+            "Store as numbers",
+            key=f"tf_store_numbers_{held.name}",
+            icon=":material/pin:",
+            width="stretch",
+            help="Opens the Add-a-step box set to 'Fix numbers stored as text' with these "
+            "columns already chosen. Check the preview, then add the step.",
+            on_click=_open_store_as,
+            args=(held.name, "fix_numeric_text", {"columns": numbers}),
+        )
+    if dates:
+        date_column.button(
+            "Store as dates",
+            key=f"tf_store_dates_{held.name}",
+            icon=":material/calendar_month:",
+            width="stretch",
+            help="Opens the Add-a-step box set to 'Change column type' as date with these "
+            "columns already chosen. Check the preview, then add the step.",
+            on_click=_open_store_as,
+            args=(held.name, "change_dtype", {"columns": dates, "target_type": "date"}),
+        )
+
+
+def _open_store_as(table_name: str, operation: str, params: dict) -> None:
+    """Opens the add dialog with `operation`, `table_name` and `params` already chosen."""
+    spec = get_operation(operation)
+    st.session_state[PICK_CATEGORY_KEY] = spec.category
+    st.session_state[PICK_OPERATION_KEY] = spec
+    preset_source_table(table_name, operation, params)
+    session.open_dialog("add")
 
 
 def _render_fix_headers(held: NamedFrame) -> None:

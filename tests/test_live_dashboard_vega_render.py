@@ -71,6 +71,7 @@ view.runAsync().then(() => {
   const marks = [];
   const labels = {};
   const texts = [];
+  const fills = [];
   const walk = (items) => {
     for (const item of items || []) {
       if (item.marktype && item.role === 'mark') {
@@ -79,6 +80,7 @@ view.runAsync().then(() => {
       if (item.marktype === 'text' && item.role !== 'axis-label') {
         const written = (item.items || []).map((one) => String(one.text));
         if (written.length) { texts.push(written); }
+        for (const one of item.items || []) { fills.push(one.fill === undefined ? null : one.fill); }
       }
       if (item.marktype === 'text' && item.role === 'axis-label') {
         const texts = (item.items || []).map((one) => String(one.text));
@@ -89,7 +91,8 @@ view.runAsync().then(() => {
   };
   walk(view.scenegraph().root.items);
   console.log(JSON.stringify({domains: domains, marks: marks,
-                              labels: Object.values(labels), texts: texts}));
+                              labels: Object.values(labels), texts: texts,
+                              fills: fills}));
 }).catch((error) => {
   console.error(error.stack);
   process.exit(1);
@@ -97,7 +100,7 @@ view.runAsync().then(() => {
 """
 
 
-def _draw(panel: m.PanelSpec, rows: list[dict], tmp_path: Path) -> dict:
+def _draw(panel: m.PanelSpec, rows: list[dict], tmp_path: Path, theme: str = m.THEME_LIGHT) -> dict:
     """Draws one panel over `rows` and reports its scales, marks and axis labels."""
     node = shutil.which("node")
     if not node:
@@ -107,7 +110,7 @@ def _draw(panel: m.PanelSpec, rows: list[dict], tmp_path: Path) -> dict:
     spec_file = tmp_path / "spec.json"
     rows_file = tmp_path / "rows.json"
     probe.write_text(PROBE, encoding="utf-8")
-    spec_file.write_text(json.dumps(vs.build_vega_spec(panel)), encoding="utf-8")
+    spec_file.write_text(json.dumps(vs.build_vega_spec(panel, theme=theme)), encoding="utf-8")
     rows_file.write_text(json.dumps(rows), encoding="utf-8")
 
     try:
@@ -311,6 +314,24 @@ def test_labels_and_a_top_n_still_agree_about_which_bars_are_there(tmp_path):
 
     kinds = {mark["type"]: mark["count"] for mark in drawn["marks"] if mark["count"]}
     assert kinds.get("rect") == 3 and kinds.get("text") == 3
+
+
+@pytest.mark.parametrize("sub_type", [m.CHART_BAR, m.CHART_BAR_HORIZONTAL, m.CHART_LINE])
+def test_data_labels_are_light_on_a_dark_page(sub_type, tmp_path):
+    """A label with no colour of its own was drawn in Vega's default black, which on the dark
+    theme is the page's own background - the numbers were there and nobody could see them."""
+    drawn = _draw(_panel(sub_type=sub_type, group_by=CATEGORY, properties={"labels": True}),
+                  SPENDING, tmp_path, theme=m.THEME_DARK)
+
+    assert drawn["fills"], drawn
+    assert set(drawn["fills"]) == {vs._DARK_CONFIG["text"]["color"]}
+
+
+def test_data_labels_stay_dark_on_a_light_page(tmp_path):
+    drawn = _draw(_panel(sub_type=m.CHART_BAR, group_by=CATEGORY, properties={"labels": True}),
+                  SPENDING, tmp_path)
+
+    assert set(drawn["fills"]) == {vs._LIGHT_CONFIG["text"]["color"]}
 
 
 def test_a_named_colour_paints_a_single_series_chart(tmp_path):
