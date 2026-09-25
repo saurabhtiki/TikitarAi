@@ -2,8 +2,9 @@
 
 Follows `cleaner/db.py` line for line, which follows `tasks/db.py`: a short-lived
 connection per call (connections aren't safe to share across Streamlit's per-session
-threads), and every read or write scoped to the owning `user_id`, so one account cannot
-open another's pipelines.
+threads), and every write scoped to the owning `user_id`, so one account cannot change or
+delete another's pipelines. Reading is shared (phase 49): `list_all_pipelines`,
+`load_pipeline_for_run` and `pipeline_owner` let anyone on this small team run any pipeline.
 
 One name per account. Saving a pipeline whose name is already taken **updates that one**,
 rather than hitting the unique index with an error the user can do nothing useful about —
@@ -95,6 +96,70 @@ def list_pipelines(user_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> list[
             (user_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+
+def list_all_pipelines(db_path: Path | str = DEFAULT_DB_PATH) -> list[dict]:
+    """Every account's pipelines, newest edit first, each with its owner's name (phase 49).
+
+    Feeds the Transform Data picker, where anyone may run any pipeline. Like `list_pipelines`
+    it leaves the JSON out. `owner_name` is blank when the owner row is somehow missing, rather
+    than the pipeline vanishing from the list.
+    """
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT transform_pipelines.pipeline_id, transform_pipelines.user_id, "
+            "transform_pipelines.name, transform_pipelines.description, "
+            "transform_pipelines.created_at, transform_pipelines.updated_at, "
+            "COALESCE(users.name, '') AS owner_name "
+            "FROM transform_pipelines LEFT JOIN users ON users.user_id = transform_pipelines.user_id "
+            "ORDER BY transform_pipelines.updated_at DESC;"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+_GONE = "This pipeline no longer exists. Its owner may have deleted it."
+
+
+def load_pipeline_for_run(pipeline_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> SavedPipeline:
+    """Reads any account's pipeline, **to run it** (phase 49).
+
+    Not scoped to `user_id`, on purpose: this is a small internal team and anyone may run any
+    pipeline. Changing it is still the owner's alone - `save_pipeline` and `delete_pipeline`
+    refuse everyone else, whatever a page lets through.
+
+    Raises:
+        PipelineStorageError: if there is no such pipeline, or its JSON can't be read.
+    """
+    with _get_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT * FROM transform_pipelines WHERE pipeline_id = ?;", (int(pipeline_id),)
+        ).fetchone()
+    if row is None:
+        raise PipelineStorageError(_GONE)
+    return from_json(
+        row["pipeline_json"],
+        pipeline_id=row["pipeline_id"],
+        name=row["name"],
+        description=row["description"] or "",
+    )
+
+
+def pipeline_owner(pipeline_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> dict:
+    """`{"user_id", "owner_name"}` of a pipeline, so a page can tell whether you may change it.
+
+    Raises:
+        PipelineStorageError: if there is no such pipeline, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT transform_pipelines.user_id, COALESCE(users.name, '') AS owner_name "
+            "FROM transform_pipelines LEFT JOIN users ON users.user_id = transform_pipelines.user_id "
+            "WHERE transform_pipelines.pipeline_id = ?;",
+            (int(pipeline_id),),
+        ).fetchone()
+    if row is None:
+        raise PipelineStorageError(_GONE)
+    return dict(row)
 
 
 def _get_owned_pipeline(

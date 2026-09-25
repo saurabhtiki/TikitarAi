@@ -65,6 +65,7 @@ def select_saved(
     include_none: bool = False,
     none_label: str = "— None —",
     on_change=None,
+    row_face=None,
 ) -> dict | None:
     """Draws the select box and returns the chosen row, or None when nothing is chosen.
 
@@ -83,6 +84,8 @@ def select_saved(
         none_label: what that entry says.
         on_change: passed straight through, for a caller that has to react to the change
             rather than to the returned value.
+        row_face: how one row reads in the list; `row_label` when not given. Transform Data
+            passes one that adds who owns the pipeline.
 
     Returns None both when nothing is selected and when the "none" entry is — those mean the
     same thing to every caller so far, and a third return value nobody reads would be one
@@ -104,7 +107,7 @@ def select_saved(
     def _face(option: object) -> str:
         if option == NONE_OPTION:
             return none_label
-        return row_label(by_id[option])
+        return (row_face or row_label)(by_id[option])
 
     # `index` is only offered on the run that creates the widget. Passing it alongside a
     # value already in session_state sets a default that is then immediately overridden,

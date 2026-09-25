@@ -15,8 +15,11 @@ from auth.db import create_user, init_db, seed_default_admin
 from transform.db import (
     delete_pipeline,
     init_transform_pipelines_table,
+    list_all_pipelines,
     list_pipelines,
     load_pipeline,
+    load_pipeline_for_run,
+    pipeline_owner,
     save_pipeline,
 )
 from transform.exceptions import PipelineStorageError
@@ -253,6 +256,44 @@ class TestStorage:
         init_transform_pipelines_table(path)
         init_transform_pipelines_table(path)
         assert list_pipelines(1, path) == []
+
+
+class TestSharedForRunning:
+    """Phase 49: anyone may see and run any pipeline; changing it stays with its owner."""
+
+    def test_every_account_s_pipelines_are_listed_with_their_owner(self, db_path):
+        save_pipeline(1, _pipeline("Admin's"), db_path)
+        save_pipeline(2, _pipeline("Second's"), db_path)
+        rows = {row["name"]: row for row in list_all_pipelines(db_path)}
+        assert set(rows) == {"Admin's", "Second's"}
+        assert rows["Second's"]["owner_name"] == "Second"
+        assert rows["Second's"]["user_id"] == 2
+        assert "pipeline_json" not in rows["Second's"]
+
+    def test_another_account_can_load_it_to_run(self, db_path):
+        saved = save_pipeline(1, _pipeline(), db_path)
+        loaded = load_pipeline_for_run(saved.pipeline_id, db_path)
+        assert loaded.name == "Monthly sales"
+        assert [step["operation"] for step in loaded.steps] == [
+            step["operation"] for step in _pipeline().steps
+        ]
+
+    def test_the_owner_is_known(self, db_path):
+        saved = save_pipeline(2, _pipeline(), db_path)
+        assert pipeline_owner(saved.pipeline_id, db_path) == {"user_id": 2, "owner_name": "Second"}
+
+    def test_another_account_still_cannot_change_it(self, db_path):
+        saved = save_pipeline(1, _pipeline(), db_path)
+        with pytest.raises(PipelineStorageError, match="No transform pipeline"):
+            save_pipeline(2, load_pipeline_for_run(saved.pipeline_id, db_path), db_path)
+        with pytest.raises(PipelineStorageError, match="No transform pipeline"):
+            delete_pipeline(saved.pipeline_id, 2, db_path)
+
+    def test_a_missing_one_says_it_no_longer_exists(self, db_path):
+        with pytest.raises(PipelineStorageError, match="no longer exists"):
+            load_pipeline_for_run(999, db_path)
+        with pytest.raises(PipelineStorageError, match="no longer exists"):
+            pipeline_owner(999, db_path)
 
 
 class TestPipelineTable:

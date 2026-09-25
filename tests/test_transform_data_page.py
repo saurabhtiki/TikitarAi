@@ -13,7 +13,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from app_pages import saved_picker
-from auth.db import init_db, seed_default_admin
+from auth.db import create_user, init_db, seed_default_admin
 from cleaner.loaders import list_sheet_names
 from engine import session as engine_session
 from llm import session as llm_session
@@ -43,15 +43,20 @@ def _workbook(sheets: dict[str, pd.DataFrame]) -> bytes:
     return buffer.getvalue()
 
 
-def _make_app(tmp_path, monkeypatch):
+def _make_app(tmp_path, monkeypatch, user_id=1):
+    """The page, signed in as the admin (1) or, with `user_id=2`, as Anna."""
     monkeypatch.chdir(tmp_path)
     init_db()
     seed_default_admin()
+    try:
+        create_user("anna@example.com", "Anna", "Passw0rd!x", "normal_user")
+    except Exception:
+        pass  # already made by an earlier `_make_app` in the same test
     init_llm_table()
     init_transform_pipelines_table()
     app = AppTest.from_file(TRANSFORM_PAGE_PATH, default_timeout=30)
-    app.session_state["user_id"] = 1
-    app.session_state["email"] = "admin@admin.com"
+    app.session_state["user_id"] = user_id
+    app.session_state["email"] = "admin@admin.com" if user_id == 1 else "anna@example.com"
     app.session_state["role"] = "normal_user"
     app.run()
     return app
@@ -883,6 +888,70 @@ class TestUpdatingAPipeline:
         rows = list_pipelines(1)
         assert len(rows) == 1
         assert len(load_pipeline(rows[0]["pipeline_id"], 1).steps) == 2
+
+
+class TestSomeoneElsesPipeline:
+    """Phase 49: Anna sees and runs the admin's pipeline, but only the admin may change it."""
+
+    def _as_anna(self, tmp_path, monkeypatch):
+        _save_pipeline_through_the_page(_joined_app(tmp_path, monkeypatch))
+        anna = _upload_and_load(
+            _make_app(tmp_path, monkeypatch, user_id=2),
+            ("sales.csv", SALES_CSV),
+            ("customers.csv", CUSTOMERS_CSV),
+        )
+        return _select_saved(anna)
+
+    def test_it_is_listed_with_its_owner(self, tmp_path, monkeypatch):
+        _save_pipeline_through_the_page(_joined_app(tmp_path, monkeypatch))
+        anna = _make_app(tmp_path, monkeypatch, user_id=2)
+        labels = anna.selectbox(key=session.TF_PIPELINE_PICK_KEY).options[1:]  # after "New pipeline"
+        assert len(labels) == 1
+        assert labels[0].startswith("Monthly · by ") and "· by you" not in labels[0]
+
+    def test_anna_can_run_it(self, tmp_path, monkeypatch):
+        app = self._as_anna(tmp_path, monkeypatch)
+        app.button(key="tf_pipeline_apply").click().run()
+
+        assert not app.exception
+        assert [step["operation"] for step in _steps(app)] == ["merge"]
+
+    def test_update_and_delete_are_greyed_out_for_her(self, tmp_path, monkeypatch):
+        app = self._as_anna(tmp_path, monkeypatch)
+        update, delete = app.button(key="tf_pipeline_update"), app.button(key="tf_pipeline_delete")
+        assert update.disabled and delete.disabled
+        assert "can change or delete this pipeline" in update.help
+        assert not app.button(key="tf_pipeline_save_as").disabled   # her own copy is fine
+
+    def test_the_owner_is_checked_again_when_update_is_pressed(self, tmp_path, monkeypatch):
+        """Anna's own "Monthly" must not be overwritten by pressing Update on the admin's."""
+        app = self._as_anna(tmp_path, monkeypatch)
+        admin_id = list_pipelines(1)[0]["pipeline_id"]
+        app.session_state[session.TF_PIPELINE_DIALOG_KEY] = {
+            "name": "update", "payload": {"pipeline_id": admin_id, "name": "Monthly"},
+        }
+        app.run()
+        app.button(key="tf_pipeline_update_confirm").click().run()
+
+        assert any("can change or delete this pipeline" in error.value for error in app.error)
+        assert list_pipelines(2) == []
+
+    def test_the_owner_is_checked_again_when_delete_is_pressed(self, tmp_path, monkeypatch):
+        app = self._as_anna(tmp_path, monkeypatch)
+        admin_id = list_pipelines(1)[0]["pipeline_id"]
+        app.session_state[session.TF_PIPELINE_DIALOG_KEY] = {
+            "name": "delete", "payload": {"pipeline_id": admin_id, "name": "Monthly"},
+        }
+        app.run()
+        app.button(key="tf_pipeline_delete_confirm").click().run()
+
+        assert any("can change or delete this pipeline" in error.value for error in app.error)
+        assert len(list_pipelines(1)) == 1
+
+    def test_the_owner_s_own_buttons_stay_live(self, tmp_path, monkeypatch):
+        app = _select_saved(_save_pipeline_through_the_page(_joined_app(tmp_path, monkeypatch)))
+        assert not app.button(key="tf_pipeline_update").disabled
+        assert not app.button(key="tf_pipeline_delete").disabled
 
 
 class TestExportToChatWithData:

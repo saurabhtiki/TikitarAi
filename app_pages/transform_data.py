@@ -926,16 +926,16 @@ def _commit_ai_steps(steps: list[dict], workspace: dict[str, NamedFrame]) -> Non
 PIPELINE_NEW_LABEL = "— New pipeline —"
 
 
-def _saved_pipelines(user_id: int) -> list[dict] | None:
-    """Every saved pipeline for this account, or None when the list couldn't be read.
+def _saved_pipelines() -> list[dict] | None:
+    """Every account's saved pipelines (phase 49), or None when the list couldn't be read.
 
-    None rather than `[]`: "you have none" and "we couldn't look" lead to two different
+    None rather than `[]`: "there are none" and "we couldn't look" lead to two different
     next actions.
     """
     try:
-        return transform_db.list_pipelines(user_id)
+        return transform_db.list_all_pipelines()
     except PipelineStorageError as error:
-        logger.exception("Could not list transform pipelines for user %s.", user_id)
+        logger.exception("Could not list transform pipelines.")
         st.error(str(error), icon=":material/error:")
         return None
 
@@ -964,6 +964,39 @@ def _pipeline_name_taken(user_id: int, name: str, ignoring: int | None = None) -
     )
 
 
+def _change_blocked_reason(user_id: int, pipeline_id: int | None) -> str | None:
+    """Why this account may not update or delete the pipeline, or None when it may.
+
+    Anyone may run any pipeline, but changing one is its owner's alone (phase 49). Checked
+    again when a dialog's button is pressed, not only when the bar is drawn: `save_pipeline`
+    matches by name within the saver's own account, so a non-owner who happens to have a
+    pipeline of the same name would silently overwrite that one instead of being refused.
+    """
+    if pipeline_id is None:
+        return None
+    try:
+        owner = transform_db.pipeline_owner(pipeline_id)
+    except PipelineStorageError as error:
+        logger.exception("Could not look up the owner of transform pipeline %s.", pipeline_id)
+        return str(error)
+    if owner["user_id"] == user_id:
+        return None
+    return (
+        f"Only {owner['owner_name'] or 'its owner'} can change or delete this pipeline. "
+        "Save as pipeline keeps your own copy."
+    )
+
+
+def _pipeline_face(user_id: int):
+    """The picker's line for one pipeline: its name, whose it is, and when it was saved."""
+    def face(row: dict) -> str:
+        name = str(row.get("name") or "Untitled")
+        saved = saved_picker.format_timestamp(row.get("updated_at"))
+        owned = f"{name} · by {tasks_db.owner_label(row, user_id)}"
+        return f"{owned} — last saved {saved}" if saved else owned
+    return face
+
+
 def _there_is_something_to_save() -> bool:
     """Whether the Save/Update buttons should be live.
 
@@ -976,18 +1009,19 @@ def _there_is_something_to_save() -> bool:
     return bool(st.session_state.get(session.TF_UPLOADER_KEY) or session.get_steps())
 
 
-def _render_pipeline_bar(rows: list[dict] | None) -> None:
+def _render_pipeline_bar(rows: list[dict] | None, user_id: int) -> None:
     """The picker and its four buttons, above the uploader. Records intent only."""
     active_id, active_name = session.active_pipeline()
     listing = rows or []
     savable = _there_is_something_to_save()
+    change_blocked = _change_blocked_reason(user_id, active_id)
 
     with st.container(border=True):
         picker_column, status_column = st.columns([2, 3], vertical_alignment="center")
 
         with picker_column:
             if rows is None:
-                st.caption(":red[Your saved pipelines couldn't be listed — the message above says why.]")
+                st.caption(":red[The saved pipelines couldn't be listed — the message above says why.]")
             else:
                 saved_picker.select_saved(
                     listing,
@@ -996,9 +1030,11 @@ def _render_pipeline_bar(rows: list[dict] | None) -> None:
                     label="Saved pipeline",
                     help=(
                         "A saved set of files and the steps that turn them into your answer. "
-                        "Choosing one selects it — press Run this pipeline, below the uploader, "
-                        "to run it against your files. Start typing to filter."
+                        "Everyone's pipelines are listed, with who owns each one. Choosing one "
+                        "selects it — press Run this pipeline, below the uploader, to run it "
+                        "against your files. Start typing to filter by name or owner."
                     ),
+                    row_face=_pipeline_face(user_id),
                     include_none=True,
                     none_label=PIPELINE_NEW_LABEL,
                     index=saved_picker.option_index(
@@ -1011,6 +1047,11 @@ def _render_pipeline_bar(rows: list[dict] | None) -> None:
                 st.caption(
                     ":red[Build your steps as usual, then **Save as pipeline** to do it in "
                     "one click next month.]"
+                )
+            elif change_blocked is not None:
+                st.caption(
+                    f":red[Selected: **{active_name}**. You can run it; to change it, "
+                    "**Save as pipeline** makes your own copy.]"
                 )
             else:
                 st.caption(f":red[Selected: **{active_name}**.]")
@@ -1044,8 +1085,8 @@ def _render_pipeline_bar(rows: list[dict] | None) -> None:
                 icon=":material/save:",
                 type="primary",
                 width="stretch",
-                disabled=active_id is None or not savable,
-                help="Overwrite this pipeline with the steps currently on screen.",
+                disabled=active_id is None or not savable or change_blocked is not None,
+                help=change_blocked or "Overwrite this pipeline with the steps currently on screen.",
             ):
                 session.open_pipeline_dialog(
                     "update", {"pipeline_id": active_id, "name": active_name}
@@ -1056,8 +1097,8 @@ def _render_pipeline_bar(rows: list[dict] | None) -> None:
                 key="tf_pipeline_delete",
                 icon=":material/delete:",
                 width="stretch",
-                disabled=active_id is None,
-                help="Permanently delete this saved pipeline.",
+                disabled=active_id is None or change_blocked is not None,
+                help=change_blocked or "Permanently delete this saved pipeline.",
             ):
                 session.open_pipeline_dialog(
                     "delete", {"pipeline_id": active_id, "name": active_name}
@@ -1101,7 +1142,7 @@ def _select_pipeline(user_id: int) -> None:
         return
 
     try:
-        pipeline = transform_db.load_pipeline(selected_id, user_id)
+        pipeline = transform_db.load_pipeline_for_run(selected_id)
     except PipelineStorageError as error:
         logger.exception("Could not load transform pipeline %s.", selected_id)
         st.error(str(error), icon=":material/error:")
@@ -1339,6 +1380,10 @@ def _dialog_update_pipeline(user_id: int, payload: dict) -> None:
             width="stretch",
             help="Overwrite the saved pipeline with what is on screen.",
         ):
+            blocked = _change_blocked_reason(user_id, payload.get("pipeline_id"))
+            if blocked:
+                st.error(blocked, icon=":material/lock:")
+                return
             _write_pipeline(
                 user_id,
                 name,
@@ -1374,6 +1419,10 @@ def _dialog_delete_pipeline(user_id: int, payload: dict) -> None:
             width="stretch",
             help="Permanently delete this saved pipeline.",
         ):
+            blocked = _change_blocked_reason(user_id, pipeline_id)
+            if blocked:
+                st.error(blocked, icon=":material/lock:")
+                return
             try:
                 transform_db.delete_pipeline(pipeline_id, user_id)
             except PipelineStorageError as error:
@@ -1721,9 +1770,9 @@ if profile is not None:
     # key once it exists this run. Saving and deleting are what queue one.
     session.consume_pipeline_selection()
 
-    pipeline_rows = _saved_pipelines(user_id)
+    pipeline_rows = _saved_pipelines()
     # Above the uploader, and records intent only — see that section's header comment.
-    _render_pipeline_bar(pipeline_rows)
+    _render_pipeline_bar(pipeline_rows, user_id)
 
     upload_workspace, problems = _render_upload()
 

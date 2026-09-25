@@ -1,3 +1,48 @@
+# Phase 49 — Everyone can run every Transform Data pipeline
+
+**Status: done.**
+
+## The problem
+
+Transform Data's **Saved pipeline** picker lists only the pipelines *you* saved. Like reports
+(phase 48), Ravi should be able to run Anna's "Monthly clean-up" on this month's files.
+
+## What changes
+
+**Everyone can:** see every saved pipeline, with its owner, like *"Monthly clean-up · by Anna —
+last saved 2026-09-20 10:15"* (or *"· by you"*), and run it with **Run this pipeline**. Typing
+"anna" in the picker finds Anna's pipelines. **Save as pipeline** still works: it saves your
+own copy under your name.
+
+**Only the owner can:** **Update pipeline** and **Delete**. For anyone else both are grey, with
+the tooltip *"Only Anna can change or delete this pipeline. Save as pipeline keeps your own
+copy."*, and the line beside the picker says the same.
+
+**Example:** Ravi picks "Monthly clean-up · by Anna", uploads September's file and presses Run.
+He wants one more step, so he adds it and presses **Save as pipeline** → "Ravi's clean-up".
+Anna's pipeline is untouched.
+
+## How it's built
+
+- `transform/db.py`: `list_all_pipelines()` (with `owner_name`), `load_pipeline_for_run(id)`
+  and `pipeline_owner(id)`, the same shape as phase 48's Task helpers. Every write stays
+  owner-scoped.
+- `app_pages/transform_data.py`: the picker lists everyone's pipelines (`saved_picker.select_saved`
+  gains `row_face` for the "· by" label), selecting loads with `load_pipeline_for_run`, and
+  `_change_blocked_reason` greys Update/Delete and is checked again when either dialog's button
+  is pressed (a non-owner with a same-named pipeline would otherwise overwrite their own).
+- `tests/conftest.py`: loads the `dashboard` package before any page test, since
+  `app_pages/dashboard.py` hid it when a page test file ran on its own.
+
+## Tests
+
+- Storage: every account listed with owner names, another account loads to run, owner lookup,
+  another account still can't save or delete, a missing pipeline says so.
+- AppTest: Anna sees the admin's pipeline "· by" its owner and runs it; Update/Delete are grey
+  for her (Save as is not); pressing either dialog's button is refused; the owner's stay live.
+
+---
+
 # Phase 48 — Everyone can run every report
 
 **Status: done.**
