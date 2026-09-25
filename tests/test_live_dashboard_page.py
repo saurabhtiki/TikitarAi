@@ -63,6 +63,8 @@ def leave_the_engine_session_as_it_was_found():
     saved_light = llm_session.light_profile
     saved_active = llm_session.active_profile
     saved_revise = ai_spec.revise_dashboard
+    saved_draft = ai_spec.draft_checklist
+    saved_build = ai_spec.build_from_checklist
     try:
         yield
     finally:
@@ -71,6 +73,8 @@ def leave_the_engine_session_as_it_was_found():
         llm_session.light_profile = saved_light
         llm_session.active_profile = saved_active
         ai_spec.revise_dashboard = saved_revise
+        ai_spec.draft_checklist = saved_draft
+        ai_spec.build_from_checklist = saved_build
 
 
 def _scenario():
@@ -81,6 +85,7 @@ def _scenario():
     be there to close over.
     """
     import duckdb
+    import streamlit as st
 
     from app_pages import dashboard_view
     from engine.relationships import Relationship
@@ -97,7 +102,10 @@ def _scenario():
     engine.get_relationships = lambda: [Relationship("Transactions", "CustID", "Customer", "CustID")]
     engine.rebuild_count = lambda: 0
 
-    dashboard_view.llm_session.light_profile = lambda user_id: {
+    # `test_no_light` takes the Light Model away, so the checklist's fallback to the session
+    # model can be tested without a fourth copy of this scenario.
+    dashboard_view.llm_session.light_profile = lambda user_id: None if st.session_state.get(
+        "test_no_light") else {
         "profile_id": 1,
         "nickname": "Light",
         "default_model": "small-model",
@@ -117,10 +125,47 @@ def _scenario():
     # With no plan in session state the real `revise_dashboard` runs. That is not laziness:
     # the "blank box with visuals already there" refusal happens before any model is
     # reached, so the honest way to test it is to let the real function answer.
-    import streamlit as st
-
     from live_dashboard import ai_spec
     from live_dashboard import model as ld_model
+
+    # Phase 45's two calls. The draft returns `test_checklist` (or two default lines) and
+    # counts how often it was asked; the build records the lines and wishes it was sent and
+    # makes one chart per line, titled with the line - so a test can read the list back off
+    # the page - unless `test_round_plan` says it failed.
+    if not getattr(ai_spec.draft_checklist, "is_test_stub", False):
+        def drafted(profile, tables, **kwargs):
+            st.session_state["test_draft_profile"] = profile
+            st.session_state["test_draft_wishes"] = kwargs.get("wishes", "")
+            st.session_state["test_draft_count"] = st.session_state.get("test_draft_count", 0) + 1
+            lines = st.session_state.get("test_checklist",
+                                         ["Card: Total Amount", "Chart: Amount by customer"])
+            return list(lines), []
+
+        drafted.is_test_stub = True
+        ai_spec.draft_checklist = drafted
+
+    if not getattr(ai_spec.build_from_checklist, "is_test_stub", False):
+        def built(profile, lines, tables, spec, **kwargs):
+            st.session_state["test_round_profile"] = profile
+            st.session_state["test_checklist_sent"] = list(lines)
+            st.session_state["test_wishes_sent"] = kwargs.get("wishes", "")
+            plan = st.session_state.get("test_round_plan") or {}
+            result = ai_spec.RoundResult(notes=list(plan.get("notes") or []))
+            if plan.get("fail"):
+                result.failed = True
+                return result
+            for line in lines:
+                panel = ld_model.PanelSpec(
+                    visual_type=ld_model.VISUAL_CHART, sub_type=ld_model.CHART_BAR,
+                    source_table="Transactions", measure_column="Amount",
+                    group_by="Customer - CustName", title=line, row_number=1,
+                )
+                spec.panels.append(panel)
+                result.added.append(panel)
+            return result
+
+        built.is_test_stub = True
+        ai_spec.build_from_checklist = built
 
     if not getattr(ai_spec.revise_dashboard, "is_test_stub", False):
         real_revise = ai_spec.revise_dashboard
@@ -524,48 +569,145 @@ def test_generate_is_the_only_button_on_an_empty_page():
     assert "ld_ai_open" not in keys
 
 
-def test_generate_designs_a_dashboard_with_the_session_model_not_the_light_one():
-    """The one judgement call on this page - laying out a page from nothing - is made once,
-    so it is worth the better model. Every round after it stays Light."""
+# ------------------------------------------------------------------ phase 45: the checklist
+
+
+def test_generate_opens_a_checklist_drafted_by_the_light_model_and_builds_nothing_yet():
+    """The list is the quick part, so the Light Model writes it. Nothing is built until the
+    user has read it."""
     app = _app()
-    app.session_state["test_round_plan"] = {"add": ["Sales by customer"]}
     app.button(key="ld_generate").click().run()
 
     assert not app.exception
-    assert [panel.title for panel in _spec(app).panels] == ["Sales by customer"]
+    assert app.session_state["ld_dialog"] == "generate"
+    assert app.text_area(key="ld_checklist_text").value == (
+        "Card: Total Amount\nChart: Amount by customer"
+    )
+    assert app.session_state["test_draft_profile"]["nickname"] == "Light"
+    assert _spec(app).panels == []
+    assert "test_checklist_sent" not in app.session_state
+
+
+def test_the_edited_list_is_what_gets_built_by_the_session_model():
+    """The whole feature: the user's list, not the AI's first guess, reaches the build -
+    and the build is the good model's job, while rounds afterwards stay Light."""
+    app = _app()
+    app.button(key="ld_generate").click().run()
+    app.text_area(key="ld_checklist_text").set_value(
+        "1. Card: Total Amount\nChart: Amount by customer\n\n- Table: every transaction"
+    ).run()
+    app.text_area(key="ld_checklist_wishes").set_value("show money in INR").run()
+    app.button(key="ld_checklist_build").click().run()
+
+    assert not app.exception
+    lines = ["Card: Total Amount", "Chart: Amount by customer", "Table: every transaction"]
+    assert app.session_state["test_checklist_sent"] == lines
+    assert app.session_state["test_wishes_sent"] == "show money in INR"
     assert app.session_state["test_round_profile"]["nickname"] == "Good"
+    assert [panel.title for panel in _spec(app).panels] == lines
+    assert "ld_dialog" not in app.session_state
+
+    # The history shows the list the page was built from, not a generic "Generate".
+    written = " ".join(element.value for element in app.markdown)
+    assert "Build this list" in written and "Table: every transaction" in written
 
     _round(app, "rename it", retitle={0: "Renamed"})
     assert app.session_state["test_round_profile"]["nickname"] == "Light"
 
 
-def test_generate_over_an_existing_dashboard_asks_before_replacing_it():
-    """It replaces the page, edits and all, so one stray click must not be enough."""
-    app = _add_chart(_app(), title="Built by hand")
-    app.session_state["test_round_plan"] = {"add": ["Designed"]}
+def test_with_no_light_model_the_session_model_drafts_the_list():
+    app = _app()
+    app.session_state["test_no_light"] = True
+    app.button(key="ld_generate").click().run()
+
+    assert not app.exception
+    assert app.session_state["test_draft_profile"]["nickname"] == "Good"
+
+
+def test_cancel_changes_nothing_and_keeps_the_list_for_next_time():
+    """Reopening finds the user's edits where they left them, rather than a fresh draft
+    written over them."""
+    app = _app()
+    app.button(key="ld_generate").click().run()
+    app.text_area(key="ld_checklist_text").set_value("Card: My own line").run()
+    app.button(key="ld_checklist_cancel").click().run()
+
+    assert not app.exception
+    assert "ld_dialog" not in app.session_state
+    assert _spec(app).panels == []
 
     app.button(key="ld_generate").click().run()
+    assert app.text_area(key="ld_checklist_text").value == "Card: My own line"
+    assert app.session_state["test_draft_count"] == 1
+
+
+def test_draft_again_asks_for_a_fresh_list_using_anything_else():
+    app = _app()
+    app.button(key="ld_generate").click().run()
+    app.session_state["test_checklist"] = ["Card: Total cost"]
+    app.text_area(key="ld_checklist_wishes").set_value("focus on cost").run()
+    app.button(key="ld_checklist_redraft").click().run()
+
+    assert not app.exception
+    assert app.session_state["test_draft_count"] == 2
+    assert app.session_state["test_draft_wishes"] == "focus on cost"
+    assert app.text_area(key="ld_checklist_text").value == "Card: Total cost"
+
+
+def test_an_empty_list_asks_for_a_line_and_records_no_round():
+    app = _app()
+    app.button(key="ld_generate").click().run()
+    app.text_area(key="ld_checklist_text").set_value("  \n").run()
+    app.button(key="ld_checklist_build").click().run()
+
+    assert not app.exception
+    assert any("Write at least one line" in warning.value for warning in app.warning)
+    assert "test_checklist_sent" not in app.session_state
+    assert app.session_state["ld_dialog"] == "generate"
+
+
+def test_skip_the_list_builds_the_way_generate_always_did():
+    """For the reader who trusts the AI: no list, the model decides, the good model builds."""
+    app = _app()
+    app.session_state["test_round_plan"] = {"add": ["Sales by customer"]}
+    app.button(key="ld_generate").click().run()
+    app.button(key="ld_checklist_skip").click().run()
+
+    assert not app.exception
+    assert [panel.title for panel in _spec(app).panels] == ["Sales by customer"]
+    assert app.session_state["test_round_profile"]["nickname"] == "Good"
+    assert "test_checklist_sent" not in app.session_state
+    assert "ld_dialog" not in app.session_state
+
+
+def test_generate_over_an_existing_dashboard_says_it_replaces_it():
+    """One question instead of phase 39's two presses: the dialog is already the second
+    step, so it carries the warning and the button says what it does."""
+    app = _add_chart(_app(), title="Built by hand")
+    app.button(key="ld_generate").click().run()
+
+    assert any("This replaces everything" in warning.value for warning in app.warning)
+    assert app.button(key="ld_checklist_build").label == "Replace and build"
     assert [panel.title for panel in _spec(app).panels] == ["Built by hand"]
-    assert "test_round_profile" not in app.session_state
 
-    app.button(key="ld_generate_yes").click().run()
-    assert [panel.title for panel in _spec(app).panels] == ["Designed"]
+    app.button(key="ld_checklist_build").click().run()
+    assert [panel.title for panel in _spec(app).panels] == [
+        "Card: Total Amount", "Chart: Amount by customer",
+    ]
 
 
-def test_saying_no_to_generate_keeps_the_dashboard():
+def test_an_empty_page_offers_build_rather_than_replace():
+    app = _app()
+    app.button(key="ld_generate").click().run()
+    assert app.button(key="ld_checklist_build").label == "Build this dashboard"
+    assert not any("This replaces everything" in warning.value for warning in app.warning)
+
+
+def test_undo_after_building_the_list_brings_the_old_dashboard_back():
     app = _add_chart(_app(), title="Built by hand")
     app.button(key="ld_generate").click().run()
-    app.button(key="ld_generate_no").click().run()
-
-    assert [panel.title for panel in _spec(app).panels] == ["Built by hand"]
-    assert app.button(key="ld_generate") is not None
-
-
-def test_undo_after_generate_brings_the_old_dashboard_back():
-    app = _add_chart(_app(), title="Built by hand")
-    app.session_state["test_round_plan"] = {"add": ["Designed"]}
-    app.button(key="ld_generate").click().run()
-    app.button(key="ld_generate_yes").click().run()
+    app.button(key="ld_checklist_build").click().run()
+    assert [panel.title for panel in _spec(app).panels] != ["Built by hand"]
 
     app.button(key="ld_undo_round_0").click().run()
 
@@ -573,14 +715,28 @@ def test_undo_after_generate_brings_the_old_dashboard_back():
     assert [panel.title for panel in _spec(app).panels] == ["Built by hand"]
 
 
-def test_a_generate_that_produced_nothing_leaves_the_dashboard_alone():
-    """The panels are emptied on the way in, so a round that fails has to put them back -
-    otherwise a provider outage silently clears the page."""
+def test_a_build_that_produced_nothing_leaves_the_dashboard_alone():
+    """The panels are emptied on the way in, so a build that fails has to put them back -
+    otherwise a provider outage silently clears the page. The dialog stays open, with the
+    reason, beside the list the user may want to fix."""
+    app = _add_chart(_app(), title="Built by hand")
+    app.session_state["test_round_plan"] = {
+        "fail": True, "notes": ["Line 1 not built (Card: Total Amount): no such column."],
+    }
+    app.button(key="ld_generate").click().run()
+    app.button(key="ld_checklist_build").click().run()
+
+    assert not app.exception
+    assert [panel.title for panel in _spec(app).panels] == ["Built by hand"]
+    assert app.session_state["ld_dialog"] == "generate"
+    assert any("Line 1 not built" in warning.value for warning in app.warning)
+
+
+def test_a_skipped_generate_that_produced_nothing_leaves_the_dashboard_alone():
     app = _add_chart(_app(), title="Built by hand")
     app.session_state["test_round_plan"] = {"fail": True}
-
     app.button(key="ld_generate").click().run()
-    app.button(key="ld_generate_yes").click().run()
+    app.button(key="ld_checklist_skip").click().run()
 
     assert not app.exception
     assert [panel.title for panel in _spec(app).panels] == ["Built by hand"]

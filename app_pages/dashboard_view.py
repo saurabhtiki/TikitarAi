@@ -7,8 +7,9 @@ what to change, see it again, download**.
 - **Generate Dashboard is the starting point** (phase 39). One press designs a whole page
   from the data, the links confirmed in Setup and the column descriptions - and it is the
   one control here that uses the session's own model rather than the Light Model, because
-  laying out a page from nothing is the single judgement call on this screen. On a page
-  that already has visuals it asks before replacing them, and Undo brings the old one back.
+  laying out a page from nothing is the single judgement call on this screen. Since phase
+  45 it first shows a checklist - one line per visual, drafted by the Light Model - that the
+  user edits, and then builds exactly that list. Undo brings the old page back.
 - **Asking is the only way the dashboard is changed.** Each press is one round: the model
   is shown the page as it stands and returns the changes asked for, and a visual it does not
   mention is left alone. Rounds run on the Light Model unless the toggle above the button
@@ -143,9 +144,11 @@ def _render_generate(spec: model.DashboardSpec, data: dashboard_session.BuiltDat
     one judgement call here, and it is made once. So this button uses the session's chosen
     model (`llm_session.active_profile`) while Update the dashboard and Edit stay Light.
 
-    With visuals already on the page it asks first, in two presses like Remove. Generate
-    does not add to a dashboard - it replaces it, edits and all - and that is not something
-    a stray click should be able to do. Undo still brings the old one back either way.
+    Since phase 45 the press opens a dialog rather than building straight away: the Light
+    Model drafts a checklist, one line per visual, the user edits it, and only then is the
+    page built - exactly that list. The dialog is itself the second step, so on a page that
+    already has visuals it says "this replaces everything" there instead of asking in two
+    presses as phase 39 did. Undo still brings the old page back either way.
     """
     profile = llm_session.active_profile(user_id)
     if profile is None:
@@ -156,43 +159,117 @@ def _render_generate(spec: model.DashboardSpec, data: dashboard_session.BuiltDat
         )
         return
 
-    if not dashboard_session.is_confirming_generate():
-        pressed = st.button(
-            "Generate Dashboard", key="ld_generate",  width="stretch",
-            icon=":material/auto_awesome:",
-            help=f"Designs a whole dashboard from your data using {profile['nickname']}. "
-                 + ("This replaces what is on the page now." if spec.panels
-                    else "You can change any of it afterwards by asking."),
-        )
-        st.caption(
-            f":red[Designed by **{profile['nickname']}** ({profile['default_model']}) from "
-            "your tables, the links confirmed in Setup and your column descriptions.]"
-        )
-        if pressed and spec.panels:
-            dashboard_session.ask_to_generate()
-            st.rerun(scope="app")
-        elif pressed:
-            _run_generate(profile, spec, data)
-        return
+    st.button(
+        "Generate Dashboard", key="ld_generate", width="stretch",
+        icon=":material/auto_awesome:",
+        help="Shows a short list of what the AI plans to build. Edit it, then build. "
+             + ("This replaces what is on the page now." if spec.panels
+                else "You can change any of it afterwards by asking."),
+        on_click=dashboard_session.open_generate,
+    )
+    st.caption(
+        f":red[Designed by **{profile['nickname']}** ({profile['default_model']}) from "
+        "your tables, the links confirmed in Setup and your column descriptions.]"
+    )
 
-    st.caption(":red[This replaces everything on the dashboard, including your own edits. "
-               "Continue?]")
-    yes_column, no_column = st.columns(2)
-    with yes_column:
-        confirmed = st.button(
-            "Yes, replace it", key="ld_generate_yes", type="primary", width="stretch",
+    if dashboard_session.current_dialog() == dashboard_session.GENERATE_DIALOG:
+        # The checklist is the quick part, so it goes to the Light Model; with none set up
+        # the session model drafts it too.
+        draft_profile = llm_session.light_profile(user_id) or profile
+        _dialog_generate(draft_profile, profile, spec, data)
+
+
+@st.dialog("Plan your dashboard", width="large", on_dismiss=dashboard_session.close_dialog)
+def _dialog_generate(draft_profile: dict, build_profile: dict, spec: model.DashboardSpec,
+                     data: dashboard_session.BuiltData) -> None:
+    """The checklist Generate shows before it builds (phase 45).
+
+    One plain line per visual, in a text box the user can edit, delete from or add to. The
+    build then makes exactly those lines - `ai_spec.build_from_checklist` drops anything
+    extra and names any line it could not make - so what the user approved is what they get.
+    """
+    if dashboard_session.take_draft_request():
+        with st.spinner(f"Asking {draft_profile['default_model']} what to build..."):
+            lines, notes = ai_spec.draft_checklist(
+                draft_profile, data.tables, notes=_column_notes(),
+                wishes=dashboard_session.checklist_wishes(),
+            )
+        dashboard_session.store_draft(lines, notes)
+    dashboard_session.seed_checklist_boxes()
+
+    if spec.panels:
+        st.warning("This replaces everything on the dashboard, including your own edits. "
+                   "Undo brings it back.", icon=":material/warning:")
+    for note in dashboard_session.checklist_notes():
+        st.warning(note, icon=":material/error:")
+
+    st.caption(
+        f":red[Drafted by **{draft_profile['nickname']}**. One visual per line, starting "
+        "with Card:, Filter:, Chart: or Table:. Edit, delete or add lines - the dashboard "
+        "will have exactly these.]"
+    )
+    text = st.text_area(
+        "What the dashboard will show",
+        key=dashboard_session.LD_CHECKLIST_BOX_KEY,
+        height=240,
+        placeholder="Card: Total Amount\nChart: Sum of Amount by Customer (bar)",
+        help="One line is one visual. Name the columns you want - the list below shows "
+             "them. A line the AI can't build is named afterwards, with the reason.",
+    )
+    wishes = st.text_area(
+        "Anything else?",
+        key=dashboard_session.LD_WISHES_BOX_KEY,
+        height=70,
+        placeholder="show money in INR, focus on cost",
+        help="Wishes that are not a visual. Used by Build, and by Draft again for a fresh "
+             "list.",
+    )
+    dashboard_session.keep_checklist(text, wishes)
+
+    with st.expander("Columns you can use", expanded=False, icon=":material/view_column:"):
+        for table, columns in data.available_columns().items():
+            st.markdown(f"**{table}:** " + ", ".join(columns))
+
+    build_column, redraft_column = st.columns(2)
+    with build_column:
+        build = st.button(
+            "Replace and build" if spec.panels else "Build this dashboard",
+            key="ld_checklist_build", type="primary", width="stretch",
             icon=":material/auto_awesome:",
-            help="Designs a new dashboard now. Undo brings this one back.",
+            help=f"{build_profile['nickname']} builds exactly the lines above - one visual "
+                 "each, nothing extra.",
         )
-    with no_column:
-        st.button(
-            "No, keep this one", key="ld_generate_no", width="stretch",
-            help="Leaves the dashboard exactly as it is.",
-            on_click=dashboard_session.cancel_generate,
+    with redraft_column:
+        redraft = st.button(
+            "Draft again", key="ld_checklist_redraft", width="stretch",
+            icon=":material/refresh:",
+            help="Asks for a fresh list, using what you wrote in Anything else?. Replaces "
+                 "the list above.",
         )
-    if confirmed:
-        dashboard_session.cancel_generate()
-        _run_generate(profile, spec, data)
+    skip_column, cancel_column = st.columns(2)
+    with skip_column:
+        skip = st.button(
+            "Skip the list, just build", key="ld_checklist_skip", width="stretch",
+            help="Lets the AI decide what to build, without the list.",
+        )
+    with cancel_column:
+        if st.button("Cancel", key="ld_checklist_cancel", width="stretch",
+                     help="Close without changing anything. Your list is kept."):
+            dashboard_session.close_dialog()
+            st.rerun(scope="app")
+
+    if redraft:
+        dashboard_session.request_draft()
+        st.rerun(scope="app")
+    elif build:
+        lines = ai_spec.checklist_lines(text)
+        if not lines:
+            st.warning("Write at least one line - for example 'Card: Total Amount' - or "
+                       "press Skip the list to let the AI decide.", icon=":material/error:")
+        else:
+            _run_generate(build_profile, spec, data, checklist=lines, wishes=wishes)
+    elif skip:
+        _run_generate(build_profile, spec, data)
 
 
 def _render_conversation(spec: model.DashboardSpec, data: dashboard_session.BuiltData,
@@ -302,8 +379,8 @@ def _render_open_dialog(profile: dict, spec: model.DashboardSpec,
     on the same model the caption named.
     """
     which = dashboard_session.current_dialog()
-    if not which:
-        return
+    if not which or which == dashboard_session.GENERATE_DIALOG:
+        return  # Generate's checklist is drawn by `_render_generate`, beside its button.
 
     if which == dashboard_session.ASK_DIALOG:
         _dialog_ask(profile, spec, data)
@@ -523,25 +600,45 @@ def _run_round(profile: dict, spec: model.DashboardSpec,
 
 
 def _run_generate(profile: dict, spec: model.DashboardSpec,
-                  data: dashboard_session.BuiltData) -> None:
+                  data: dashboard_session.BuiltData, *,
+                  checklist: list[str] | None = None, wishes: str = "") -> None:
     """Designs a whole dashboard from the data, with the session's own model.
 
     The panels are emptied first, deliberately: `revise_dashboard` reads an empty dashboard
     as a first draft, which is exactly what this is - a page designed from the data rather
     than a round of edits to the one already there. The copy taken beforehand is what Undo
     puts back, so replacing a page you liked is still one press from being reversed.
+
+    `checklist` is the list the user approved in the dialog (phase 45), built line for line;
+    without one - Skip the list - the model decides, as Generate always did.
     """
     before = dashboard_session.snapshot(spec)
     spec.panels = []
 
     with st.spinner(f"Asking {profile['default_model']} to design a dashboard..."):
-        result = ai_spec.revise_dashboard(
-            profile, "", data.tables, spec, notes=_column_notes(),
+        if checklist:
+            result = ai_spec.build_from_checklist(
+                profile, checklist, data.tables, spec, notes=_column_notes(), wishes=wishes,
+            )
+        else:
+            result = ai_spec.revise_dashboard(
+                profile, "", data.tables, spec, notes=_column_notes(),
+            )
+
+    if checklist:
+        # The list itself is what was asked, so the history shows it rather than a generic
+        # "Generate" - and Undo beside it says which list it would take away.
+        instruction = "Build this list:\n\n" + "\n".join(
+            f"{number}. {line}" for number, line in enumerate(checklist, start=1)
         )
+        if wishes.strip():
+            instruction += f"\n\nAlso: {wishes.strip()}"
+    else:
+        instruction = "Generate a dashboard from this data"
 
     changed = result.changed()
     dashboard_session.record_round(dashboard_session.Round(
-        instruction="Generate a dashboard from this data",
+        instruction=instruction,
         summary=result.summary(),
         details=[ai_spec.describe_panel(one) for one in result.added],
         notes=list(result.notes),
@@ -563,6 +660,7 @@ def _run_generate(profile: dict, spec: model.DashboardSpec,
             st.info(result.clarification, icon=":material/info:")
         return
 
+    dashboard_session.close_dialog()
     st.rerun(scope="app")
 
 

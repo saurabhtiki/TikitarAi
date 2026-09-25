@@ -49,6 +49,7 @@ nonsense is a degraded result the user asks again about, not a broken screen.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -367,6 +368,54 @@ them blank otherwise.
 
 {_DESIGN_RULES}"""
 
+#: The words a checklist line starts with - one per visual type, in the user's language
+#: rather than the catalog's keys, because the user reads and edits these lines.
+CHECKLIST_KINDS = ("Card", "Filter", "Chart", "Table")
+
+#: Phase 45, step one: plan the page as a short list the user can edit, and build nothing.
+#: Plain lines rather than spec rows, because the person reading them is not a developer -
+#: "Chart: Sum of Amount by Customer (horizontal bar)" is a line anyone can correct.
+_CHECKLIST_DRAFT_INSTRUCTIONS = f"""You plan a dashboard before it is built. Read the tables and write a short checklist:
+ONE plain line per visual, and nothing else.
+
+Each line starts with what the visual is - {', '.join(f'"{kind}:"' for kind in CHECKLIST_KINDS)} -
+and then says what it shows in a few words, using the real column names from the schema.
+Put a chart's or table's style in brackets at the end. For example:
+Card: Total Amount
+Filter: Customer - CustName
+Chart: Sum of Amount by Customer - CustName (horizontal bar)
+Chart: Sum of Amount by TxnDate (line)
+Table: Sum of Amount by Category, then Item (drill-down)
+
+Only plan what the catalog can draw and the columns really hold. Never write code, field
+names or explanations - a person reads this list and edits it. If nothing can be planned,
+return no lines and say why in one plain sentence in `clarification`.
+
+{_DESIGN_RULES}"""
+
+#: Phase 45, step two: build the list the user approved - exactly that list. The line
+#: number each visual carries back is what lets `build_from_checklist` say which line was
+#: not built, and drop a visual that belongs to no line, rather than trusting the model to
+#: have counted.
+_CHECKLIST_BUILD_INSTRUCTIONS = f"""You build a dashboard from a numbered list the user has already approved. Every line
+is ONE visual, and every row you return is added to the page.
+
+Strict rules for the list:
+- Return exactly one visual per line, in the list's order, and set `line` to that line's
+  number ("1", "2", ...).
+- Never add a visual that is not on the list. Never merge two lines into one visual, and
+  never split one line into two.
+- Build what the line says. Where it names a column loosely ("sales"), use the real column;
+  where it gives a style in brackets ("(horizontal bar)"), use that sub-type.
+- If ONE line cannot be built with this catalog and these columns, leave out only that
+  line and say why in `clarification`, naming its number. Build every other line.
+- The list decides WHAT is on the page. Use the design rules below only for HOW: titles,
+  sorting, formats and which row each visual sits on.
+
+{_CORE_RULES}
+
+{_DESIGN_RULES}"""
+
 
 class ProposedPanel(BaseModel):
     """One visual as the model proposed it, before anything has been checked.
@@ -416,6 +465,26 @@ class ProposedPanel(BaseModel):
         default="",
         description="Optional look settings from the catalog, e.g. "
                     "'format:currency, labels:yes, size:tall'",
+    )
+    # Phase 45: which line of the user's checklist this visual is for. Text for the same
+    # reason as `row_number`, and on the reply only - `PanelSpec` never carries it, so no
+    # saved dashboard changes shape.
+    line: str = Field(
+        default="",
+        description="Only when building from a numbered list: the list line this visual is "
+                    "for, digits only",
+    )
+
+
+class ProposedChecklist(BaseModel):
+    """The plan Generate shows before it builds (phase 45): one plain line per visual."""
+
+    lines: list[str] = Field(
+        default_factory=list,
+        description="One line per visual, e.g. 'Card: Total Amount'",
+    )
+    clarification: str = Field(
+        default="", description="Why no dashboard can be planned, if it can't"
     )
 
 
@@ -1556,6 +1625,210 @@ def revise_dashboard(
         "A dashboard round added %d, changed %d, removed %d visual(s), %d note(s).",
         len(result.added), len(result.updated), len(result.removed), len(result.notes),
     )
+    return result
+
+
+# --------------------------------------------------------------------------------------
+# The checklist Generate asks about first (phase 45)
+# --------------------------------------------------------------------------------------
+
+#: A bullet or a number someone typed at the start of a line: "- ", "* ", "3. ", "3) ".
+_LINE_MARKER = re.compile(r"^\s*(?:[-*•]+|\d+\s*[.)])\s*")
+
+
+def checklist_lines(text) -> list[str]:
+    """The lines of a checklist, cleaned: one per visual, blanks and bullets gone.
+
+    Takes the text box's contents or a list of lines, because the same cleaning applies to
+    what the model wrote and to what the user typed - "1. Card: Total" and "- Card: Total"
+    are both one line, and the numbers are put back when the list is sent to be built.
+    """
+    raw = text.splitlines() if isinstance(text, str) else [str(one) for one in text or []]
+    lines = []
+    for one in raw:
+        cleaned = _LINE_MARKER.sub("", str(one)).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return lines
+
+
+def draft_checklist(
+    profile: dict,
+    tables: dict[str, pd.DataFrame],
+    *,
+    notes: dict[str, str] | None = None,
+    wishes: str = "",
+    key_path=None,
+) -> tuple[list[str], list[str]]:
+    """Plans a dashboard as a short list of lines, and builds nothing.
+
+    Step one of Generate since phase 45. The user reads the list, edits it, and only then is
+    anything built - so a wrong guess costs a line of text rather than a page.
+
+    Args:
+        profile: the model to ask - the Light Model where there is one.
+        tables: the embedded tables, the same dict the build will be checked against.
+        notes: `column_notes`' output, so the plan uses what the columns mean.
+        wishes: the "Anything else?" box - preferences that are not a visual.
+
+    Returns:
+        `(lines, messages)`. `lines` is empty when nothing came back, and `messages` then
+        says why, so the dialog can invite the user to write their own. Never raises.
+    """
+    if not tables:
+        return [], ["There's no data loaded to build a dashboard from yet."]
+
+    asked = DEFAULT_INSTRUCTION
+    if str(wishes or "").strip():
+        asked += f"\nThe user also says: {wishes.strip()}"
+
+    try:
+        response = run_structured(
+            profile,
+            build_prompt(asked, tables, notes=notes),
+            ProposedChecklist,
+            instructions=_CHECKLIST_DRAFT_INSTRUCTIONS,
+            key_path=key_path,
+        )
+    except LLMConnectionError as error:
+        logger.warning("The dashboard checklist could not be drafted: %s", error)
+        return [], [f"We couldn't draft a list: {error} Write your own lines below, or "
+                    "press Skip the list to let the AI decide."]
+
+    lines = checklist_lines(response.lines)
+    messages: list[str] = []
+    if len(lines) > MAX_PANELS:
+        lines = lines[:MAX_PANELS]
+        messages.append(f"Only the first {MAX_PANELS} lines were kept.")
+    if not lines:
+        messages.append(
+            str(response.clarification or "").strip()
+            or "The AI didn't suggest anything. Write your own lines below."
+        )
+
+    logger.info("Drafted a dashboard checklist of %d line(s).", len(lines))
+    return lines, messages
+
+
+def _checklist_instruction(lines: list[str], wishes: str) -> str:
+    """The approved list, numbered, as the request the build prompt ends with."""
+    numbered = "\n".join(f"{number}. {text}" for number, text in enumerate(lines, start=1))
+    asked = f"Build exactly these {len(lines)} visual(s), one per line:\n{numbered}"
+    if str(wishes or "").strip():
+        asked += ("\n\nAlso keep this in mind for the whole page (it adds no visual): "
+                  f"{wishes.strip()}")
+    return asked
+
+
+def build_from_checklist(
+    profile: dict,
+    lines: list[str],
+    tables: dict[str, pd.DataFrame],
+    spec: DashboardSpec,
+    *,
+    notes: dict[str, str] | None = None,
+    wishes: str = "",
+    key_path=None,
+) -> RoundResult:
+    """Builds exactly the lines the user approved - one visual each, nothing extra.
+
+    Step two of Generate since phase 45. "Strict" is enforced here rather than hoped for:
+    every visual the model returns names the line it is for, so a visual naming no line (or
+    a line that already has one) is dropped with a sentence, and a line with no visual
+    behind it is reported by its number with the reason the checker gave - "Line 4 not
+    built (Card: Total bonus): ... there is no column called 'Bonus'".
+
+    The column check happens here, after the model has answered, rather than on the text
+    beforehand: "Card: Headcount" names no column and is still a perfectly good line, so
+    guessing columns from free text would raise false alarms.
+
+    Mutates `spec` only when at least one line was built, like `revise_dashboard`, so a
+    failed build leaves the page as it was. Never raises.
+    """
+    lines = checklist_lines(lines)
+    if not tables:
+        return RoundResult(
+            failed=True, notes=["There's no data loaded to build a dashboard from yet."],
+        )
+    if not lines:
+        return RoundResult(
+            failed=True,
+            notes=["Write at least one line - for example 'Card: Total Amount' - or press "
+                   "Skip the list to let the AI decide."],
+        )
+    if len(lines) > MAX_PANELS:
+        return RoundResult(
+            failed=True,
+            notes=[f"That list has {len(lines)} lines. A dashboard holds at most "
+                   f"{MAX_PANELS} visuals - remove a few and build again."],
+        )
+
+    try:
+        response = run_structured(
+            profile,
+            build_prompt(_checklist_instruction(lines, wishes), tables, notes=notes),
+            ProposedDashboard,
+            instructions=_CHECKLIST_BUILD_INSTRUCTIONS,
+            key_path=key_path,
+        )
+    except LLMConnectionError as error:
+        logger.warning("The dashboard could not be built from the checklist: %s", error)
+        return RoundResult(failed=True, notes=[f"We couldn't build the dashboard: {error}"])
+
+    available_columns = {name: [str(column) for column in frame.columns]
+                         for name, frame in tables.items()}
+    date_columns = payload.date_columns(tables)
+
+    built: dict[int, PanelSpec] = {}
+    reasons: dict[int, str] = {}
+    extra_notes: list[str] = []
+    for proposed in response.panels:
+        number, _ = _whole_number(proposed.line, default=0, minimum=0)
+        title = str(proposed.title or "").strip() or "a visual"
+        if not 1 <= number <= len(lines):
+            extra_notes.append(f"Dropped '{title}': it isn't on your list.")
+            continue
+        if number in built:
+            extra_notes.append(
+                f"Dropped '{title}': line {number} already has its visual - one per line."
+            )
+            continue
+        panel, warning = _build_one(proposed, tables, available_columns, date_columns)
+        if panel is None:
+            reasons.setdefault(number, warning or "it couldn't be understood.")
+            continue
+        if warning:
+            extra_notes.append(f"Line {number}: {warning}")
+        built[number] = panel
+
+    # The lines that were not built come first: they are what the user asked for and did
+    # not get, which matters more than a visual the model added on its own.
+    missing = [
+        f"Line {number} not built ({text}): "
+        + reasons.get(number, "the AI gave no visual for it.")
+        for number, text in enumerate(lines, start=1) if number not in built
+    ]
+    result = RoundResult(
+        notes=missing + extra_notes,
+        clarification=str(response.clarification or "").strip() or None,
+    )
+
+    panels = [built[number] for number in sorted(built)]
+    if not panels:
+        result.failed = True
+        return result
+
+    _lay_out(panels)
+    spec.panels = panels
+    spec.title = str(response.title or "").strip() or spec.title
+    spec.subtitle = str(response.subtitle or "").strip() or spec.subtitle
+    position = _key(response.filter_position)
+    spec.filter_position = (position if position in FILTER_POSITIONS
+                            else DEFAULT_FILTER_POSITION)
+    result.added = panels
+
+    logger.info("Built %d of %d checklist line(s), %d note(s).", len(panels), len(lines),
+                len(result.notes))
     return result
 
 

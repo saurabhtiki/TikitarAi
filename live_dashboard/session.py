@@ -62,11 +62,31 @@ ASK_DIALOG = "ask"
 #: reruns to show the question.
 LD_CONFIRM_REMOVE_KEY = "ld_confirm_remove"
 
-#: Set once **Generate Dashboard** has been pressed on a page that already has visuals, and
-#: is waiting for "Yes, replace it". The same two-press idiom as Remove, for the same
-#: reason: Generate throws away every round the user has had, so one stray click must not
-#: be enough to do it.
-LD_CONFIRM_GENERATE_KEY = "ld_confirm_generate"
+#: The dialog **Generate Dashboard** opens (phase 45): the checklist, shown before anything
+#: is built. It replaced phase 39's two-press "Yes, replace it" - the dialog is already a
+#: second step, so the replace warning is said inside it rather than asked separately.
+GENERATE_DIALOG = "generate"
+
+#: The checklist and the "Anything else?" wishes, kept for this sitting so that closing the
+#: dialog and opening it again finds the list as the user left it. Plain keys that the text
+#: boxes are seeded from, because Streamlit forgets a widget's own key on any run where the
+#: widget is not drawn - which is every run while the dialog is closed. Never saved into the
+#: Task: the dashboard is the record of what was built, and this is only the plan for it.
+LD_CHECKLIST_KEY = "ld_checklist"
+LD_CHECKLIST_WISHES_KEY = "ld_checklist_wishes_saved"
+
+#: The widget keys of those two boxes.
+LD_CHECKLIST_BOX_KEY = "ld_checklist_text"
+LD_WISHES_BOX_KEY = "ld_checklist_wishes"
+
+#: Set when the list should be (re)drafted on the next run - on opening with no list yet, and
+#: on Draft again. A flag rather than drafting inside the button press, because the box it
+#: fills has already been drawn by then and cannot be changed in the same run.
+LD_CHECKLIST_REDRAFT_KEY = "ld_checklist_redraft"
+
+#: What the last draft had to say - "we couldn't reach the model", "only the first 20 lines
+#: were kept". Shown in the dialog above the list it is about.
+LD_CHECKLIST_NOTES_KEY = "ld_checklist_notes"
 
 #: The **Update the dashboard** toggle: on, a round runs on the session's own model rather
 #: than the Light Model. A plain widget key rather than a helper pair, because nothing reads
@@ -250,17 +270,60 @@ def close_dialog() -> None:
     st.session_state.pop(LD_CONFIRM_REMOVE_KEY, None)
 
 
-def ask_to_generate() -> None:
-    """First press of Generate on a page that already has visuals: asks before replacing."""
-    st.session_state[LD_CONFIRM_GENERATE_KEY] = True
+def open_generate() -> None:
+    """Generate Dashboard was pressed: opens the checklist dialog.
+
+    A list is drafted only if there isn't one from earlier in this sitting - reopening the
+    dialog finds the user's edits where they left them, and Draft again is there for a
+    fresh one.
+    """
+    open_dialog(GENERATE_DIALOG)
+    if not checklist_text():
+        request_draft()
 
 
-def cancel_generate() -> None:
-    st.session_state.pop(LD_CONFIRM_GENERATE_KEY, None)
+def request_draft() -> None:
+    st.session_state[LD_CHECKLIST_REDRAFT_KEY] = True
 
 
-def is_confirming_generate() -> bool:
-    return bool(st.session_state.get(LD_CONFIRM_GENERATE_KEY))
+def take_draft_request() -> bool:
+    """Whether a draft was asked for, clearing the request so it runs once."""
+    return bool(st.session_state.pop(LD_CHECKLIST_REDRAFT_KEY, False))
+
+
+def store_draft(lines: list[str], notes: list[str]) -> None:
+    """Puts a freshly drafted list in the box, replacing what was there."""
+    text = "\n".join(lines)
+    st.session_state[LD_CHECKLIST_KEY] = text
+    st.session_state[LD_CHECKLIST_BOX_KEY] = text
+    st.session_state[LD_CHECKLIST_NOTES_KEY] = list(notes)
+
+
+def seed_checklist_boxes() -> None:
+    """Refills the two boxes from the kept copies, when Streamlit has forgotten them."""
+    if LD_CHECKLIST_BOX_KEY not in st.session_state:
+        st.session_state[LD_CHECKLIST_BOX_KEY] = checklist_text()
+    if LD_WISHES_BOX_KEY not in st.session_state:
+        st.session_state[LD_WISHES_BOX_KEY] = checklist_wishes()
+
+
+def keep_checklist(text: str, wishes: str) -> None:
+    """Remembers what is in the two boxes now, for the next time the dialog opens."""
+    st.session_state[LD_CHECKLIST_KEY] = str(text or "")
+    st.session_state[LD_CHECKLIST_WISHES_KEY] = str(wishes or "")
+
+
+def checklist_text() -> str:
+    return str(st.session_state.get(LD_CHECKLIST_KEY) or "")
+
+
+def checklist_wishes() -> str:
+    return str(st.session_state.get(LD_CHECKLIST_WISHES_KEY) or "")
+
+
+def checklist_notes() -> list[str]:
+    stored = st.session_state.get(LD_CHECKLIST_NOTES_KEY)
+    return [str(one) for one in stored] if isinstance(stored, list) else []
 
 
 def ask_to_remove(panel_id: str) -> None:
@@ -319,5 +382,7 @@ def reset_dashboard_spec() -> None:
     new one.
     """
     for key in (LD_SPEC_KEY, LD_DATA_KEY, LD_ROUNDS_KEY, LD_FLASH_KEY,
-                LD_DIALOG_KEY, LD_CONFIRM_REMOVE_KEY, LD_CONFIRM_GENERATE_KEY):
+                LD_DIALOG_KEY, LD_CONFIRM_REMOVE_KEY, LD_CHECKLIST_KEY,
+                LD_CHECKLIST_WISHES_KEY, LD_CHECKLIST_BOX_KEY, LD_WISHES_BOX_KEY,
+                LD_CHECKLIST_REDRAFT_KEY, LD_CHECKLIST_NOTES_KEY):
         st.session_state.pop(key, None)
