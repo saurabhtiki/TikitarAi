@@ -1,3 +1,419 @@
+# Phase 54 — Meetings: templates, plain-English drafting and a flow picture
+
+**Status: done.**
+
+## The problem
+
+Setting up a structured meeting means filling a grid with Rule, Go to and For each cells.
+A new organiser starts from a blank row and has to learn the rule words first. And once
+there are jumps ("if > 60000 go to End"), it is hard to see the path an invitee will take.
+
+This is step 5 of 5 in the structured-meeting build order.
+
+## What changes
+
+**1. Templates (New meeting window).** A **Start from** box at the top with five ready-made
+meetings, and a **Use template** button:
+
+| Template | What it fills in |
+|---|---|
+| HR interview | Expected salary (Number, between 10000 and 500000, `if > 150000 go to End`), notice period, joining date (future), relocation (Yes/No) |
+| Vendor purchase | Price, delivery date, payment terms (Choice), warranty |
+| Sales quotation | Quantity, target price, delivery needed by, decision date |
+| Project review | Task complete? (Yes/No, `if Yes go to Next update`), why late, new date, who is responsible |
+| AR review | For each **Outstanding invoices**: will it be paid on time? (`if Yes go to Next row`), expected payment date, reason for delay |
+
+It fills the meeting context, persona, Context / SOP, agenda and evaluation questions. The
+subject and invitees stay yours. Everything can be edited before pressing Create.
+
+**2. Describe it in plain English (New meeting window).** A text box and a **Draft with AI**
+button. Example: *"Ask expected salary, must be a number; if above 1 lakh end the interview.
+Then ask notice period in days."* The AI writes the agenda rows into the grid. Any row the
+app can't use is listed in a warning so it can be fixed before Create. Needs a default
+model (Settings), like the other AI buttons.
+
+**3. Flow picture.** A diagram of the questions: Start → each question in order → End,
+with the Go to jumps as labelled arrows (e.g. "> 150000") and a For each list drawn as a box
+with a "next row" arrow back to its first question. Shown:
+- in the New meeting window, under the grid (updates as you type), and
+- in Overview, under the agenda.
+
+A Go to the app can't read is drawn as a red arrow labelled "?" so it stands out.
+Meetings with no Question rows show no picture.
+
+**Not in this phase:** saving your own meetings as templates, Excel download/upload of the
+agenda, and a "try it as the invitee" run.
+
+## How it's built
+
+- `meetings/templates.py` (new): the five templates as data (`MeetingTemplate` with context,
+  persona, SOP, agenda, evaluation questions). Each must pass `steps.agenda_problems`.
+- `meetings/drafting_agent.py` (new): `draft_agenda(profile, description)` via
+  `run_structured`, returning `AgendaItem`s; unknown type words fall back to Discussion/Text.
+- `meetings/flow.py` (new): `flow_dot(agenda)` builds a Graphviz DOT text; the page shows it
+  with `st.graphviz_chart` (no new package).
+- `app_pages/meetings.py`: Start from + Use template and Draft with AI in the dialog (they
+  refill the grid and the text boxes through button callbacks); flow picture in the dialog
+  and in Overview.
+
+## Tests
+
+- Templates: all five pass the agenda check and name only valid rules and jumps.
+- Flow: order arrows, a labelled Go to arrow, End, a For each box with "next row", a red "?"
+  for a bad Go to, quotes escaped, and no picture without questions.
+- Drafting: the prompt carries the description and rule words; rows come back as agenda
+  items; odd types fall back; a provider failure becomes a clear message.
+- Page: Use template fills the grid and text boxes; Draft with AI fills the grid (model
+  stubbed); Overview shows the flow picture for a meeting with questions.
+
+---
+
+# Phase 53 — Meetings: FAQ side questions
+
+**Status: done.**
+
+## The problem
+
+Invitees ask side questions in the middle of a meeting ("What is the leave policy?", "Who
+approves credit notes?"). Today the bot answers from the Context / SOP box or says it
+doesn't know, and the organiser never learns what was asked. Organisers already keep these
+answers in a spreadsheet.
+
+This is step 4 of 5 in the structured-meeting build order (templates come last).
+
+## What changes
+
+**For the organiser — Overview** gets a **FAQ** box. Upload an Excel or CSV with a Question
+column and an Answer column (usually 50–70 rows):
+
+| Question | Answer |
+|---|---|
+| What is the notice period? | 60 days for managers, 30 days for everyone else. |
+| Who approves credit notes? | The regional finance manager. |
+
+- The columns named Question and Answer are picked automatically; the organiser can choose
+  others. Blank rows are dropped. At most 300 questions.
+- Uploading again replaces the FAQ. A Remove button deletes it.
+
+**For the invitee:** they can ask a side question at any time, even in the middle of a set
+question.
+- If the FAQ has the answer, the bot answers **only from it**, then goes back to the
+  question it was asking. Asking uses no try, as before.
+- If the FAQ doesn't have it, the bot doesn't guess. It says *"I don't have that — I've
+  noted it for the organiser, who will get back to you"*, logs the question, and carries on.
+
+**For the organiser (results):**
+- The FAQ box lists **Questions the bot couldn't answer**: who asked, what, and when
+  (dd-mm-yyyy). The organiser can type an answer next to any of them and press **Add to
+  FAQ**: those questions join the FAQ (so the bot can answer them for the next invitee) and
+  leave the list. A Download Excel button gives the list as a file.
+- The Status tab adds a red line: *"2 question(s) the bot couldn't answer — see Overview →
+  FAQ"*.
+- The same question from the same invitee is logged once.
+
+**Without a FAQ** nothing changes: the bot behaves as today and nothing is logged.
+
+**Not in this phase:** telling the invitee when their question has been answered, and
+searching the FAQ instead of putting it all in the prompt (not needed at 50–300 rows).
+
+## How it's built
+
+- `meetings/model.py`: `FaqEntry(question, answer)`, `Faq(source_file, entries)`,
+  `FaqMiss(miss_id, invitee_id, invitee_name, question, agenda_tag, created_at)`.
+- `meetings/db.py`: two new tables — `meeting_faqs` (one row per meeting: file name and the
+  entries as JSON) and `meeting_faq_misses` (one row per logged question). `save_faq`,
+  `load_faq`, `delete_faq`, `add_faq_miss` (skips a repeat from the same invitee),
+  `list_faq_misses`, `delete_faq_misses`.
+- `meetings/faq.py` (new): reading the upload into entries, guessing the two columns, the FAQ
+  text for the prompt, adding answered misses to the FAQ, and the misses table.
+- `meetings/chat_agent.py`: `ChatTurnOutput` gains `unanswered_question`. With a FAQ, the
+  instructions carry it and say: answer the invitee's own questions only from it; if it isn't
+  there, say you will check, fill `unanswered_question`, and return to the current step.
+- Invitee page: loads the FAQ, passes it to the bot, and logs `unanswered_question`. A
+  failure to log is logged and never costs the invitee the reply.
+- Organiser page: FAQ box in Overview, the unanswered list with Add to FAQ, the Status line.
+
+## Tests
+
+- Reading the upload: columns guessed, blank rows dropped, missing columns and too many rows
+  refused.
+- Prompt: FAQ entries and the "only from the FAQ" rule are present with a FAQ, absent without.
+- Storage: save/replace/delete the FAQ, log a miss once per invitee, list with the invitee's
+  name, delete; tables created on an old database.
+- Invitee page: an unanswered question is logged; no FAQ means nothing is logged.
+- Organiser page: upload saves the FAQ; Add to FAQ moves an answered question into it; the
+  Status line counts the misses.
+
+# Phase 52 — Meetings: repeat questions for each row of a list
+
+**Status: done.**
+
+## The problem
+
+Some meetings go through a long list with the same questions for every line. In a weekly
+receivables review, every outstanding invoice needs "Expected payment date" and "Reason for
+delay". Typing one Question row per invoice is not practical, and the answers should end up
+back in the list, as a filled-in Excel.
+
+This is step 3 of 5 in the structured-meeting build order (FAQ and templates come later).
+
+## What changes
+
+**For the organiser — the agenda grid** gets one more column, **For each**, for Question rows
+only. Question rows with the same For each name are asked once per row of that list:
+
+| Agenda item | Type | Answer type | Rule | Go to | For each |
+|---|---|---|---|---|---|
+| Customer name confirmed? | Question | Yes/No | | | |
+| Is it paid already? | Question | Yes/No | | if Yes go to Next row | Outstanding invoices |
+| Expected payment date | Question | Date | future | | Outstanding invoices |
+| Reason for delay | Question | Text | | | Outstanding invoices |
+| Anything else? | Discussion | | | | |
+
+**The list itself** is uploaded in Overview, in a new "List — Outstanding invoices" box (the
+same way a Table item's sheet is attached today). Optional **Match column**: each invitee then
+sees only their own rows — rows whose value in that column equals their name or email.
+Example: Match column `Customer`, invitee "ABC Traders" gets only ABC Traders' invoices.
+
+**Rules:**
+- The questions of one list must sit together (one after another).
+- The list name can't be the same as another agenda item's title.
+- Go to inside a list can jump to a later question **of the same list** (same row),
+  to `Next row` (skip the rest of this row), or `End`.
+- Go to from an ordinary question can jump to the **first** question of a list, not the middle.
+- If no list is attached yet, or an invitee has no matching rows, those questions are skipped.
+- Uploading a new list replaces the old one and clears the answers given to it.
+- Mistakes block **Create meeting** / **Save setup** with a sentence, as before.
+
+**For the invitee:** the bot says which row it is on and asks the questions for it, e.g.
+*"Invoice 1001 for 5,000, due 01-08-2026 — when do you expect to pay it?"*. The line above
+the reply box reads *"Outstanding invoices: row 2 of 12, question 1 of 3"*. They can stop and
+come back later; rows already answered are not asked again.
+
+**For the organiser (results):**
+- Comparisons gets a **List answers** tab: the list's own columns, plus one column per
+  question, one row per invitee per list row, with a **Download Excel** button.
+- A question jumped over shows `— skipped`, as before.
+- The status line adds *"Outstanding invoices: 3 of 12 row(s) done"*.
+
+**Not in this phase:** the "same answer for all 12 invoices?" shortcut, and using `{Bill No}`
+inside the question title (the bot is given the whole row instead, so it can say it itself).
+
+## How it's built
+
+- `meetings/model.py`: `AgendaItem.loop` (the For each name, written to the JSON only for
+  questions that have one). `AgendaTable.match_column`.
+- `meetings/db.py`: `match_column` added to `meeting_agenda_tables` (guarded `ALTER TABLE`);
+  `delete_row_answers` clears a list's answers when it is replaced. **No new table:** a row's
+  answer is stored in `meeting_step_answers` under a key made of the question title and the
+  row number.
+- `meetings/steps.py`: the path is now a list of **steps** (question + row). `walk()` goes
+  through them following Go to (now also `Next row`) and records which were skipped.
+  `next_question`, `progress_text` and `skipped_questions` use it; loop checks are added to
+  `agenda_problems`.
+- `meetings/loops.py` (new): which rows each invitee gets, the row's text for the bot, the
+  per-list progress, and the results table for the organiser.
+- `meetings/chat_agent.py`: the question guidance and the answer reader are given the row.
+- Pages: For each column; list upload box in Overview; List answers tab with Excel download;
+  status line; the invitee page passes the rows through.
+
+## Tests
+
+- Loop checks: questions not together, list name clashing with a title, Go to rules inside
+  and outside a list, `Next row` outside a list.
+- Walking: every row gets every question, answers keyed per row, `Next row` skips the rest of
+  a row, End inside a list, no rows means skipped, matching rows by name or email.
+- Progress text and results table (answers, skipped, not reached).
+- Pages: the invitee is asked about row 1 then row 2; the organiser sees the List answers table
+  and the status line; the upload box saves the list and match column.
+- Full suite still passes.
+
+---
+
+# Phase 51 — Meetings: branching between questions
+
+**Status: done.**
+
+## The problem
+
+Phase 50 asks every question in grid order. The organiser wants the answer to change the path,
+for example "if the salary is above budget, skip the rest", or "if they won't relocate, skip
+the city question".
+
+This is step 2 of 5 in the structured-meeting build order (loops, FAQ and templates come later).
+
+## What changes
+
+**For the organiser:** the agenda grid gets one more column, **Go to**, for Question rows only.
+It holds one or more lines of the form `if <answer> go to <question title>`, separated by `;`.
+`End` as the target skips all the remaining questions.
+
+| Agenda item | Type | Answer type | Rule | Go to |
+|---|---|---|---|---|
+| Expected salary | Question | Number | > 0 | if > 60000 go to End |
+| Willing to relocate? | Question | Yes/No | | if No go to Notice period |
+| Preferred city | Question | Choice | Pune, Delhi | |
+| Notice period | Question | Number | <= 90 | |
+| Preferred shift | Question | Choice | Morning, Evening, Night | if Night go to Night allowance; if Morning, Evening go to End |
+
+**What `<answer>` can be**, by answer type:
+- **Number:** as in Rule: `> 60000`, `<= 30`, `between 1 and 5`
+- **Date:** as in Rule: `after 01-12-2026`, `before 31-12-2026`, `future`, `past`, `within 30 days`
+  (judged on the day the answer was given, so the path never changes later)
+- **Yes/No:** `Yes` or `No`
+- **Choice:** one or more of the question's options, with commas: `Morning, Evening`
+- **Text:** can't branch
+
+**Rules for Go to:**
+- The first line that matches wins. No match (or a Not answered question) goes to the next
+  question as before.
+- It can only jump **forward**, to a later Question row or `End`. This stops endless loops.
+- Mistakes block **Create meeting** / **Save setup** with a sentence, for example:
+  *"Willing to relocate?: 'Notice' isn't a later question. Go to can only jump forward to a Question row, or End."*
+
+**For the invitee:** skipped questions are simply never asked. The line above the reply box
+counts the path, e.g. "Question 3 of 4". The "of" number can drop after a jump.
+
+**For the organiser (results):** a skipped question shows `— skipped` in the Question answers
+table, and the status line counts only questions on that invitee's path
+("2 of 3 question(s) answered"). The Overview shows each question's Go to lines.
+
+## How it's built
+
+- `meetings/model.py`: `AgendaItem.branch` (text, written to the JSON only for questions that
+  have one, so older agendas read back unchanged).
+- `meetings/steps.py`:
+  - `parse_branches(item, agenda)` reads the Go to text into `(condition, target)` pairs, or
+    raises `RuleError`. `branch_problem` turns that into a sentence and `agenda_problems`
+    includes it.
+  - `branch_target(item, answer)` returns the target title, `End`, or `None` (go on in order).
+  - `question_path(meeting, answers)` walks from the first question, following branches, and
+    returns the questions asked so far plus the open one. `next_question`, `progress_text` and
+    the new `skipped_questions` are built on it.
+- `app_pages/meetings.py`: the **Go to** column (with `help=`), Overview line, `— skipped`
+  cells, and the status count.
+- `app_pages/meeting_invitee.py`: `progress_text` now takes the answers.
+- No database change: the path is worked out from the saved answers every time.
+
+## Tests
+
+- `tests/test_meetings_branching.py`: parsing each answer type, forward-only and unknown-target
+  errors, text refused, first match wins, End, Not answered doesn't branch, date judged on the
+  answer day, progress, skipped list, JSON round trip.
+- Page tests: an invitee answer that jumps skips a question; the organiser table shows
+  `— skipped`.
+
+# Phase 50 — Meetings: question steps with answer type, rule and tries
+
+**Status: done.**
+
+## The problem
+
+Today the meeting AI chats freely: if it asks "What is your expected salary?" and the candidate
+says "good money", it may simply move on. The organiser wants **step-by-step questions** where
+the bot keeps asking until it gets a proper answer, for example a number within the budget or
+a date in the future.
+
+This is step 1 of 5 in the structured-meeting build order. Branching, loops over lists, FAQ
+side questions and templates come in later phases.
+
+## What changes
+
+**For the organiser (agenda grid):** the agenda grid gets a third **Type**, `Question`, and
+three new columns:
+
+| Agenda item | Type | Answer type | Rule | Tries | AI note |
+|---|---|---|---|---|---|
+| Expected salary | Question | Number | between 20000 and 60000 | 3 | Monthly, in INR |
+| Notice period end | Question | Date | future | 3 | |
+| Willing to relocate? | Question | Yes/No | | 2 | |
+| Preferred shift | Question | Choice | Morning, Evening, Night | 3 | |
+| Tell us about yourself | Question | Text | at least 20 characters | 3 | |
+
+**Answer types and the rules each one understands** (a blank rule means "any answer of that type"):
+- **Number:** `> 0`, `>= 1000`, `< 90`, `<= 90`, `between 20000 and 60000`
+- **Date** (written as dd-mm-yyyy): `future`, `past`, `after 01-10-2026`, `before 31-12-2026`,
+  `within 30 days`
+- **Text:** `at least 20 characters`
+- **Choice:** the options, separated by commas (a rule is required)
+- **Yes/No:** no rule
+
+If a rule can't be read, **Create meeting** or **Save setup** refuses to save and names the row,
+for example: *"Expected salary: 'more than 5k' isn't a rule I understand. For a number, write
+it like `> 5000` or `between 20000 and 60000`."*
+The same check refuses an agenda that uses one title twice, because answers are stored by title.
+
+**For the invitee:** questions are asked first, one at a time and in grid order. A line above
+the reply box shows *"Question 2 of 5"*.
+- A valid answer is saved and the bot asks the next question.
+- A wrong answer: the bot explains the rule in simple words and asks again. That uses up one try.
+- The invitee asks something instead of answering ("Is this remote?"): the bot answers and asks
+  again. No try is used.
+- Out of tries: the question is saved as **Not answered** with the last reply, and the bot
+  moves on, so nobody is stuck forever.
+- After the last question, any Discussion items are chatted through as they are today. If there
+  are none, the bot says thanks and asks the invitee to press **Close chat**.
+
+**For the organiser (results):** *Comparisons* gets a new **Question answers** tab with one row
+per invitee and one column per question. For example, Raj's row reads `45000 | 15-11-2026 | Yes`,
+and an unanswered question shows `⚠ Not answered (said: "good money")`. *Invitees & status*
+shows "3 of 5 questions answered".
+
+## How it's built
+
+- `meetings/model.py`: `QUESTION_ITEM` item type. `AgendaItem` gains `answer_type`, `rule` and
+  `max_tries` (written to the JSON only for questions, so older agendas read back unchanged), plus
+  `Meeting.question_items()`.
+- `meetings/steps.py` (new, no AI and no Streamlit):
+  - `rule_problem(item)` returns a plain sentence if the rule can't be read.
+  - `check_answer(item, value, today)` returns ok or not, the cleaned value, and the reason.
+  - `describe_rule(item)` gives the rule in words for the prompt.
+  - `next_question(meeting, answers)` returns the next unfinished question.
+- `meetings/chat_agent.py`:
+  - `read_answer(profile, item, message, today)`: the model only *converts* the reply, e.g.
+    "45k" → `45000` or "next Monday" → `05-10-2026`, or reports that it was a question. Python
+    then decides whether the answer passes the rule.
+  - `send_turn` / `opening_message` gain `step_guidance`, which tells the model what just
+    happened and which question to ask now.
+  - Question items are left out of the free agenda list.
+- `meetings/db.py`: new table `meeting_step_answers` with columns meeting, invitee, question
+  title, value, status (`pending`/`answered`/`not_answered`), tries, last reply and time. It
+  gets `load_step_answers`, `save_step_answer` and `list_all_step_answers` (the next state comes
+  from `steps.record_attempt`, which is pure). Changing a
+  question's title detaches its answers, the same way tables do today.
+- `app_pages/meeting_invitee.py`: while a question is pending, each turn runs read → check →
+  record → reply, with a progress caption.
+- `app_pages/meetings.py`: the new grid columns, the save-time rule check, the Overview line
+  (e.g. "Expected salary · question · Number, between 20000 and 60000"), the status count and
+  the Question answers tab.
+
+## Tests
+
+- **Rules:** every example rule above passes a good answer and refuses a bad one. Unreadable
+  rules are refused with a sentence. A Choice question with no options is refused. Dates are
+  checked against a fixed "today".
+- **Model:** a question item round-trips through JSON, and an old agenda without the new keys
+  still loads.
+- **Storage:** tries count up, the status becomes `not_answered` at the limit, a question
+  doesn't use a try, and `next_question` skips finished questions.
+- **Chat agent:** `read_answer` and `step_guidance` reach the prompt, and question items are
+  not listed as free agenda (the provider is stubbed).
+- **AppTest (invitee):**
+  - A good answer moves to question 2.
+  - A bad answer re-asks and shows "Question 1 of 2".
+  - Running out of tries moves on and saves "Not answered".
+- **AppTest (organiser):**
+  - The status count and the Overview line describe the questions. (The save-time check is
+    tested on `steps.agenda_problems` directly, because AppTest cannot type into a data editor.)
+  - The Question answers tab shows the saved answers.
+
+## Not in this phase
+
+Branching ("if salary > budget, go to the end"), loops over uploaded lists, FAQ side questions,
+templates and the flow diagram come in phases 51–54.
+
+---
+
 # Phase 49 — Everyone can run every Transform Data pipeline
 
 **Status: done.**

@@ -28,7 +28,21 @@ DISCUSSION_ITEM = "discussion"
 # own tab and its own `meeting_agenda_tables` row; the chat never asks for its contents.
 TABLE_ITEM = "table"
 
-ITEM_TYPES = (DISCUSSION_ITEM, TABLE_ITEM)
+# A question with an expected kind of answer and a rule it must pass (phase 50). The app, not
+# the model, decides when it is answered: see `meetings/steps.py`.
+QUESTION_ITEM = "question"
+
+ITEM_TYPES = (DISCUSSION_ITEM, TABLE_ITEM, QUESTION_ITEM)
+
+ANSWER_TEXT = "text"
+ANSWER_NUMBER = "number"
+ANSWER_DATE = "date"
+ANSWER_YES_NO = "yes_no"
+ANSWER_CHOICE = "choice"
+ANSWER_TYPES = (ANSWER_TEXT, ANSWER_NUMBER, ANSWER_DATE, ANSWER_YES_NO, ANSWER_CHOICE)
+
+DEFAULT_MAX_TRIES = 3
+MAX_TRIES_LIMIT = 5
 
 # The tag an exchange gets when it doesn't belong to any agenda item. Spec 2.5: off-agenda
 # points are captured in the MoM rather than forced into a defined item, so this is a real
@@ -59,9 +73,20 @@ class AgendaItem:
     item: str
     ai_note: str = ""
     item_type: str = DISCUSSION_ITEM
+    # Only read for a `QUESTION_ITEM`; a discussion or table item ignores these.
+    answer_type: str = ANSWER_TEXT
+    rule: str = ""
+    max_tries: int = DEFAULT_MAX_TRIES
+    # "if > 60000 go to End; ..." — where to jump after this answer (phase 51, see `steps`).
+    branch: str = ""
+    # The list this question is repeated for, once per row (phase 52), e.g. "Outstanding invoices".
+    loop: str = ""
 
     def is_table(self) -> bool:
         return self.item_type == TABLE_ITEM
+
+    def is_question(self) -> bool:
+        return self.item_type == QUESTION_ITEM
 
 
 @dataclass
@@ -88,6 +113,10 @@ class Meeting:
     def discussion_items(self) -> list[AgendaItem]:
         """The items the chat works through. What `agenda_titles` used to mean, exactly."""
         return [item for item in self.agenda if not item.is_table()]
+
+    def question_items(self) -> list[AgendaItem]:
+        """The step-by-step questions, in the order they are asked (phase 50)."""
+        return [item for item in self.agenda if item.is_question()]
 
     def table_items(self) -> list[AgendaItem]:
         """The items that render as their own grid tab (spec 3a)."""
@@ -150,6 +179,9 @@ class AgendaTable:
     locked_columns: list[str] = field(default_factory=list)
     editable_columns: list[str] = field(default_factory=list)
     base_data: list[dict] = field(default_factory=list)
+    # For a For each list (phase 52): each invitee gets only the rows whose value here is
+    # their name or email. Blank means everyone gets every row.
+    match_column: str = ""
 
     def row_count(self) -> int:
         return len(self.base_data)
@@ -198,6 +230,32 @@ class EvaluationAnswer:
         return raw or tag
 
 
+STEP_PENDING = "pending"
+STEP_ANSWERED = "answered"
+STEP_NOT_ANSWERED = "not_answered"
+STEP_FINISHED = (STEP_ANSWERED, STEP_NOT_ANSWERED)
+
+
+@dataclass
+class StepAnswer:
+    """Where one invitee stands on one question item (phase 50).
+
+    Keyed by the question's title, like `AgendaTable.item_ref` and for the same reason: the
+    agenda is one JSON blob with no durable ids. `last_reply` is what the invitee last typed,
+    kept so a question that ran out of tries still shows the organiser what was said.
+    """
+
+    item_ref: str = ""
+    value: str = ""
+    status: str = STEP_PENDING
+    tries: int = 0
+    last_reply: str = ""
+    updated_at: str = ""
+
+    def is_finished(self) -> bool:
+        return self.status in STEP_FINISHED
+
+
 @dataclass
 class ChatSession:
     """One invitee's progress through one meeting.
@@ -214,6 +272,37 @@ class ChatSession:
     running_summary: str = ""
     folded_through_message_id: int = 0
     last_active_at: str = ""
+
+
+# Phase 53: the organiser's FAQ, and the side questions it couldn't answer.
+
+
+@dataclass
+class FaqEntry:
+    """One question the bot may answer, with the only answer it may give."""
+
+    question: str = ""
+    answer: str = ""
+
+
+@dataclass
+class Faq:
+    """A meeting's FAQ, as uploaded (and later grown by Add to FAQ)."""
+
+    source_file: str = ""
+    entries: list[FaqEntry] = field(default_factory=list)
+
+
+@dataclass
+class FaqMiss:
+    """A side question an invitee asked that the FAQ had no answer for."""
+
+    miss_id: int | None = None
+    invitee_id: int | None = None
+    invitee_name: str = ""
+    question: str = ""
+    agenda_tag: str = ""
+    created_at: str = ""
 
 
 def canonical_tag(tag: str, meeting: Meeting) -> str:
@@ -239,14 +328,29 @@ def canonical_tag(tag: str, meeting: Meeting) -> str:
 
 def agenda_to_json(agenda: list[AgendaItem]) -> str:
     """Serialises the agenda for the `meetings.agenda_json` column."""
-    payload = {
-        "version": SCHEMA_VERSION,
-        "items": [
-            {"type": item.item_type, "item": item.item, "ai_note": item.ai_note}
-            for item in agenda
-        ],
-    }
-    return json.dumps(payload, indent=2)
+    items = []
+    for item in agenda:
+        entry = {"type": item.item_type, "item": item.item, "ai_note": item.ai_note}
+        if item.is_question():
+            # Written only for questions, so an agenda with none reads back byte-identical.
+            entry.update(
+                {"answer_type": item.answer_type, "rule": item.rule, "max_tries": item.max_tries}
+            )
+            if item.branch:
+                entry["branch"] = item.branch
+            if item.loop:
+                entry["loop"] = item.loop
+        items.append(entry)
+    return json.dumps({"version": SCHEMA_VERSION, "items": items}, indent=2)
+
+
+def clamp_tries(value) -> int:
+    """A tries count from a grid cell or stored JSON, kept between 1 and `MAX_TRIES_LIMIT`."""
+    try:
+        tries = int(float(value))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_TRIES
+    return min(max(tries, 1), MAX_TRIES_LIMIT)
 
 
 def agenda_from_json(text: str) -> list[AgendaItem]:
@@ -288,8 +392,21 @@ def agenda_from_json(text: str) -> list[AgendaItem]:
                 item_type,
             )
             item_type = DISCUSSION_ITEM
+        answer_type = str(raw.get("answer_type") or ANSWER_TEXT)
+        if answer_type not in ANSWER_TYPES:
+            logger.warning("Question '%s' has unknown answer type '%s'; reading it as text.", title, answer_type)
+            answer_type = ANSWER_TEXT
         items.append(
-            AgendaItem(item=title, ai_note=str(raw.get("ai_note") or ""), item_type=item_type)
+            AgendaItem(
+                item=title,
+                ai_note=str(raw.get("ai_note") or ""),
+                item_type=item_type,
+                answer_type=answer_type,
+                rule=str(raw.get("rule") or ""),
+                max_tries=clamp_tries(raw.get("max_tries", DEFAULT_MAX_TRIES)),
+                branch=str(raw.get("branch") or "") if item_type == QUESTION_ITEM else "",
+                loop=str(raw.get("loop") or "").strip() if item_type == QUESTION_ITEM else "",
+            )
         )
 
     return items

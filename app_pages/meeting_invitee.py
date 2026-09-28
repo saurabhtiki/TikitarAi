@@ -16,6 +16,7 @@ Discussion** tab, and each table item gets its own grid tab. Ten discussion item
 tables are three tabs, not twelve.
 """
 
+import datetime
 import logging
 
 import streamlit as st
@@ -26,15 +27,26 @@ from meetings import (
     chat_agent,
     db,
     extraction_agent,
+    loops,
     running_summary,
     session,
+    steps,
     storage,
     summary_agent,
     tables,
 )
 from meetings.access import verify_code
 from meetings.exceptions import MeetingAgentError, MeetingError
-from meetings.model import SENDER_AI, SENDER_USER, AgendaTable, Meeting
+from meetings.model import (
+    SENDER_AI,
+    SENDER_USER,
+    STEP_ANSWERED,
+    STEP_NOT_ANSWERED,
+    AgendaTable,
+    Faq,
+    Meeting,
+    StepAnswer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +146,45 @@ def _evaluation_fields(meeting_id: int) -> list:
         return []
 
 
+def _invitee_lists(meeting: Meeting, invitee: dict) -> loops.InviteeLists:
+    """This invitee's For each lists and their rows in them (phase 52).
+
+    A failure here costs the list questions, not the conversation: with no rows they are
+    skipped, which is what happens anyway for a list the organiser hasn't attached yet.
+    """
+    if not steps.loop_names(meeting):
+        return loops.InviteeLists()
+    try:
+        tables = loops.list_tables(meeting, db.list_agenda_tables(invitee["meeting_id"]))
+    except MeetingError:
+        logger.exception("Could not read the lists for meeting %s.", invitee["meeting_id"])
+        return loops.InviteeLists()
+    return loops.invitee_lists(tables, invitee)
+
+
+def _meeting_faq(meeting_id: int) -> Faq | None:
+    """The organiser's FAQ (phase 53), or None.
+
+    A failure here costs the FAQ, not the conversation: the bot then answers side questions
+    as it did before there was one, and nothing is logged.
+    """
+    try:
+        return db.load_faq(meeting_id)
+    except MeetingError:
+        logger.exception("Could not read the FAQ for meeting %s.", meeting_id)
+        return None
+
+
+def _log_unanswered(meeting_id: int, invitee_id: int, question: str, agenda_tag: str) -> None:
+    """Logs a side question the FAQ couldn't answer. Never costs the invitee their reply."""
+    if not question:
+        return
+    try:
+        db.add_faq_miss(meeting_id, invitee_id, question, agenda_tag)
+    except MeetingError:
+        logger.exception("Could not log an unanswered question for invitee %s.", invitee_id)
+
+
 def _render_chat(meeting: Meeting, invitee: dict) -> None:
     meeting_id = invitee["meeting_id"]
     invitee_id = invitee["invitee_id"]
@@ -141,6 +192,7 @@ def _render_chat(meeting: Meeting, invitee: dict) -> None:
     try:
         chat_session = db.ensure_session(meeting_id, invitee_id)
         messages = db.list_messages(meeting_id, invitee_id)
+        answers = db.load_step_answers(meeting_id, invitee_id)
     except MeetingError as error:
         logger.exception("Could not load the chat for invitee %s.", invitee_id)
         st.error(str(error), icon=":material/error:")
@@ -156,9 +208,10 @@ def _render_chat(meeting: Meeting, invitee: dict) -> None:
         return
 
     fields = _evaluation_fields(meeting_id)
+    lists = _invitee_lists(meeting, invitee)
 
     if not messages and not chat_session.closed:
-        _open_conversation(meeting, profile, meeting_id, invitee_id, fields)
+        _open_conversation(meeting, profile, meeting_id, invitee_id, fields, answers, lists)
         return
 
     table_items = meeting.table_items()
@@ -168,12 +221,12 @@ def _render_chat(meeting: Meeting, invitee: dict) -> None:
         # pinned to the bottom, exactly as it was before this phase.
         tabs = st.tabs([DISCUSSION_TAB, *[f"📋 {item.item}" for item in table_items]])
         with tabs[0]:
-            _render_discussion(meeting, profile, invitee, chat_session, messages, fields)
+            _render_discussion(meeting, profile, invitee, chat_session, messages, fields, answers, lists)
         for tab, item in zip(tabs[1:], table_items):
             with tab:
                 _render_table_tab(meeting_id, invitee_id, item, chat_session.closed)
     else:
-        _render_discussion(meeting, profile, invitee, chat_session, messages, fields)
+        _render_discussion(meeting, profile, invitee, chat_session, messages, fields, answers, lists)
 
     # Below the tabs, because closing and its summary belong to the whole session rather
     # than to whichever tab happens to be open.
@@ -197,6 +250,8 @@ def _render_discussion(
     chat_session,
     messages: list,
     fields: list,
+    answers: dict[str, StepAnswer],
+    lists: loops.InviteeLists,
 ) -> None:
     """The conversation itself — every discussion agenda item, as one flowing chat."""
     meeting_id = invitee["meeting_id"]
@@ -211,10 +266,23 @@ def _render_discussion(
 
     _render_uploads(meeting_id, invitee_id)
 
+    current = steps.next_question(meeting, answers, lists.rows)
+    if current is not None:
+        st.caption(f":red[{steps.progress_text(meeting, current, answers, lists.rows)}]")
+
     prompt = st.chat_input("Type your reply", key="invitee_chat_input")
     if prompt:
         _handle_turn(
-            meeting, profile, meeting_id, invitee_id, chat_session.running_summary, messages, prompt, fields
+            meeting,
+            profile,
+            meeting_id,
+            invitee_id,
+            chat_session.running_summary,
+            messages,
+            prompt,
+            fields,
+            answers,
+            lists,
         )
 
 
@@ -290,12 +358,38 @@ def _handle_save_table(table: AgendaTable, invitee_id: int, edited) -> None:
 
 
 def _open_conversation(
-    meeting: Meeting, profile: dict, meeting_id: int, invitee_id: int, fields: list
+    meeting: Meeting,
+    profile: dict,
+    meeting_id: int,
+    invitee_id: int,
+    fields: list,
+    answers: dict[str, StepAnswer],
+    lists: loops.InviteeLists,
 ) -> None:
-    """Generates and stores the AI's opening message, then reruns to show it."""
+    """Generates and stores the AI's opening message, then reruns to show it.
+
+    A meeting with question steps opens by asking the first one, so the invitee's first
+    reply is already an answer to something the app is tracking.
+    """
+    first = steps.next_question(meeting, answers, lists.rows)
+    guidance = ""
+    if first is not None:
+        guidance = chat_agent.question_guidance(
+            first.question,
+            steps.progress_text(meeting, first, answers, lists.rows),
+            just_happened="Open with a short welcome in character and say why this conversation is happening.",
+            row_context=lists.row_context(first),
+        )
     try:
         with st.spinner("Starting the conversation..."):
-            opening = chat_agent.opening_message(meeting, profile, evaluation_fields=fields)
+            opening = chat_agent.opening_message(
+                meeting,
+                profile,
+                evaluation_fields=fields,
+                step_guidance=guidance,
+                step_tag=first.item if first is not None else "",
+                faq=_meeting_faq(meeting_id),
+            )
         db.add_message(meeting_id, invitee_id, SENDER_AI, opening.reply, opening.agenda_tag)
     except (LLMConnectionError, MeetingError) as error:
         logger.exception("Could not open the conversation for invitee %s.", invitee_id)
@@ -313,14 +407,18 @@ def _handle_turn(
     messages: list,
     prompt: str,
     fields: list,
+    answers: dict[str, StepAnswer],
+    lists: loops.InviteeLists,
 ) -> None:
     """Saves the invitee's message, replies to it, then folds if the history has grown.
 
     The invitee's own message is written **first and on its own**, so a provider failure
-    costs them the reply and not what they typed.
+    costs them the reply and not what they typed. While a question step is open the reply is
+    steered by `_advance_question`; a failure while reading the answer uses no try.
     """
+    current = steps.next_question(meeting, answers, lists.rows)
     try:
-        db.add_message(meeting_id, invitee_id, SENDER_USER, prompt)
+        db.add_message(meeting_id, invitee_id, SENDER_USER, prompt, current.item if current else "")
     except MeetingError as error:
         logger.exception("Could not save an invitee message for %s.", invitee_id)
         st.error(str(error), icon=":material/error:")
@@ -328,6 +426,11 @@ def _handle_turn(
 
     try:
         with st.spinner("Thinking..."):
+            guidance, step_tag = "", ""
+            if current is not None:
+                guidance, step_tag = _advance_question(
+                    meeting, profile, meeting_id, invitee_id, current, answers, prompt, lists
+                )
             turn = chat_agent.send_turn(
                 meeting,
                 profile,
@@ -335,8 +438,12 @@ def _handle_turn(
                 running_summary.recent_messages(messages),
                 prompt,
                 evaluation_fields=fields,
+                step_guidance=guidance,
+                step_tag=step_tag,
+                faq=_meeting_faq(meeting_id),
             )
         db.add_message(meeting_id, invitee_id, SENDER_AI, turn.reply, turn.agenda_tag)
+        _log_unanswered(meeting_id, invitee_id, turn.unanswered_question, turn.agenda_tag)
     except (LLMConnectionError, MeetingError) as error:
         logger.exception("Could not generate a reply for invitee %s.", invitee_id)
         st.error(f"We couldn't get a reply: {error}. Your message was saved — try again.", icon=":material/error:")
@@ -346,6 +453,73 @@ def _handle_turn(
     # After the writes have committed, never inside them — see `running_summary.maybe_fold`.
     running_summary.maybe_fold(profile, meeting_id, invitee_id)
     st.rerun()
+
+
+def _advance_question(
+    meeting: Meeting,
+    profile: dict,
+    meeting_id: int,
+    invitee_id: int,
+    current: steps.Step,
+    answers: dict[str, StepAnswer],
+    reply: str,
+    lists: loops.InviteeLists,
+) -> tuple[str, str]:
+    """Reads, checks and records one reply to the open question (for its list row, if any).
+
+    Returns the step guidance for the chat model and the title its reply is about. The model
+    only converts the reply (`read_answer`); `steps.check_answer` decides if it passes.
+
+    Raises:
+        LLMConnectionError: if reading the reply fails.
+        MeetingError: if the answer can't be saved.
+    """
+    today = datetime.date.today()
+    question = current.question
+    reading = chat_agent.read_answer(profile, question, reply, today, row_context=lists.row_context(current))
+    if reading.kind == chat_agent.QUESTION_KIND:
+        # Asking something is not a wrong answer, so no try is used.
+        guidance = chat_agent.question_guidance(
+            question,
+            steps.progress_text(meeting, current, answers, lists.rows),
+            just_happened="The invitee asked something instead of answering. Answer it briefly "
+            "from your instructions and the FAQ if there is one (say so if you don't know), then "
+            "ask the question again.",
+            row_context=lists.row_context(current),
+        )
+        return guidance, current.item
+
+    check = steps.check_answer(question, reading.value, today)
+    updated = steps.record_attempt(question, answers.get(current.key), check, reply, key=current.key)
+    db.save_step_answer(meeting_id, invitee_id, updated)
+
+    if updated.status == STEP_ANSWERED:
+        happened = f'The answer "{updated.value}" was accepted. Thank them in a few words.'
+    elif updated.status == STEP_NOT_ANSWERED:
+        happened = (
+            "The invitee could not give a usable answer within the allowed tries. Say politely "
+            "that you have noted it for the organiser and are moving on."
+        )
+    else:
+        tries_left = question.max_tries - updated.tries
+        happened = (
+            f"That answer can't be accepted. {check.reason} Explain this in simple words with a "
+            f"small example of a good answer. Tries left: {tries_left}."
+        )
+
+    after = {**answers, current.key: updated}
+    upcoming = steps.next_question(meeting, after, lists.rows)
+    if upcoming is None:
+        return chat_agent.finished_questions_guidance(meeting, just_happened=happened), current.item
+    return (
+        chat_agent.question_guidance(
+            upcoming.question,
+            steps.progress_text(meeting, upcoming, after, lists.rows),
+            just_happened=happened,
+            row_context=lists.row_context(upcoming),
+        ),
+        upcoming.item,
+    )
 
 
 def _handle_close(

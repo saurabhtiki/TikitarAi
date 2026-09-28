@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from meetings.exceptions import MeetingStorageError
+from meetings.faq import same_question
 from meetings.model import (
     AgendaItem,
     AgendaTable,
@@ -30,8 +31,12 @@ from meetings.model import (
     ChatSession,
     EvaluationAnswer,
     EvaluationField,
+    Faq,
+    FaqEntry,
+    FaqMiss,
     Invitee,
     Meeting,
+    StepAnswer,
     agenda_from_json,
     agenda_to_json,
 )
@@ -212,6 +217,62 @@ CREATE TABLE IF NOT EXISTS meeting_evaluation_results (
 );
 """
 
+# Phase 50: where each invitee stands on each question item. Keyed by the question's title
+# (like `meeting_agenda_tables.item_ref`), so renaming a question detaches its answers.
+_CREATE_STEP_ANSWERS_TABLE = """
+CREATE TABLE IF NOT EXISTS meeting_step_answers (
+    meeting_id INTEGER NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
+    invitee_id INTEGER NOT NULL REFERENCES meeting_invitees(invitee_id) ON DELETE CASCADE,
+    item_ref   TEXT NOT NULL,
+    value      TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'pending',
+    tries      INTEGER NOT NULL DEFAULT 0,
+    last_reply TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (meeting_id, invitee_id, item_ref)
+);
+"""
+
+# Phase 53: one FAQ per meeting, stored whole — it is read whole into every prompt and
+# replaced whole on upload, so rows of its own would only be reassembled again.
+_CREATE_FAQS_TABLE = """
+CREATE TABLE IF NOT EXISTS meeting_faqs (
+    meeting_id   INTEGER PRIMARY KEY REFERENCES meetings(meeting_id) ON DELETE CASCADE,
+    source_file  TEXT NOT NULL DEFAULT '',
+    entries_json TEXT NOT NULL DEFAULT '[]',
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_FAQ_MISSES_TABLE = """
+CREATE TABLE IF NOT EXISTS meeting_faq_misses (
+    miss_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    meeting_id INTEGER NOT NULL REFERENCES meetings(meeting_id) ON DELETE CASCADE,
+    invitee_id INTEGER NOT NULL REFERENCES meeting_invitees(invitee_id) ON DELETE CASCADE,
+    question   TEXT NOT NULL,
+    agenda_tag TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+_CREATE_FAQ_MISSES_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_meeting_faq_misses_meeting
+ON meeting_faq_misses (meeting_id, miss_id);
+"""
+
+
+def _ensure_match_column(connection: sqlite3.Connection) -> None:
+    """Phase 52: adds `match_column` to a `meeting_agenda_tables` written before it existed.
+
+    Guarded on `PRAGMA table_info` because SQLite has no `ADD COLUMN IF NOT EXISTS` and this
+    runs on every process start.
+    """
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(meeting_agenda_tables);").fetchall()}
+    if "match_column" in columns:
+        return
+    connection.execute("ALTER TABLE meeting_agenda_tables ADD COLUMN match_column TEXT NOT NULL DEFAULT '';")
+    logger.info("Added match_column to meeting_agenda_tables.")
+
 
 @contextmanager
 def _get_connection(db_path: Path | str = DEFAULT_DB_PATH):
@@ -259,10 +320,15 @@ def init_meetings_tables(db_path: Path | str = DEFAULT_DB_PATH) -> None:
         connection.execute(_CREATE_FILES_INDEX)
         connection.execute(_CREATE_AGENDA_TABLES_TABLE)
         connection.execute(_CREATE_AGENDA_TABLES_INDEX)
+        _ensure_match_column(connection)
         connection.execute(_CREATE_TABLE_RESPONSES_TABLE)
         connection.execute(_CREATE_EVALUATION_FIELDS_TABLE)
         connection.execute(_CREATE_EVALUATION_FIELDS_INDEX)
         connection.execute(_CREATE_EVALUATION_RESULTS_TABLE)
+        connection.execute(_CREATE_STEP_ANSWERS_TABLE)
+        connection.execute(_CREATE_FAQS_TABLE)
+        connection.execute(_CREATE_FAQ_MISSES_TABLE)
+        connection.execute(_CREATE_FAQ_MISSES_INDEX)
 
 
 def _now() -> str:
@@ -803,6 +869,7 @@ def _row_to_agenda_table(row: sqlite3.Row) -> AgendaTable:
         locked_columns=_json_list(row["locked_columns"]),
         editable_columns=_json_list(row["editable_columns"]),
         base_data=_json_list(row["base_data"]),
+        match_column=row["match_column"] or "",
     )
 
 
@@ -850,12 +917,13 @@ def save_agenda_table(
             json.dumps(table.locked_columns),
             json.dumps(table.editable_columns),
             json.dumps(table.base_data),
+            (table.match_column or "").strip(),
         )
         if existing is None:
             cursor = connection.execute(
                 "INSERT INTO meeting_agenda_tables "
-                "(meeting_id, item_ref, source_file, locked_columns, editable_columns, base_data) "
-                "VALUES (?, ?, ?, ?, ?, ?);",
+                "(meeting_id, item_ref, source_file, locked_columns, editable_columns, base_data, match_column) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?);",
                 (meeting_id, item_ref, *payload),
             )
             return cursor.lastrowid
@@ -863,7 +931,7 @@ def save_agenda_table(
         table_id = existing["table_id"]
         connection.execute(
             "UPDATE meeting_agenda_tables SET source_file = ?, locked_columns = ?, "
-            "editable_columns = ?, base_data = ? WHERE table_id = ?;",
+            "editable_columns = ?, base_data = ?, match_column = ? WHERE table_id = ?;",
             (*payload, table_id),
         )
         # The rows people filled in answered the old sheet. Keeping them against a new one
@@ -1164,3 +1232,221 @@ def list_evaluation_answers(
         )
         for row in rows
     ]
+
+
+# --------------------------------------------------------------------------------------
+# Question steps (phase 50)
+# --------------------------------------------------------------------------------------
+
+
+def _row_to_step_answer(row: sqlite3.Row) -> StepAnswer:
+    return StepAnswer(
+        item_ref=row["item_ref"],
+        value=row["value"] or "",
+        status=row["status"] or "",
+        tries=int(row["tries"] or 0),
+        last_reply=row["last_reply"] or "",
+        updated_at=row["updated_at"] or "",
+    )
+
+
+def load_step_answers(
+    meeting_id: int, invitee_id: int, db_path: Path | str = DEFAULT_DB_PATH
+) -> dict[str, StepAnswer]:
+    """One invitee's answers so far, by question title."""
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM meeting_step_answers WHERE meeting_id = ? AND invitee_id = ?;",
+            (meeting_id, invitee_id),
+        ).fetchall()
+    return {row["item_ref"]: _row_to_step_answer(row) for row in rows}
+
+
+def save_step_answer(
+    meeting_id: int, invitee_id: int, answer: StepAnswer, db_path: Path | str = DEFAULT_DB_PATH
+) -> None:
+    """Writes one question's state for one invitee, replacing what was there."""
+    with _get_connection(db_path) as connection:
+        connection.execute(
+            "INSERT INTO meeting_step_answers "
+            "(meeting_id, invitee_id, item_ref, value, status, tries, last_reply, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(meeting_id, invitee_id, item_ref) DO UPDATE SET value = excluded.value, "
+            "status = excluded.status, tries = excluded.tries, last_reply = excluded.last_reply, "
+            "updated_at = excluded.updated_at;",
+            (
+                meeting_id,
+                invitee_id,
+                answer.item_ref,
+                answer.value,
+                answer.status,
+                answer.tries,
+                answer.last_reply,
+                _now(),
+            ),
+        )
+
+
+def list_all_step_answers(
+    meeting_id: int, user_id: int, db_path: Path | str = DEFAULT_DB_PATH
+) -> dict[int, dict[str, StepAnswer]]:
+    """Every invitee's answers in this meeting, for its owner: `{invitee_id: {title: answer}}`."""
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        rows = connection.execute(
+            "SELECT * FROM meeting_step_answers WHERE meeting_id = ?;", (meeting_id,)
+        ).fetchall()
+    answers: dict[int, dict[str, StepAnswer]] = {}
+    for row in rows:
+        answers.setdefault(row["invitee_id"], {})[row["item_ref"]] = _row_to_step_answer(row)
+    return answers
+
+
+def delete_row_answers(
+    meeting_id: int, user_id: int, key_prefixes: list[str], db_path: Path | str = DEFAULT_DB_PATH
+) -> None:
+    """Removes every invitee's per-row answers whose key starts with one of `key_prefixes`.
+
+    Used when a For each list is replaced (phase 52): the answers were given to the old rows,
+    and row 3 of a new sheet is a different invoice.
+
+    Raises:
+        MeetingStorageError: if the meeting isn't theirs, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        for prefix in key_prefixes:
+            connection.execute(
+                "DELETE FROM meeting_step_answers WHERE meeting_id = ? AND instr(item_ref, ?) = 1;",
+                (meeting_id, prefix),
+            )
+
+
+# --------------------------------------------------------------------------------------
+# FAQ (phase 53)
+# --------------------------------------------------------------------------------------
+
+
+def save_faq(meeting_id: int, user_id: int, faq: Faq, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+    """Stores the meeting's FAQ, replacing any FAQ already there.
+
+    Raises:
+        MeetingStorageError: if the meeting isn't theirs, or on a database failure.
+    """
+    entries = [{"question": entry.question, "answer": entry.answer} for entry in faq.entries]
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        connection.execute(
+            "INSERT INTO meeting_faqs (meeting_id, source_file, entries_json, updated_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(meeting_id) DO UPDATE SET "
+            "source_file = excluded.source_file, entries_json = excluded.entries_json, "
+            "updated_at = excluded.updated_at;",
+            (meeting_id, faq.source_file, json.dumps(entries), _now()),
+        )
+
+
+def load_faq(meeting_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> Faq | None:
+    """The meeting's FAQ, or None if the organiser hasn't uploaded one.
+
+    Unscoped, like `list_agenda_tables`: the invitee page reads it with a meeting id that
+    came from `resolve_token`.
+    """
+    with _get_connection(db_path) as connection:
+        row = connection.execute(
+            "SELECT source_file, entries_json FROM meeting_faqs WHERE meeting_id = ?;", (meeting_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    entries = [
+        FaqEntry(question=str(entry.get("question", "")), answer=str(entry.get("answer", "")))
+        for entry in _json_list(row["entries_json"])
+        if isinstance(entry, dict)
+    ]
+    return Faq(source_file=row["source_file"] or "", entries=entries)
+
+
+def delete_faq(meeting_id: int, user_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+    """Removes the meeting's FAQ. The logged questions stay: they are still unanswered.
+
+    Raises:
+        MeetingStorageError: if the meeting isn't theirs, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        connection.execute("DELETE FROM meeting_faqs WHERE meeting_id = ?;", (meeting_id,))
+
+
+def add_faq_miss(
+    meeting_id: int,
+    invitee_id: int,
+    question: str,
+    agenda_tag: str = "",
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> bool:
+    """Logs a side question the FAQ couldn't answer. Returns False if it wasn't new.
+
+    The same question from the same invitee is kept once: the model tends to repeat it while
+    the invitee follows up on it, and one line per asking is what the organiser has to answer.
+
+    Raises:
+        MeetingStorageError: on a database failure.
+    """
+    question = " ".join(str(question or "").split())
+    if not question:
+        return False
+    with _get_connection(db_path) as connection:
+        existing = connection.execute(
+            "SELECT question FROM meeting_faq_misses WHERE meeting_id = ? AND invitee_id = ?;",
+            (meeting_id, invitee_id),
+        ).fetchall()
+        if any(same_question(row["question"]) == same_question(question) for row in existing):
+            return False
+        connection.execute(
+            "INSERT INTO meeting_faq_misses (meeting_id, invitee_id, question, agenda_tag, created_at) "
+            "VALUES (?, ?, ?, ?, ?);",
+            (meeting_id, invitee_id, question, agenda_tag or "", _now()),
+        )
+    return True
+
+
+def list_faq_misses(meeting_id: int, user_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> list[FaqMiss]:
+    """Every logged question in this meeting, oldest first, with who asked it.
+
+    Raises:
+        MeetingStorageError: if the meeting isn't theirs, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        rows = connection.execute(
+            "SELECT m.miss_id, m.invitee_id, i.name AS invitee_name, m.question, m.agenda_tag, m.created_at "
+            "FROM meeting_faq_misses m JOIN meeting_invitees i ON i.invitee_id = m.invitee_id "
+            "WHERE m.meeting_id = ? ORDER BY m.miss_id;",
+            (meeting_id,),
+        ).fetchall()
+    return [
+        FaqMiss(
+            miss_id=row["miss_id"],
+            invitee_id=row["invitee_id"],
+            invitee_name=row["invitee_name"] or "",
+            question=row["question"],
+            agenda_tag=row["agenda_tag"] or "",
+            created_at=row["created_at"] or "",
+        )
+        for row in rows
+    ]
+
+
+def delete_faq_misses(
+    meeting_id: int, user_id: int, miss_ids: list[int], db_path: Path | str = DEFAULT_DB_PATH
+) -> None:
+    """Removes logged questions once they have been answered into the FAQ.
+
+    Raises:
+        MeetingStorageError: if the meeting isn't theirs, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        connection.executemany(
+            "DELETE FROM meeting_faq_misses WHERE meeting_id = ? AND miss_id = ?;",
+            [(meeting_id, miss_id) for miss_id in miss_ids],
+        )
