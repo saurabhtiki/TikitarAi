@@ -136,3 +136,25 @@ class TestFollowingIt:
     def test_a_broken_go_to_in_a_stored_agenda_goes_on_in_order(self):
         meeting = _meeting(salary_branch="if lots go to End")
         assert steps.next_question(meeting, {SALARY: _answered(SALARY, "90000")}).item == RELOCATE
+
+
+class TestAnswerDay:
+    def test_the_saved_utc_time_is_read_as_the_local_day(self):
+        import datetime
+
+        stamp = "2026-09-28 20:30:00"
+        expected = (
+            datetime.datetime(2026, 9, 28, 20, 30, tzinfo=datetime.timezone.utc).astimezone().date()
+        )
+        assert steps._answer_day(_answered(SALARY, "1", day=stamp)) == expected
+
+    def test_an_answer_not_saved_yet_is_judged_today(self):
+        import datetime
+
+        assert steps._answer_day(_answered(SALARY, "1", day="")) == datetime.date.today()
+
+    def test_a_new_attempt_drops_the_previous_tries_time(self):
+        item = _question(SALARY, ANSWER_NUMBER, "> 0")
+        previous = StepAnswer(item_ref=SALARY, tries=1, updated_at="2026-09-01 10:00:00")
+        updated = steps.record_attempt(item, previous, steps.check_answer(item, "5", None), "5")
+        assert updated.updated_at == ""

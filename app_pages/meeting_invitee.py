@@ -424,11 +424,16 @@ def _handle_turn(
         st.error(str(error), icon=":material/error:")
         return
 
+    # Set once an answer is saved: the plain-words next question, posted if the reply fails,
+    # so the chat never moves on to a question the invitee was not asked.
+    fallback = ""
     try:
         with st.spinner("Thinking..."):
             guidance, step_tag = "", ""
-            if current is not None:
-                guidance, step_tag = _advance_question(
+            if current is not None and not _was_asked(messages, current):
+                guidance, step_tag = _ask_new_question(meeting, current, answers, lists), current.item
+            elif current is not None:
+                guidance, step_tag, fallback = _advance_question(
                     meeting, profile, meeting_id, invitee_id, current, answers, prompt, lists
                 )
             turn = chat_agent.send_turn(
@@ -446,6 +451,9 @@ def _handle_turn(
         _log_unanswered(meeting_id, invitee_id, turn.unanswered_question, turn.agenda_tag)
     except (LLMConnectionError, MeetingError) as error:
         logger.exception("Could not generate a reply for invitee %s.", invitee_id)
+        if fallback and _post_fallback(meeting_id, invitee_id, fallback, step_tag):
+            st.rerun()
+            return
         st.error(f"We couldn't get a reply: {error}. Your message was saved — try again.", icon=":material/error:")
         st.rerun()
         return
@@ -464,11 +472,12 @@ def _advance_question(
     answers: dict[str, StepAnswer],
     reply: str,
     lists: loops.InviteeLists,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     """Reads, checks and records one reply to the open question (for its list row, if any).
 
-    Returns the step guidance for the chat model and the title its reply is about. The model
-    only converts the reply (`read_answer`); `steps.check_answer` decides if it passes.
+    Returns the step guidance for the chat model, the title its reply is about, and a plain
+    reply to post if the model then fails ("" when nothing was saved). The model only
+    converts the reply (`read_answer`); `steps.check_answer` decides if it passes.
 
     Raises:
         LLMConnectionError: if reading the reply fails.
@@ -487,7 +496,7 @@ def _advance_question(
             "ask the question again.",
             row_context=lists.row_context(current),
         )
-        return guidance, current.item
+        return guidance, current.item, ""
 
     check = steps.check_answer(question, reading.value, today)
     updated = steps.record_attempt(question, answers.get(current.key), check, reply, key=current.key)
@@ -495,22 +504,31 @@ def _advance_question(
 
     if updated.status == STEP_ANSWERED:
         happened = f'The answer "{updated.value}" was accepted. Thank them in a few words.'
+        plain = f"Thanks, noted: {updated.value}."
     elif updated.status == STEP_NOT_ANSWERED:
         happened = (
             "The invitee could not give a usable answer within the allowed tries. Say politely "
             "that you have noted it for the organiser and are moving on."
         )
+        plain = "I've noted that for the organiser and will move on."
     else:
         tries_left = question.max_tries - updated.tries
         happened = (
             f"That answer can't be accepted. {check.reason} Explain this in simple words with a "
             f"small example of a good answer. Tries left: {tries_left}."
         )
+        plain = f"{check.reason} Please try again ({tries_left} tries left)."
 
     after = {**answers, current.key: updated}
     upcoming = steps.next_question(meeting, after, lists.rows)
     if upcoming is None:
-        return chat_agent.finished_questions_guidance(meeting, just_happened=happened), current.item
+        return (
+            chat_agent.finished_questions_guidance(meeting, just_happened=happened),
+            current.item,
+            f"{plain} That's all my set questions.",
+        )
+    if upcoming.key != current.key:
+        plain += f" Next: {_plain_question(upcoming, lists)}"
     return (
         chat_agent.question_guidance(
             upcoming.question,
@@ -519,7 +537,46 @@ def _advance_question(
             row_context=lists.row_context(upcoming),
         ),
         upcoming.item,
+        plain,
     )
+
+
+def _plain_question(step: steps.Step, lists: loops.InviteeLists) -> str:
+    """The question in plain words, for when the model can't word it."""
+    text = f"{step.item} — {steps.describe_rule(step.question)}."
+    row = lists.row_context(step)
+    return f"{text} ({row})" if row else text
+
+
+def _was_asked(messages: list, current: steps.Step) -> bool:
+    """Whether the bot's last message was about this question.
+
+    A question the organiser added (or a list they uploaded) after the chat started is open
+    on the path but was never put to the invitee; their next message is not an answer to it.
+    """
+    last_ai = next((message for message in reversed(messages) if message.is_from_ai()), None)
+    return last_ai is not None and last_ai.agenda_tag == current.item
+
+
+def _ask_new_question(meeting: Meeting, current: steps.Step, answers: dict, lists: loops.InviteeLists) -> str:
+    return chat_agent.question_guidance(
+        current.question,
+        steps.progress_text(meeting, current, answers, lists.rows),
+        just_happened="Reply briefly to what the invitee just said, then ask this question. It was "
+        "added after the conversation started, so their message was not an answer to it.",
+        row_context=lists.row_context(current),
+    )
+
+
+def _post_fallback(meeting_id: int, invitee_id: int, text: str, tag: str) -> bool:
+    """Posts the plain reply when the model failed after an answer was saved. False if even
+    that can't be stored, so the caller shows the usual error."""
+    try:
+        db.add_message(meeting_id, invitee_id, SENDER_AI, text, tag)
+    except MeetingError:
+        logger.exception("Could not post the plain reply for invitee %s.", invitee_id)
+        return False
+    return True
 
 
 def _handle_close(

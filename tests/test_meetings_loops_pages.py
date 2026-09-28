@@ -156,6 +156,7 @@ class TestInvitee:
         meetings_db.ensure_session(meeting.meeting_id, invitee_id)
         meetings_db.add_message(meeting.meeting_id, invitee_id, SENDER_AI, "Invoice 1001 — paid?", PAID)
         _answer(meeting.meeting_id, invitee_id, PAID, 0, "No")
+        meetings_db.add_message(meeting.meeting_id, invitee_id, SENDER_AI, "When will it be paid?", DATE)
         app = _invitee_app(probe, meeting.meeting_id, invitee_id)
         seen = _stub_model(monkeypatch, AnswerReading(value="01-12-2099"))
 
@@ -175,6 +176,7 @@ class TestInvitee:
         meetings_db.ensure_session(meeting.meeting_id, invitee_id)
         meetings_db.add_message(meeting.meeting_id, invitee_id, SENDER_AI, "Invoice 1001 — paid?", PAID)
         _answer(meeting.meeting_id, invitee_id, PAID, 0, "No")
+        meetings_db.add_message(meeting.meeting_id, invitee_id, SENDER_AI, "When will it be paid?", DATE)
         app = _invitee_app(probe, meeting.meeting_id, invitee_id)
         seen = _stub_model(monkeypatch, AnswerReading(value="01-12-2099"))
 

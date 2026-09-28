@@ -523,20 +523,35 @@ def record_attempt(
     """
     current = previous or StepAnswer(item_ref=key or item.item)
     tries = current.tries + 1
+    # The previous try's time is dropped: this attempt is "now" until it is saved, so the
+    # turn judges a date Go to on the same day the reloaded page will (see `_answer_day`).
     if check.ok:
-        return replace(current, value=check.value, status=STEP_ANSWERED, tries=tries, last_reply=reply)
+        return replace(
+            current, value=check.value, status=STEP_ANSWERED, tries=tries, last_reply=reply, updated_at=""
+        )
     status = STEP_NOT_ANSWERED if tries >= item.max_tries else STEP_PENDING
-    return replace(current, value="", status=status, tries=tries, last_reply=reply)
+    return replace(current, value="", status=status, tries=tries, last_reply=reply, updated_at="")
 
 
 def _answer_day(answer: StepAnswer) -> datetime.date:
-    """The day the answer was saved, so a date condition like "within 30 days" is judged once.
+    """The local day the answer was saved, so a date condition like "within 30 days" is
+    judged once. Not saved yet (no time) means today.
 
     Judging it against today instead would let the path change weeks later, and a question
-    that was asked could suddenly look skipped.
+    that was asked could suddenly look skipped. The stored time is UTC; it is turned into
+    the local day because `check_answer` is given the local today while the invitee answers
+    — without that, an answer saved at 2 am in India would be judged a day earlier on reload.
     """
+    stamp = str(answer.updated_at or "").strip()
+    if not stamp:
+        return datetime.date.today()
     try:
-        return datetime.date.fromisoformat(str(answer.updated_at)[:10])
+        saved = datetime.datetime.strptime(stamp[:19], "%Y-%m-%d %H:%M:%S")
+        return saved.replace(tzinfo=datetime.timezone.utc).astimezone().date()
+    except ValueError:
+        pass
+    try:
+        return datetime.date.fromisoformat(stamp[:10])
     except ValueError:
         return datetime.date.today()
 

@@ -188,11 +188,48 @@ class TestInvitee:
         assert SALARY not in meetings_db.load_step_answers(meeting.meeting_id, invitee_id)
         assert "asked something instead" in seen["step_guidance"]
 
+    def test_if_the_reply_fails_after_an_answer_the_next_question_is_still_asked(self, tmp_path, monkeypatch):
+        import app_pages.meeting_invitee as page
+        from llm.client import LLMConnectionError
+
+        meeting, invitee_id, app = _started(tmp_path, monkeypatch)
+        monkeypatch.setattr(page.chat_agent, "read_answer", lambda *a, **k: AnswerReading(value="45000"))
+
+        def _fail(*args, **kwargs):
+            raise LLMConnectionError("timeout")
+
+        monkeypatch.setattr(page.chat_agent, "send_turn", _fail)
+        app.run()
+        app.chat_input(key="invitee_chat_input").set_value("45k").run()
+
+        last = meetings_db.list_messages(meeting.meeting_id, invitee_id)[-1]
+        assert last.is_from_ai()
+        assert last.agenda_tag == RELOCATE
+        assert last.text == f"Thanks, noted: 45000. Next: {RELOCATE} — yes or no."
+
+    def test_a_question_added_after_the_chat_started_is_asked_not_answered(self, tmp_path, monkeypatch):
+        meeting, invitee_id, probe = _setup(tmp_path, monkeypatch)
+        meetings_db.ensure_session(meeting.meeting_id, invitee_id)
+        # The bot was talking about something else when the questions were added.
+        meetings_db.add_message(meeting.meeting_id, invitee_id, SENDER_AI, "How was your week?", "Opening")
+        import app_pages.meeting_invitee as page
+
+        seen = _stub_model(monkeypatch, AnswerReading(value="45000"))
+        monkeypatch.setattr(page.chat_agent, "read_answer", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+        app = _invitee_app(probe, meeting.meeting_id, invitee_id).run()
+        app.chat_input(key="invitee_chat_input").set_value("Busy, thanks.").run()
+        assert not app.exception
+
+        assert meetings_db.load_step_answers(meeting.meeting_id, invitee_id) == {}
+        assert seen["step_tag"] == SALARY
+        assert "added after the conversation started" in seen["step_guidance"]
+
     def test_after_the_last_question_the_invitee_is_told_to_close(self, tmp_path, monkeypatch):
         meeting, invitee_id, app = _started(tmp_path, monkeypatch)
         meetings_db.save_step_answer(
             meeting.meeting_id, invitee_id, StepAnswer(item_ref=SALARY, value="45000", status=STEP_ANSWERED, tries=1)
         )
+        meetings_db.add_message(meeting.meeting_id, invitee_id, SENDER_AI, "Willing to relocate?", RELOCATE)
         seen = _stub_model(monkeypatch, AnswerReading(value="Yes"))
 
         app.run()
