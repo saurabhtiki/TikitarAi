@@ -1002,6 +1002,21 @@ def _render_faq_setup(meeting: Meeting, user_id: int) -> None:
             ):
                 _handle_remove_faq(meeting_id, user_id)
 
+        try:
+            template = loops.to_excel_bytes(faq.template_frame(), "FAQ")
+        except MeetingError as error:
+            st.error(str(error), icon=":material/error:")
+        else:
+            st.download_button(
+                "Download template",
+                data=template,
+                file_name="FAQ template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"meetings_faq_template_{meeting_id}",
+                icon=":material/download:",
+                help="An Excel file with the Question and Answer columns and two sample rows. Fill it in and upload it below.",
+            )
+
         uploaded = st.file_uploader(
             "Upload FAQ",
             type=["csv", "xlsx", "xls"],
@@ -1150,9 +1165,57 @@ def _handle_ref_upload(meeting_id: int, uploaded) -> None:
     st.rerun()
 
 
+def _render_add_invitee(meeting: Meeting, user_id: int, invitees: list[dict]) -> None:
+    """Adds someone the organiser forgot at creation (phase 55)."""
+    meeting_id = meeting.meeting_id
+    with st.expander("Add invitee", icon=":material/person_add:", expanded=not invitees):
+        with st.form(f"meetings_add_invitee_form_{meeting_id}", clear_on_submit=True, border=False):
+            name_column, email_column = st.columns(2)
+            name = name_column.text_input(
+                "Name",
+                key=f"meetings_add_invitee_name_{meeting_id}",
+                help="Optional. Left blank, the saved contact's name (or the email) is used.",
+            )
+            email = email_column.text_input(
+                "Email",
+                key=f"meetings_add_invitee_email_{meeting_id}",
+                help="Required, e.g. raj@x.com. Their link and access code appear in the Share tab.",
+            )
+            submitted = st.form_submit_button(
+                "Add invitee",
+                key=f"meetings_add_invitee_submit_{meeting_id}",
+                icon=":material/person_add:",
+                help="Makes a new link and access code for this person.",
+            )
+        if submitted:
+            _handle_add_invitee(meeting_id, user_id, name, email, invitees)
+
+
+def _handle_add_invitee(meeting_id: int, user_id: int, name: str, email: str, invitees: list[dict]) -> None:
+    email = email.strip()
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        st.warning("Enter a valid email, e.g. raj@x.com.", icon=":material/error:")
+        return
+    if any(str(invitee["email"]).casefold() == email.casefold() for invitee in invitees):
+        st.warning(f"{email} is already invited.", icon=":material/error:")
+        return
+
+    try:
+        name = name.strip() or str((db.find_contact(email) or {}).get("name") or "").strip() or email
+        db.add_invitee(meeting_id, user_id, name, email, access.generate_token(), access.encrypt_code(access.generate_access_code()))
+        db.remember_contact(email, name, user_id)
+    except MeetingError as error:
+        logger.exception("Could not add invitee %s to meeting %s.", email, meeting_id)
+        st.error(str(error), icon=":material/error:")
+        return
+    session.flash(f"Added {name}. Their link and access code are in the Share tab.")
+    st.rerun()
+
+
 def _render_invitee_status(
     meeting: Meeting, user_id: int, invitees: list[dict], fields: list[EvaluationField]
 ) -> None:
+    _render_add_invitee(meeting, user_id, invitees)
     if not invitees:
         st.info("This meeting has no invitees.", icon=":material/info:")
         return

@@ -36,6 +36,17 @@ def guess_columns(columns: list[str]) -> tuple[str, str]:
     return question, answer
 
 
+def template_frame() -> pd.DataFrame:
+    """A sample FAQ sheet for the organiser to fill in and upload back (phase 55)."""
+    return pd.DataFrame(
+        [
+            {QUESTION_COLUMN: "What is the notice period?", ANSWER_COLUMN: "60 days."},
+            {QUESTION_COLUMN: "Is parking free?", ANSWER_COLUMN: "Yes, for all staff."},
+        ],
+        columns=[QUESTION_COLUMN, ANSWER_COLUMN],
+    )
+
+
 def entries_from_frame(frame: pd.DataFrame, question_column: str, answer_column: str) -> list[FaqEntry]:
     """The uploaded sheet as FAQ entries. Rows missing a question or an answer are dropped.
 
