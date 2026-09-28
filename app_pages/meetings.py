@@ -13,6 +13,7 @@ it has to exist first either way.
 
 import logging
 import os
+from urllib.parse import urlsplit
 
 import pandas as pd
 import streamlit as st
@@ -46,10 +47,10 @@ from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
-# Where an invitee link points. An env var rather than `st.secrets`, which raises outright
-# when no secrets file exists — and a missing base URL should give a working local link, not
-# take the page down.
-BASE_URL = os.environ.get("TIKITARAI_BASE_URL", "http://localhost:8501").rstrip("/")
+# Where an invitee link points when nothing better is known: no setting, and no browser
+# address (a test run with no browser behind it).
+FALLBACK_BASE_URL = "http://localhost:8501"
+BASE_URL_SETTING = "TIKITARAI_BASE_URL"
 
 AGENDA_ROWS_KEY = "meetings_agenda_rows"
 INVITEE_ROWS_KEY = "meetings_invitee_rows"
@@ -928,7 +929,37 @@ def _render_table_comparisons(meeting: Meeting, invitees: list[dict]) -> None:
         )
 
 
+def _invite_base_url() -> str:
+    """The web address an invitee link starts with.
+
+    A `TIKITARAI_BASE_URL` setting (Streamlit secrets, then environment) wins, for a host
+    behind a proxy or a sub-path. Otherwise the address the organiser has open right now —
+    on Streamlit Cloud that is `https://yourapp.streamlit.app`, so the link works wherever
+    the app is hosted without anyone configuring it. Only the scheme and host are kept: the
+    organiser is on the Meetings page, but the invitee lands on the app's front door.
+    """
+    try:
+        configured = str(st.secrets.get(BASE_URL_SETTING) or "").strip()
+    except Exception as error:  # no secrets file at all raises rather than returning None
+        logger.debug("Could not read %s from Streamlit secrets: %s", BASE_URL_SETTING, error)
+        configured = ""
+    configured = configured or os.environ.get(BASE_URL_SETTING, "").strip()
+    if configured:
+        return configured.rstrip("/")
+
+    try:
+        browser_url = st.context.url or ""
+    except Exception as error:  # no script-run context, e.g. called outside a page run
+        logger.warning("Could not read the browser address for invitee links: %s", error)
+        browser_url = ""
+    parts = urlsplit(browser_url)
+    if parts.scheme and parts.netloc:
+        return f"{parts.scheme}://{parts.netloc}"
+    return FALLBACK_BASE_URL
+
+
 def _render_share(meeting: Meeting, invitees: list[dict]) -> None:
+    base_url = _invite_base_url()
     st.info(
         "Copy each invitee's link and access code and send them yourself — this app doesn't "
         "send email.",
@@ -938,7 +969,7 @@ def _render_share(meeting: Meeting, invitees: list[dict]) -> None:
         with st.container(border=True):
             st.markdown(f"**{invitee['name']}** — {invitee['email']}")
             st.caption("Link")
-            st.code(f"{BASE_URL}/?m={meeting.meeting_id}&t={invitee['token']}", language=None)
+            st.code(f"{base_url}/?m={meeting.meeting_id}&t={invitee['token']}", language=None)
             st.caption("Access code")
             try:
                 st.code(access.decrypt_code(invitee["access_code_enc"]), language=None)

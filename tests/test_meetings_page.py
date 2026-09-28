@@ -8,6 +8,7 @@ means an invitee who can never join, with nothing on screen to say so.
 from pathlib import Path
 
 import pytest
+from streamlit.runtime.context import ContextProxy
 from streamlit.testing.v1 import AppTest
 
 from auth.db import init_db, seed_default_admin
@@ -107,6 +108,31 @@ class TestDetail:
 
         assert any(f"m={meeting.meeting_id}" in value and "t=token-abc" in value for value in codes)
         assert "123456" in codes
+
+    def _share_link(self, app, meeting):
+        return next(element.value for element in app.code if f"m={meeting.meeting_id}" in element.value)
+
+    def test_the_link_uses_the_address_the_app_is_open_at(self, tmp_path, monkeypatch):
+        # Hosted on Streamlit Cloud, a localhost link would be dead on arrival for the invitee.
+        monkeypatch.delenv("TIKITARAI_BASE_URL", raising=False)
+        monkeypatch.setattr(ContextProxy, "url", property(lambda self: "https://myapp.streamlit.app/meetings"))
+        app, meeting, _ = self._open(tmp_path, monkeypatch)
+
+        assert self._share_link(app, meeting) == f"https://myapp.streamlit.app/?m={meeting.meeting_id}&t=token-abc"
+
+    def test_a_configured_address_wins_over_the_browser(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TIKITARAI_BASE_URL", "https://tools.example.com/tikitar/")
+        monkeypatch.setattr(ContextProxy, "url", property(lambda self: "https://myapp.streamlit.app/meetings"))
+        app, meeting, _ = self._open(tmp_path, monkeypatch)
+
+        assert self._share_link(app, meeting).startswith("https://tools.example.com/tikitar/?m=")
+
+    def test_with_no_address_known_the_link_is_local(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TIKITARAI_BASE_URL", raising=False)
+        monkeypatch.setattr(ContextProxy, "url", property(lambda self: None))
+        app, meeting, _ = self._open(tmp_path, monkeypatch)
+
+        assert self._share_link(app, meeting).startswith("http://localhost:8501/?m=")
 
     def test_agenda_coverage_counts_what_was_actually_discussed(self, tmp_path, monkeypatch):
         app, meeting, invitee_id = self._open(tmp_path, monkeypatch)
