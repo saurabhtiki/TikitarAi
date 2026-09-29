@@ -47,6 +47,27 @@ def template_frame() -> pd.DataFrame:
     )
 
 
+def frame_from_faq(faq: Faq | None) -> pd.DataFrame:
+    """The FAQ as the organiser's editable table (phase 56); empty but with both columns if none."""
+    rows = [{QUESTION_COLUMN: entry.question, ANSWER_COLUMN: entry.answer} for entry in (faq.entries if faq else [])]
+    return pd.DataFrame(rows, columns=[QUESTION_COLUMN, ANSWER_COLUMN])
+
+
+def frame_from_upload(frame: pd.DataFrame) -> pd.DataFrame:
+    """An uploaded sheet reduced to the table's two columns, picked by name (else the first two).
+
+    Raises:
+        MeetingStorageError: if the sheet has fewer than two columns.
+    """
+    if len(frame.columns) < 2:
+        raise MeetingStorageError("The file needs two columns: Question and Answer.")
+    question_column, answer_column = guess_columns(list(frame.columns))
+    by_name = {str(column): column for column in frame.columns}
+    picked = frame[[by_name[question_column], by_name[answer_column]]].copy()
+    picked.columns = [QUESTION_COLUMN, ANSWER_COLUMN]
+    return picked.fillna("").astype(str).reset_index(drop=True)
+
+
 def entries_from_frame(frame: pd.DataFrame, question_column: str, answer_column: str) -> list[FaqEntry]:
     """The uploaded sheet as FAQ entries. Rows missing a question or an answer are dropped.
 
@@ -60,7 +81,9 @@ def entries_from_frame(frame: pd.DataFrame, question_column: str, answer_column:
 
     entries = []
     for question, answer in zip(frame[question_column], frame[answer_column]):
-        question, answer = str(question).strip(), str(answer).strip()
+        # A row added in the table and left blank comes back as None/NaN, not "".
+        question = "" if pd.isna(question) else str(question).strip()
+        answer = "" if pd.isna(answer) else str(answer).strip()
         if question and answer:
             entries.append(FaqEntry(question=question, answer=answer))
 

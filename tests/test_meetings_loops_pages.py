@@ -216,7 +216,8 @@ class TestOrganiser:
             ("invoices.csv", b"Bill No,Customer\n2001,ABC Traders\n2002,XYZ Ltd\n", "text/csv")
         )
         app.run()
-        app.selectbox(key=f"meetings_list_match_{meeting.meeting_id}_{INVOICES}").set_value("Customer").run()
+        app.toggle(key=f"meetings_list_own_new_{meeting.meeting_id}_{INVOICES}").set_value(True).run()
+        app.selectbox(key=f"meetings_list_match_new_{meeting.meeting_id}_{INVOICES}").set_value("Customer").run()
         app.button(key=f"meetings_list_save_{meeting.meeting_id}_{INVOICES}").click().run()
 
         saved = meetings_db.find_agenda_table(meeting.meeting_id, INVOICES)

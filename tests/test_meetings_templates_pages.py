@@ -122,7 +122,7 @@ class TestDrafting:
         app.button(key="meetings_new_draft").click()
         _keep_open(app)
 
-        assert any("Set a default model" in error.value for error in app.error)
+        assert any("Pick an AI model" in error.value for error in app.error)
 
 
 class TestOverviewFlow:

@@ -9,7 +9,13 @@ Nothing here touches `auth/`. The invitee's unlock lives in its own `invitee_*` 
 keys, so `st.session_state["user_id"]` stays empty and nothing that checks it can mistake
 an invitee for an employee.
 
-The model used is the *creator's* default profile — see `chat_agent`.
+The model used is the one the organiser picked for this meeting, else their default
+(phase 56, `meetings.llm_choice`).
+
+Phase 56 adds a left side panel (1/4 width): how to use the meeting, the agenda, and the
+file attach box. Close chat waits until every question on the invitee's path is done.
+Phase 57 names each table tab and its columns in How to use, and adds each For each list
+(with a done / now column) and the organiser's reference documents to that panel.
 
 Phase 2 adds the tab strip spec 3a asks for: every discussion item shares one **General
 Discussion** tab, and each table item gets its own grid tab. Ten discussion items and two
@@ -22,11 +28,11 @@ import logging
 import streamlit as st
 
 from llm.client import LLMConnectionError
-from llm.session import default_profile
 from meetings import (
     chat_agent,
     db,
     extraction_agent,
+    llm_choice,
     loops,
     running_summary,
     session,
@@ -47,6 +53,7 @@ from meetings.model import (
     Meeting,
     StepAnswer,
 )
+from utils.dates import show_dataframe
 
 logger = logging.getLogger(__name__)
 
@@ -126,10 +133,16 @@ def _render_code_gate(invitee: dict) -> None:
 
 
 def _profile_for(meeting: Meeting) -> dict | None:
-    """The creator's default model. An invitee has no model choice of their own."""
-    if meeting.created_by is None:
-        return None
-    return default_profile(meeting.created_by)
+    """The meeting's model (else the creator's default). An invitee has no model choice."""
+    return llm_choice.meeting_profile(meeting).profile
+
+
+def _note_model(meeting_id: int, invitee_id: int, profile: dict) -> None:
+    """Records which model replied, for the organiser's Status tab. Never costs the reply."""
+    try:
+        db.set_model_used(meeting_id, invitee_id, llm_choice.profile_label(profile))
+    except MeetingError:
+        logger.exception("Could not note the model used for invitee %s.", invitee_id)
 
 
 def _evaluation_fields(meeting_id: int) -> list:
@@ -214,11 +227,30 @@ def _render_chat(meeting: Meeting, invitee: dict) -> None:
         _open_conversation(meeting, profile, meeting_id, invitee_id, fields, answers, lists)
         return
 
+    side, main = st.columns([1, 3])
+    with side:
+        _render_side_panel(meeting, meeting_id, invitee_id, chat_session.closed, answers, lists)
+    with main:
+        _render_main(meeting, profile, invitee, chat_session, messages, fields, answers, lists)
+
+
+def _render_main(
+    meeting: Meeting,
+    profile: dict,
+    invitee: dict,
+    chat_session,
+    messages: list,
+    fields: list,
+    answers: dict[str, StepAnswer],
+    lists: loops.InviteeLists,
+) -> None:
+    """The right 3/4: the chat (and any table tabs), then closing."""
+    meeting_id = invitee["meeting_id"]
+    invitee_id = invitee["invitee_id"]
     table_items = meeting.table_items()
     if table_items:
         # Spec 3a's tab strip: one shared discussion tab, one tab per grid. Built only when
-        # there is a grid, so a meeting without one keeps `st.chat_input` at page level and
-        # pinned to the bottom, exactly as it was before this phase.
+        # there is a grid; a meeting without one shows the chat straight in this column.
         tabs = st.tabs([DISCUSSION_TAB, *[f"📋 {item.item}" for item in table_items]])
         with tabs[0]:
             _render_discussion(meeting, profile, invitee, chat_session, messages, fields, answers, lists)
@@ -234,13 +266,127 @@ def _render_chat(meeting: Meeting, invitee: dict) -> None:
         _render_closed(meeting_id, invitee_id)
         return
 
+    # Phase 56: the questions are the point of the meeting, so they must be done first. Tries
+    # make sure nobody is stuck — running out marks a question Not answered and moves on.
+    left = steps.questions_left(meeting, answers, lists.rows)
+    if left:
+        st.caption(f":red[{left} question(s) left — finish them to close.]")
     if st.button(
         "Close chat",
         key="invitee_close_chat",
         icon=":material/task_alt:",
-        help="Finish and generate your summary. You won't be able to add anything afterwards.",
+        disabled=left > 0,
+        help="Finish and generate your summary. You won't be able to add anything afterwards. "
+        "Available once every question is done.",
     ):
         _handle_close(meeting, profile, meeting_id, invitee_id, fields)
+
+
+def _progress(meeting: Meeting, step: steps.Step, answers: dict[str, StepAnswer], lists: loops.InviteeLists) -> str:
+    """ "Question 2 of 5", or "Outstanding invoices — INV-102: row 2 of 3, question 1 of 3"."""
+    return steps.progress_text(meeting, step, answers, lists.rows, row_label=lists.row_label(step))
+
+
+def _table_sheets(meeting: Meeting, meeting_id: int) -> dict[str, AgendaTable]:
+    """The grids behind the Table items, by title; none if they can't be read."""
+    if not meeting.table_items():
+        return {}
+    try:
+        return {table.item_ref: table for table in db.list_agenda_tables(meeting_id)}
+    except MeetingError:
+        logger.exception("Could not read the tables of meeting %s.", meeting_id)
+        return {}
+
+
+def _how_to_use(meeting: Meeting, sheets: dict[str, AgendaTable], lists: loops.InviteeLists) -> list[str]:
+    """The plain steps in the How to use panel, naming this meeting's own tabs and lists."""
+    lines = ["Type your reply in the box at the bottom of the chat and press Enter."]
+    if meeting.question_items():
+        lines.append(
+            "Some questions are asked one at a time, e.g. 'Question 2 of 5'. If an answer can't be "
+            "accepted you are told why and asked again."
+        )
+    for name in steps.loop_names(meeting):
+        rows = lists.rows.get(steps.loop_key(name), [])
+        if rows:
+            lines.append(
+                f"Questions about each row of **{name}** ({len(rows)} row(s)) are asked in the chat — "
+                "see the list on the left."
+            )
+    lines.append("You can ask your own question at any time, e.g. 'What is the notice period?'.")
+    for item in meeting.table_items():
+        sheet = sheets.get(item.item)
+        if sheet is None:
+            continue
+        columns = ", ".join(sheet.editable_columns)
+        fill = f"fill in **{columns}**" if columns else "check the rows"
+        lines.append(f"Open the tab **📋 {item.item}** and {fill}, then press Save progress.")
+    lines.append("Use Attach a file to share a document with the organiser.")
+    if meeting.question_items():
+        lines.append("When every question is done, press Close chat to get your summary.")
+    else:
+        lines.append("When you are done, press Close chat to get your summary.")
+    lines.append("You can leave and come back later with the same link — nothing is lost.")
+    return lines
+
+
+def _render_side_panel(
+    meeting: Meeting,
+    meeting_id: int,
+    invitee_id: int,
+    closed: bool,
+    answers: dict[str, StepAnswer],
+    lists: loops.InviteeLists,
+) -> None:
+    """The left 1/4: how to use, the agenda, the For each lists, reference documents, attach."""
+    sheets = _table_sheets(meeting, meeting_id)
+    with st.expander("How to use this meeting", icon=":material/help:"):
+        lines = _how_to_use(meeting, sheets, lists)
+        st.markdown("\n".join(f"{number}. {line}" for number, line in enumerate(lines, start=1)))
+    with st.expander("Agenda", icon=":material/list:", expanded=True):
+        if meeting.agenda:
+            st.markdown("\n".join(f"- {item.item}" for item in meeting.agenda))
+        else:
+            st.caption(":red[No agenda items.]")
+    _render_lists(meeting, answers, lists)
+    _render_reference_documents(meeting_id)
+    _render_uploads(meeting_id, invitee_id, closed)
+
+
+def _render_lists(meeting: Meeting, answers: dict[str, StepAnswer], lists: loops.InviteeLists) -> None:
+    """Each For each list as a table, with ✓ done / ▶ now, so the invitee can follow along."""
+    for name in steps.loop_names(meeting):
+        rows = lists.rows.get(steps.loop_key(name), [])
+        if not rows:
+            continue
+        with st.expander(f"{name} ({len(rows)} rows)", icon=":material/table:", expanded=True):
+            show_dataframe(loops.invitee_rows_frame(meeting, name, lists, answers), width="stretch", hide_index=True)
+
+
+def _render_reference_documents(meeting_id: int) -> None:
+    """The organiser's shared documents, read-only; nothing when there are none."""
+    try:
+        files = db.list_files(meeting_id)
+    except MeetingError:
+        logger.exception("Could not list the reference documents of meeting %s.", meeting_id)
+        return
+    if not files:
+        return
+    with st.expander("Reference documents", icon=":material/description:"):
+        for record in files:
+            try:
+                payload = storage.read_file(record["filepath"])
+            except MeetingError:
+                st.caption(f":red[{record['filename']} — not available]")
+                continue
+            st.download_button(
+                record["filename"],
+                data=payload,
+                file_name=record["filename"],
+                key=f"invitee_refdoc_dl_{record['file_id']}",
+                icon=":material/download:",
+                help="A document the organiser shared for this meeting.",
+            )
 
 
 def _render_discussion(
@@ -264,11 +410,9 @@ def _render_discussion(
     if chat_session.closed:
         return
 
-    _render_uploads(meeting_id, invitee_id)
-
     current = steps.next_question(meeting, answers, lists.rows)
     if current is not None:
-        st.caption(f":red[{steps.progress_text(meeting, current, answers, lists.rows)}]")
+        st.caption(f":red[{_progress(meeting, current, answers, lists)}]")
 
     prompt = st.chat_input("Type your reply", key="invitee_chat_input")
     if prompt:
@@ -376,7 +520,7 @@ def _open_conversation(
     if first is not None:
         guidance = chat_agent.question_guidance(
             first.question,
-            steps.progress_text(meeting, first, answers, lists.rows),
+            _progress(meeting, first, answers, lists),
             just_happened="Open with a short welcome in character and say why this conversation is happening.",
             row_context=lists.row_context(first),
         )
@@ -391,6 +535,7 @@ def _open_conversation(
                 faq=_meeting_faq(meeting_id),
             )
         db.add_message(meeting_id, invitee_id, SENDER_AI, opening.reply, opening.agenda_tag)
+        _note_model(meeting_id, invitee_id, profile)
     except (LLMConnectionError, MeetingError) as error:
         logger.exception("Could not open the conversation for invitee %s.", invitee_id)
         st.error(f"We couldn't start the conversation: {error}", icon=":material/error:")
@@ -448,6 +593,7 @@ def _handle_turn(
                 faq=_meeting_faq(meeting_id),
             )
         db.add_message(meeting_id, invitee_id, SENDER_AI, turn.reply, turn.agenda_tag)
+        _note_model(meeting_id, invitee_id, profile)
         _log_unanswered(meeting_id, invitee_id, turn.unanswered_question, turn.agenda_tag)
     except (LLMConnectionError, MeetingError) as error:
         logger.exception("Could not generate a reply for invitee %s.", invitee_id)
@@ -490,7 +636,7 @@ def _advance_question(
         # Asking something is not a wrong answer, so no try is used.
         guidance = chat_agent.question_guidance(
             question,
-            steps.progress_text(meeting, current, answers, lists.rows),
+            _progress(meeting, current, answers, lists),
             just_happened="The invitee asked something instead of answering. Answer it briefly "
             "from your instructions and the FAQ if there is one (say so if you don't know), then "
             "ask the question again.",
@@ -532,7 +678,7 @@ def _advance_question(
     return (
         chat_agent.question_guidance(
             upcoming.question,
-            steps.progress_text(meeting, upcoming, after, lists.rows),
+            _progress(meeting, upcoming, after, lists),
             just_happened=happened,
             row_context=lists.row_context(upcoming),
         ),
@@ -561,7 +707,7 @@ def _was_asked(messages: list, current: steps.Step) -> bool:
 def _ask_new_question(meeting: Meeting, current: steps.Step, answers: dict, lists: loops.InviteeLists) -> str:
     return chat_agent.question_guidance(
         current.question,
-        steps.progress_text(meeting, current, answers, lists.rows),
+        _progress(meeting, current, answers, lists),
         just_happened="Reply briefly to what the invitee just said, then ask this question. It was "
         "added after the conversation started, so their message was not an answer to it.",
         row_context=lists.row_context(current),
@@ -624,15 +770,22 @@ def _extract_evaluations(
         logger.exception("Could not extract evaluation answers for invitee %s.", invitee_id)
 
 
-def _render_uploads(meeting_id: int, invitee_id: int) -> None:
-    with st.expander("Attach a file"):
-        uploaded = st.file_uploader(
-            "Upload",
-            accept_multiple_files=True,
-            key="invitee_upload",
-            help="Stored privately against your own conversation.",
-        )
-        if uploaded and st.button("Save files", key="invitee_upload_save", icon=":material/upload:"):
+def _render_uploads(meeting_id: int, invitee_id: int, closed: bool = False) -> None:
+    with st.expander("Attach a file", icon=":material/attach_file:"):
+        uploaded = None
+        if not closed:
+            uploaded = st.file_uploader(
+                "Upload",
+                accept_multiple_files=True,
+                key="invitee_upload",
+                help="Stored privately against your own conversation.",
+            )
+        if uploaded and st.button(
+            "Save files",
+            key="invitee_upload_save",
+            icon=":material/upload:",
+            help="Keep these files with your conversation for the organiser to see.",
+        ):
             try:
                 for upload in uploaded:
                     path = storage.save_upload(upload.getvalue(), upload.name, meeting_id, invitee_id)

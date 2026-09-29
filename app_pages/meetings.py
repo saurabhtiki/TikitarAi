@@ -20,7 +20,6 @@ import streamlit as st
 
 from auth.db import get_user_by_id
 from auth.exceptions import AuthDatabaseError
-from llm.session import default_profile
 from meetings import (
     access,
     db,
@@ -28,6 +27,8 @@ from meetings import (
     extraction_agent,
     faq,
     flow,
+    listing,
+    llm_choice,
     loops,
     matrix,
     session,
@@ -36,6 +37,7 @@ from meetings import (
     summary_agent,
     tables,
     templates,
+    transcript,
 )
 from meetings.exceptions import MeetingAgentError, MeetingError
 from meetings.model import (
@@ -70,6 +72,7 @@ AGENDA_ROWS_KEY = "meetings_agenda_rows"
 INVITEE_ROWS_KEY = "meetings_invitee_rows"
 EVALUATION_ROWS_KEY = "meetings_evaluation_rows"
 NEW_NOTICE_KEY = "meetings_new_notice"
+NEW_MODEL_KEY = "meetings_new_model"
 BLANK_TEMPLATE = "Blank"
 
 # What the creator picks in the agenda grid, and what it means in the stored agenda.
@@ -79,7 +82,7 @@ TYPE_QUESTION = "Question"
 ITEM_TYPE_BY_LABEL = {TYPE_DISCUSSION: DISCUSSION_ITEM, TYPE_TABLE: TABLE_ITEM, TYPE_QUESTION: QUESTION_ITEM}
 LABEL_BY_ITEM_TYPE = {value: key for key, value in ITEM_TYPE_BY_LABEL.items()}
 SKIPPED_CELL = steps.SKIPPED_CELL
-EVERYONE_ROWS = "(everyone gets every row)"
+ROW_NUMBER_LABEL = "(row number)"
 
 
 def _current_user_id() -> int | None:
@@ -171,9 +174,11 @@ def _apply_template() -> None:
 
 def _draft_from_description(user_id: int) -> None:
     """Button callback: the AI writes agenda rows from the plain-English box (phase 54)."""
-    profile = default_profile(user_id)
+    profile = llm_choice.resolve(
+        llm_choice.owned_profiles(user_id), st.session_state.get(NEW_MODEL_KEY)
+    ).profile
     if profile is None:
-        st.session_state[NEW_NOTICE_KEY] = ("error", "Set a default model in Settings before drafting with AI.")
+        st.session_state[NEW_NOTICE_KEY] = ("error", "Pick an AI model (or set a default in Settings) before drafting with AI.")
         return
     try:
         agenda = drafting_agent.draft_agenda(profile, st.session_state.get("meetings_new_describe", ""))
@@ -194,6 +199,24 @@ def _draft_from_description(user_id: int) -> None:
         st.session_state[NEW_NOTICE_KEY] = ("success", f"Drafted {len(agenda)} row(s). Check them in the grid below.")
 
 
+def _model_picker(profiles: list[dict], current_id: int | None, key: str) -> int | None:
+    """The AI model dropdown (phase 56): every Settings profile, light ones included."""
+    options = [profile["profile_id"] for profile in profiles]
+    labels = {profile["profile_id"]: llm_choice.profile_label(profile) for profile in profiles}
+    if current_id not in labels:
+        fallback = llm_choice.default_of(profiles)
+        current_id = fallback["profile_id"] if fallback else options[0]
+    return st.selectbox(
+        "AI model",
+        options=options,
+        index=options.index(current_id),
+        format_func=lambda profile_id: labels.get(profile_id, str(profile_id)),
+        key=key,
+        help="The model this meeting's chat, summaries and answer checks run on. You can change it later "
+        "in Overview; invitees already chatting get the new model from their next message.",
+    )
+
+
 def _render_new_notice() -> None:
     notice = st.session_state.pop(NEW_NOTICE_KEY, None)
     if notice is None:
@@ -208,6 +231,9 @@ def _render_flow(agenda: list[AgendaItem], expanded: bool = False) -> None:
     dot = flow.flow_dot(agenda)
     if not dot:
         return
+    # Phase 57: the Rule is checked before Go to, so point out a Go to that reaches past it.
+    for warning in steps.agenda_warnings(agenda):
+        st.caption(f":red[Note — {warning}]")
     with st.expander("Flow picture", expanded=expanded):
         st.caption(":red[Arrows show the order. Blue arrows are Go to jumps; a red '?' is a Go to that needs fixing.]")
         st.graphviz_chart(dot, width="stretch")
@@ -317,6 +343,12 @@ def _open_new_meeting_dialog(user_id: int) -> None:
     if chosen in templates.TEMPLATE_BY_NAME:
         st.caption(f":red[{templates.TEMPLATE_BY_NAME[chosen].description}]")
 
+    profiles = llm_choice.owned_profiles(user_id)
+    if profiles:
+        _model_picker(profiles, st.session_state.get(NEW_MODEL_KEY), NEW_MODEL_KEY)
+    else:
+        st.caption(":red[No AI model yet — add one in Settings before invitees can chat.]")
+
     with st.expander("Describe it in plain English"):
         st.text_area(
             "What should the bot ask?",
@@ -331,7 +363,7 @@ def _open_new_meeting_dialog(user_id: int) -> None:
             icon=":material/auto_awesome:",
             on_click=_draft_from_description,
             args=(user_id,),
-            help="Replaces the agenda grid with rows drafted from your description. Uses your default model.",
+            help="Replaces the agenda grid with rows drafted from your description. Uses the AI model picked above.",
         )
     _render_new_notice()
 
@@ -397,6 +429,7 @@ def _open_new_meeting_dialog(user_id: int) -> None:
             evaluation_frame,
             invitee_frame,
             save_default,
+            st.session_state.get(NEW_MODEL_KEY),
         )
 
 
@@ -500,6 +533,7 @@ def _handle_create_meeting(
     evaluation_frame: pd.DataFrame,
     invitee_frame: pd.DataFrame,
     save_default: bool,
+    profile_id: int | None = None,
 ) -> None:
     agenda = _agenda_from_frame(agenda_frame)
     fields = _evaluation_from_frame(evaluation_frame, [])
@@ -522,6 +556,7 @@ def _handle_create_meeting(
         persona=persona,
         context_sop=context_sop,
         agenda=agenda,
+        profile_id=profile_id,
     )
 
     try:
@@ -542,6 +577,7 @@ def _handle_create_meeting(
         return
 
     _clear_creation_rows()
+    st.session_state.pop(NEW_MODEL_KEY, None)
     session.open_meeting(saved.meeting_id)
     if saved.table_items() or steps.loop_names(saved):
         # Said now rather than left to be discovered: an invitee who opens their link before
@@ -578,13 +614,36 @@ def _render_list(user_id: int) -> None:
         st.info("You haven't created any meetings yet.", icon=":material/info:")
         return
 
-    for row in rows:
+    search_column, status_column = st.columns([3, 1])
+    with search_column:
+        query = st.text_input(
+            "Find a meeting",
+            key="meetings_search",
+            placeholder="Type part of a meeting's subject",
+            help="Filters the list below by subject. Leave it empty to see every meeting.",
+        )
+    with status_column:
+        status = st.selectbox(
+            "Status",
+            options=listing.STATUS_OPTIONS,
+            key="meetings_status_filter",
+            help="Waiting on invitees: someone hasn't finished. All finished: every invitee closed their chat.",
+        )
+
+    matches = listing.filter_meetings(rows, query, status)
+    if not matches:
+        st.caption(":red[No meeting matches this search.]")
+        return
+    if len(matches) < len(rows):
+        st.caption(f":red[Showing {len(matches)} of {len(rows)} meeting(s).]")
+
+    for row in matches:
         with st.container(border=True):
             left, right = st.columns([4, 1], vertical_alignment="center")
             with left:
                 st.markdown(f"**{row['subject']}**")
                 st.caption(
-                    f"Created {row['created_at']} · "
+                    f"Created {listing.created_on(row['created_at'])} · "
                     f"{row['closed_count']} of {row['invitee_count']} invitee(s) finished"
                 )
             with right:
@@ -603,7 +662,46 @@ def _render_list(user_id: int) -> None:
 # --------------------------------------------------------------------------------------
 
 
+def _render_model_setup(meeting: Meeting, user_id: int) -> None:
+    """The meeting's AI model (phase 56): shown, changeable at any time, and a warning if deleted."""
+    profiles = llm_choice.owned_profiles(user_id)
+    if not profiles:
+        st.caption(":red[No AI model yet — add one in Settings before invitees can chat.]")
+        return
+    choice = llm_choice.resolve(profiles, meeting.profile_id)
+    if choice.fell_back:
+        using = llm_choice.profile_label(choice.profile) if choice.profile else "none — set a default in Settings"
+        st.caption(f":red[The chosen AI model was deleted in Settings — using the default ({using}).]")
+
+    left, right = st.columns([3, 1], vertical_alignment="bottom")
+    with left:
+        current = choice.profile["profile_id"] if choice.profile else None
+        picked = _model_picker(profiles, current, f"meetings_model_{meeting.meeting_id}")
+    with right:
+        if st.button(
+            "Save model",
+            key=f"meetings_model_save_{meeting.meeting_id}",
+            icon=":material/save:",
+            disabled=picked == meeting.profile_id,
+            help="Invitees get the new model from their next message.",
+        ):
+            _handle_save_model(meeting, user_id, picked)
+
+
+def _handle_save_model(meeting: Meeting, user_id: int, profile_id: int) -> None:
+    try:
+        db.set_meeting_profile(meeting.meeting_id, user_id, profile_id)
+    except MeetingError as error:
+        logger.exception("Could not save the model for meeting %s.", meeting.meeting_id)
+        st.error(str(error), icon=":material/error:")
+        return
+    session.flash("AI model saved.")
+    st.rerun()
+
+
 def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationField]) -> None:
+    _render_model_setup(meeting, user_id)
+
     st.markdown("**Meeting context**")
     st.write(meeting.meeting_context or "_None given._")
 
@@ -845,9 +943,10 @@ def _handle_remove_table(meeting_id: int, user_id: int, item_ref: str) -> None:
 
 
 def _render_list_setup(meeting: Meeting, user_id: int, name: str) -> None:
-    """Uploading the list a For each runs over, and choosing whose rows are whose (phase 52).
+    """Uploading the list a For each runs over (phase 52), its row name, and who gets which rows.
 
-    Opened by default while no list is attached: until there is, its questions are skipped.
+    Every invitee gets every row unless the Advanced filter is on (phase 57). Opened by
+    default while no list is attached: until there is, its questions are skipped.
     """
     try:
         attached = db.find_agenda_table(meeting.meeting_id, name)
@@ -857,29 +956,18 @@ def _render_list_setup(meeting: Meeting, user_id: int, name: str) -> None:
         return
 
     questions = ", ".join(item.item for item in steps.loop_questions(meeting, name))
+    key = f"{meeting.meeting_id}_{name}"
     with st.expander(f"List — {name}", expanded=attached is None):
         st.caption(f":red[Asked for every row: {questions}.]")
         if attached is None:
             st.caption(":red[No list attached yet — these questions are skipped until you upload one.]")
         else:
-            match = attached.match_column or "none — everyone gets every row"
-            st.caption(
-                f":red[{attached.source_file or 'Uploaded list'} · {attached.row_count()} row(s) · "
-                f"match column: {match}]"
-            )
-            if st.button(
-                "Remove this list",
-                key=f"meetings_list_remove_{meeting.meeting_id}_{name}",
-                icon=":material/delete:",
-                help="Deletes the list and every answer given about its rows.",
-            ):
-                _handle_remove_list(meeting, user_id, name)
-            st.caption(":red[Uploading another list replaces this one and clears every answer given to it.]")
+            _render_attached_list(meeting, user_id, name, attached, key)
 
         uploaded = st.file_uploader(
             "Upload the list",
             type=["csv", "xlsx", "xls"],
-            key=f"meetings_list_upload_{meeting.meeting_id}_{name}",
+            key=f"meetings_list_upload_{key}",
             help="One row per thing to ask about, e.g. one row per outstanding invoice.",
         )
         if uploaded is None:
@@ -892,28 +980,93 @@ def _render_list_setup(meeting: Meeting, user_id: int, name: str) -> None:
             return
 
         show_dataframe(frame.head(5), width="stretch", hide_index=True)
-
-        options = [EVERYONE_ROWS, *frame.columns]
-        current = attached.match_column if attached is not None and attached.match_column in frame.columns else EVERYONE_ROWS
-        match_column = st.selectbox(
-            "Match column",
-            options=options,
-            index=options.index(current),
-            key=f"meetings_list_match_{meeting.meeting_id}_{name}",
-            help="Optional. Each invitee gets only the rows whose value in this column is their "
-            "name or email, e.g. a Customer column. Leave it on 'everyone' to ask everyone every row.",
+        columns = [str(column) for column in frame.columns]
+        label_column, match_column = _list_settings_inputs(
+            columns,
+            attached.label_column if attached is not None else (columns[0] if columns else ""),
+            attached.match_column if attached is not None else "",
+            f"new_{key}",
         )
-
         if st.button(
             "Attach list",
-            key=f"meetings_list_save_{meeting.meeting_id}_{name}",
+            key=f"meetings_list_save_{key}",
             icon=":material/list:",
             type="primary",
             help="Saves this list; its questions are then asked once per row.",
         ):
-            _handle_attach_list(
-                meeting, user_id, name, uploaded.name, frame, "" if match_column == EVERYONE_ROWS else match_column
-            )
+            _handle_attach_list(meeting, user_id, name, uploaded.name, frame, label_column, match_column)
+
+
+def _render_attached_list(meeting: Meeting, user_id: int, name: str, attached: AgendaTable, key: str) -> None:
+    """What is attached, a warning for invitees who get no rows, and its settings."""
+    who = (
+        f"only rows matching the invitee in {attached.match_column}"
+        if attached.match_column
+        else "every invitee gets every row"
+    )
+    st.caption(
+        f":red[{attached.source_file or 'Uploaded list'} · {attached.row_count()} row(s) · "
+        f"row name: {attached.label_column or 'row number'} · {who}]"
+    )
+    try:
+        invitees = db.list_invitees(meeting.meeting_id, user_id)
+    except MeetingError:
+        logger.exception("Could not read the invitees of meeting %s.", meeting.meeting_id)
+        invitees = []
+    for invitee in loops.zero_row_invitees(attached, invitees):
+        st.caption(
+            f":red[{invitee['name']} ({invitee['email']}) gets 0 rows — these questions are skipped for them.]"
+        )
+
+    label_column, match_column = _list_settings_inputs(
+        attached.all_columns(), attached.label_column, attached.match_column, f"saved_{key}"
+    )
+    if st.button(
+        "Save list settings",
+        key=f"meetings_list_settings_{key}",
+        icon=":material/save:",
+        help="Changes the row name and the Advanced filter. Answers already given are kept.",
+    ):
+        _handle_list_settings(meeting, user_id, name, label_column, match_column)
+    if st.button(
+        "Remove this list",
+        key=f"meetings_list_remove_{key}",
+        icon=":material/delete:",
+        help="Deletes the list and every answer given about its rows.",
+    ):
+        _handle_remove_list(meeting, user_id, name)
+    st.caption(":red[Uploading another list replaces this one and clears every answer given to it.]")
+
+
+def _list_settings_inputs(columns: list[str], label_current: str, match_current: str, key: str) -> tuple[str, str]:
+    """The Row name picker and the Advanced filter; returns (row name column, match column)."""
+    label_options = [ROW_NUMBER_LABEL, *columns]
+    label = st.selectbox(
+        "Row name column",
+        options=label_options,
+        index=label_options.index(label_current) if label_current in columns else 0,
+        key=f"meetings_list_label_{key}",
+        help="The column that names each row, e.g. Invoice No or Task ID. The chat then says "
+        "'INV-102' instead of 'row 2'.",
+    )
+    own_rows = st.toggle(
+        "Advanced: only give each invitee their own rows",
+        value=bool(match_current and match_current in columns),
+        key=f"meetings_list_own_{key}",
+        help="Off (usual): every invitee sees the whole list and is asked about every row. "
+        "On: each invitee gets only the rows whose value in the column below is their name or email.",
+    )
+    match = ""
+    if own_rows and columns:
+        match = st.selectbox(
+            "Column holding the invitee's name or email",
+            options=columns,
+            index=columns.index(match_current) if match_current in columns else 0,
+            key=f"meetings_list_match_{key}",
+            help="e.g. a Customer email column. Rows whose value here is not an invitee's name or "
+            "email are asked to nobody.",
+        )
+    return ("" if label == ROW_NUMBER_LABEL else label), match
 
 
 def _list_answer_prefixes(meeting: Meeting, name: str) -> list[str]:
@@ -921,7 +1074,13 @@ def _list_answer_prefixes(meeting: Meeting, name: str) -> list[str]:
 
 
 def _handle_attach_list(
-    meeting: Meeting, user_id: int, name: str, filename: str, frame: pd.DataFrame, match_column: str
+    meeting: Meeting,
+    user_id: int,
+    name: str,
+    filename: str,
+    frame: pd.DataFrame,
+    label_column: str,
+    match_column: str,
 ) -> None:
     table = AgendaTable(
         meeting_id=meeting.meeting_id,
@@ -930,6 +1089,7 @@ def _handle_attach_list(
         locked_columns=list(frame.columns),
         base_data=tables.base_data_from_frame(frame),
         match_column=match_column,
+        label_column=label_column,
     )
     try:
         db.save_agenda_table(meeting.meeting_id, user_id, table)
@@ -941,6 +1101,18 @@ def _handle_attach_list(
         return
 
     session.flash(f"List attached to '{name}' ({len(frame)} row(s)).")
+    st.rerun()
+
+
+def _handle_list_settings(meeting: Meeting, user_id: int, name: str, label_column: str, match_column: str) -> None:
+    try:
+        db.update_list_settings(meeting.meeting_id, user_id, name, label_column, match_column)
+    except MeetingError as error:
+        logger.exception("Could not save the settings of the list '%s'.", name)
+        st.error(str(error), icon=":material/error:")
+        return
+
+    session.flash(f"List settings saved for '{name}'.")
     st.rerun()
 
 
@@ -986,90 +1158,118 @@ def _render_faq_setup(meeting: Meeting, user_id: int) -> None:
             st.caption(":red[No FAQ yet — the bot answers side questions from the Context / SOP only.]")
         else:
             st.caption(f":red[{current.source_file or 'FAQ'} · {len(current.entries)} question(s)]")
-            show_dataframe(
-                pd.DataFrame(
-                    [{faq.QUESTION_COLUMN: entry.question, faq.ANSWER_COLUMN: entry.answer} for entry in current.entries]
-                ),
-                width="stretch",
-                height=200,
-                hide_index=True,
-            )
-            if st.button(
-                "Remove FAQ",
-                key=f"meetings_faq_remove_{meeting_id}",
-                icon=":material/delete:",
-                help="Deletes the FAQ. The bot then says it doesn't know instead of answering from it.",
-            ):
-                _handle_remove_faq(meeting_id, user_id)
 
-        try:
-            template = loops.to_excel_bytes(faq.template_frame(), "FAQ")
-        except MeetingError as error:
-            st.error(str(error), icon=":material/error:")
-        else:
-            st.download_button(
-                "Download template",
-                data=template,
-                file_name="FAQ template.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key=f"meetings_faq_template_{meeting_id}",
-                icon=":material/download:",
-                help="An Excel file with the Question and Answer columns and two sample rows. Fill it in and upload it below.",
+        template_column, upload_column = st.columns(2, vertical_alignment="bottom")
+        with template_column:
+            try:
+                template = loops.to_excel_bytes(faq.template_frame(), "FAQ")
+            except MeetingError as error:
+                st.error(str(error), icon=":material/error:")
+            else:
+                st.download_button(
+                    "Download template",
+                    data=template,
+                    file_name="FAQ template.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"meetings_faq_template_{meeting_id}",
+                    icon=":material/download:",
+                    help="An Excel file with the Question and Answer columns and two sample rows. Fill it in and upload it.",
+                )
+        with upload_column:
+            uploaded = st.file_uploader(
+                "Upload FAQ",
+                type=["csv", "xlsx", "xls"],
+                key=f"meetings_faq_upload_{meeting_id}",
+                help="An Excel or CSV with a Question column and an Answer column. It replaces the table "
+                "below; press Save FAQ to keep it.",
             )
-
-        uploaded = st.file_uploader(
-            "Upload FAQ",
-            type=["csv", "xlsx", "xls"],
-            key=f"meetings_faq_upload_{meeting_id}",
-            help="An Excel or CSV with a Question column and an Answer column. Replaces the current FAQ.",
-        )
         if uploaded is not None:
-            _render_faq_upload(meeting_id, user_id, uploaded)
+            _take_faq_upload(meeting_id, uploaded)
+
+        start_frame = st.session_state.get(_faq_rows_key(meeting_id))
+        if start_frame is None:
+            start_frame = faq.frame_from_faq(current)
+        edited = st.data_editor(
+            start_frame,
+            num_rows="dynamic",
+            width="stretch",
+            hide_index=True,
+            key=_faq_table_key(meeting_id),
+            column_config={
+                faq.QUESTION_COLUMN: st.column_config.TextColumn(
+                    faq.QUESTION_COLUMN, help="A question invitees might ask, e.g. 'What is the notice period?'"
+                ),
+                faq.ANSWER_COLUMN: st.column_config.TextColumn(
+                    faq.ANSWER_COLUMN, help="The only answer the bot may give to it, e.g. '60 days.'"
+                ),
+            },
+        )
+        if st.button(
+            "Save FAQ",
+            key=f"meetings_faq_save_{meeting_id}",
+            icon=":material/quiz:",
+            type="primary",
+            help=f"Saves the table (max {faq.MAX_FAQ_ENTRIES} rows); the bot uses it from the invitee's next "
+            "message. Saving an empty table removes the FAQ.",
+        ):
+            _handle_save_faq(meeting_id, user_id, current, edited)
 
         _render_faq_misses(meeting_id, user_id, current, misses)
 
 
-def _render_faq_upload(meeting_id: int, user_id: int, uploaded) -> None:
+def _faq_rows_key(meeting_id: int) -> str:
+    """Where an uploaded FAQ waits in the table until Save FAQ."""
+    return f"meetings_faq_rows_{meeting_id}"
+
+
+def _faq_table_key(meeting_id: int) -> str:
+    return f"meetings_faq_table_{meeting_id}"
+
+
+def _take_faq_upload(meeting_id: int, uploaded) -> None:
+    """Puts a newly uploaded FAQ into the table, replacing what it showed. Once per file."""
+    seen_key = f"meetings_faq_upload_seen_{meeting_id}"
+    if st.session_state.get(seen_key) == uploaded.file_id:
+        return
     try:
-        frame = tables.read_source(uploaded.getvalue(), uploaded.name)
+        frame = faq.frame_from_upload(tables.read_source(uploaded.getvalue(), uploaded.name))
     except MeetingError as error:
+        logger.warning("Could not read the FAQ upload %s: %s", uploaded.name, error)
+        st.error(str(error), icon=":material/error:")
+        return
+    st.session_state[seen_key] = uploaded.file_id
+    st.session_state[_faq_rows_key(meeting_id)] = frame
+    st.session_state[f"meetings_faq_source_{meeting_id}"] = uploaded.name
+    # The table's edits are by row position and belong to what it showed before.
+    st.session_state.pop(_faq_table_key(meeting_id), None)
+
+
+def _handle_save_faq(meeting_id: int, user_id: int, current: Faq | None, edited: pd.DataFrame) -> None:
+    has_rows = any(
+        str(question or "").strip() and str(answer or "").strip()
+        for question, answer in zip(edited[faq.QUESTION_COLUMN].fillna(""), edited[faq.ANSWER_COLUMN].fillna(""))
+    )
+    source = st.session_state.get(f"meetings_faq_source_{meeting_id}") or (
+        current.source_file if current is not None else "Added by hand"
+    )
+    try:
+        if has_rows:
+            entries = faq.entries_from_frame(edited, faq.QUESTION_COLUMN, faq.ANSWER_COLUMN)
+            db.save_faq(meeting_id, user_id, Faq(source_file=source, entries=entries))
+        elif current is not None:
+            db.delete_faq(meeting_id, user_id)
+        else:
+            st.warning("Type at least one question and its answer first.", icon=":material/warning:")
+            return
+    except MeetingError as error:
+        logger.exception("Could not save the FAQ for meeting %s.", meeting_id)
         st.error(str(error), icon=":material/error:")
         return
 
-    columns = list(frame.columns)
-    question_guess, answer_guess = faq.guess_columns(columns)
-    question_column = st.selectbox(
-        "Question column",
-        options=columns,
-        index=columns.index(question_guess),
-        key=f"meetings_faq_question_col_{meeting_id}",
-        help="The column holding the questions invitees might ask.",
-    )
-    answer_column = st.selectbox(
-        "Answer column",
-        options=columns,
-        index=columns.index(answer_guess) if answer_guess in columns else 0,
-        key=f"meetings_faq_answer_col_{meeting_id}",
-        help="The column holding the answer the bot should give.",
-    )
-    show_dataframe(frame[list(dict.fromkeys([question_column, answer_column]))].head(5), width="stretch", hide_index=True)
-
-    if st.button(
-        "Save FAQ",
-        key=f"meetings_faq_save_{meeting_id}",
-        icon=":material/quiz:",
-        type="primary",
-        help="Saves this FAQ; the bot uses it from the invitee's next message.",
-    ):
-        try:
-            entries = faq.entries_from_frame(frame, question_column, answer_column)
-            db.save_faq(meeting_id, user_id, Faq(source_file=uploaded.name, entries=entries))
-        except MeetingError as error:
-            logger.exception("Could not save the FAQ for meeting %s.", meeting_id)
-            st.error(str(error), icon=":material/error:")
-            return
-        session.flash(f"FAQ saved ({len(entries)} question(s)).")
-        st.rerun()
+    for key in (_faq_rows_key(meeting_id), _faq_table_key(meeting_id), f"meetings_faq_source_{meeting_id}"):
+        st.session_state.pop(key, None)
+    session.flash(f"FAQ saved ({len(entries)} question(s))." if has_rows else "FAQ removed.")
+    st.rerun()
 
 
 def _render_faq_misses(meeting_id: int, user_id: int, current: Faq | None, misses: list) -> None:
@@ -1137,18 +1337,9 @@ def _handle_add_to_faq(meeting_id: int, user_id: int, current: Faq | None, misse
     # The grid's edits are by row position; the list is now shorter, so they would land on
     # the wrong questions.
     st.session_state.pop(f"meetings_faq_misses_{meeting_id}", None)
+    st.session_state.pop(_faq_rows_key(meeting_id), None)
+    st.session_state.pop(_faq_table_key(meeting_id), None)
     session.flash(f"Added {len(new_entries)} answer(s) to the FAQ.")
-    st.rerun()
-
-
-def _handle_remove_faq(meeting_id: int, user_id: int) -> None:
-    try:
-        db.delete_faq(meeting_id, user_id)
-    except MeetingError as error:
-        logger.exception("Could not remove the FAQ for meeting %s.", meeting_id)
-        st.error(str(error), icon=":material/error:")
-        return
-    session.flash("FAQ removed.")
     st.rerun()
 
 
@@ -1247,9 +1438,10 @@ def _render_invitee_status(
 
             covered = summary_agent.coverage(messages, meeting)
             st.markdown(f"**{invitee['name']}** — {invitee['email']}")
+            model_used = f" · model: {invitee['model_used']}" if invitee.get("model_used") else ""
             st.caption(
                 f"{status} · last active {invitee['last_active_at'] or '—'} · "
-                f"{len(covered)} of {discussion_count} agenda item(s) covered"
+                f"{len(covered)} of {discussion_count} agenda item(s) covered{model_used}"
             )
 
             # Spec 3a tracks a table item by rows filled, so it gets its own line rather
@@ -1279,6 +1471,8 @@ def _render_invitee_status(
             if unanswered:
                 st.caption(f":red[{unanswered} question(s) the bot couldn't answer]")
 
+            _render_invitee_files(meeting.meeting_id, invitee["invitee_id"])
+
             if not closed and joined:
                 if st.button(
                     "Generate status",
@@ -1301,6 +1495,38 @@ def _render_invitee_status(
             if snapshot is not None and not closed:
                 with st.expander(f"Live status — generated {invitee['live_status_at']}"):
                     _render_summary(snapshot)
+
+
+def _render_invitee_files(meeting_id: int, invitee_id: int) -> None:
+    """The files this invitee attached, each with a download button (phase 57).
+
+    The meeting was already opened through `load_meeting`, which proves it is this
+    organiser's, so reading its invitees' uploads here is allowed.
+    """
+    try:
+        files = db.list_files(meeting_id, invitee_id)
+    except MeetingError:
+        logger.exception("Could not list the files of invitee %s.", invitee_id)
+        st.caption(":red[Their files couldn't be read.]")
+        return
+    if not files:
+        return
+
+    st.markdown(f"**Files ({len(files)})**")
+    for record in files:
+        try:
+            payload = storage.read_file(record["filepath"])
+        except MeetingError:
+            st.caption(f":red[{record['filename']} — no longer on disk]")
+            continue
+        st.download_button(
+            record["filename"],
+            data=payload,
+            file_name=record["filename"],
+            key=f"meetings_invitee_file_dl_{record['file_id']}",
+            icon=":material/download:",
+            help="Download the file this invitee attached.",
+        )
 
 
 def _all_step_answers(meeting: Meeting, user_id: int) -> dict:
@@ -1348,9 +1574,9 @@ def _handle_generate_status(
     conversation — "where has this invitee got to". The extraction failing is reported but
     does not discard the status that was already generated.
     """
-    profile = default_profile(user_id)
+    profile = llm_choice.meeting_profile(meeting).profile
     if profile is None:
-        st.error("Set a default model in Settings before generating a summary.", icon=":material/error:")
+        st.error("Pick an AI model in Overview (or set a default in Settings) before generating a summary.", icon=":material/error:")
         return
 
     try:
@@ -1380,9 +1606,9 @@ def _handle_extract(
     meeting: Meeting, user_id: int, invitee_id: int, messages: list, fields: list[EvaluationField]
 ) -> None:
     """Re-reads a finished chat's evaluation answers, leaving its locked MoM alone."""
-    profile = default_profile(user_id)
+    profile = llm_choice.meeting_profile(meeting).profile
     if profile is None:
-        st.error("Set a default model in Settings before extracting answers.", icon=":material/error:")
+        st.error("Pick an AI model in Overview (or set a default in Settings) before extracting answers.", icon=":material/error:")
         return
 
     try:
@@ -1410,6 +1636,83 @@ def _render_transcript(messages: list) -> None:
     for message in messages:
         with st.chat_message("assistant" if message.is_from_ai() else "user"):
             st.write(message.text)
+
+
+def _render_chat_tab(meeting: Meeting, user_id: int, invitees: list[dict]) -> None:
+    """One invitee's chat, with Download chat (.txt) and Download all chats (Excel) (phase 57)."""
+    chosen = _pick_invitee(invitees, "meetings_chat_pick")
+    if chosen is None:
+        st.info("This meeting has no invitees.", icon=":material/info:")
+        return
+    try:
+        messages = db.list_messages_for_creator(meeting.meeting_id, chosen["invitee_id"], user_id)
+    except MeetingError as error:
+        st.error(str(error), icon=":material/error:")
+        return
+
+    subject = meeting.display_subject()
+    left, right = st.columns(2)
+    with left:
+        st.download_button(
+            "Download chat",
+            data=transcript.chat_text(subject, chosen["name"], messages),
+            file_name=f"{subject} - {chosen['name']} - chat.txt",
+            mime="text/plain",
+            key="meetings_chat_download",
+            icon=":material/download:",
+            disabled=not messages,
+            help="This invitee's chat as a text file.",
+        )
+    with right:
+        _render_all_chats_download(meeting, user_id, invitees)
+    _render_transcript(messages)
+
+
+def _render_all_chats_download(meeting: Meeting, user_id: int, invitees: list[dict]) -> None:
+    chats = []
+    try:
+        for invitee in invitees:
+            chats.append(
+                (invitee["name"], db.list_messages_for_creator(meeting.meeting_id, invitee["invitee_id"], user_id))
+            )
+        payload = transcript.to_excel_bytes(transcript.all_chats_frame(chats))
+    except MeetingError as error:
+        logger.exception("Could not build the all-chats Excel for meeting %s.", meeting.meeting_id)
+        st.caption(f":red[{error}]")
+        return
+    st.download_button(
+        "Download all chats (Excel)",
+        data=payload,
+        file_name=f"{meeting.display_subject()} - all chats.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="meetings_all_chats_download",
+        icon=":material/table:",
+        help="Every invitee's chat in one Excel sheet: Invitee, Time, From, Message.",
+    )
+
+
+def _render_summary_tab(meeting: Meeting, invitees: list[dict]) -> None:
+    """One finished invitee's summary, with Download summary (.txt) (phase 57)."""
+    chosen = _pick_invitee(invitees, "meetings_summary_pick", only_closed=True)
+    if chosen is None:
+        st.info("No invitee has finished their chat yet.", icon=":material/info:")
+        return
+    parsed = summary_agent.from_json(chosen["summary_json"] or "")
+    if parsed is None:
+        st.warning("This invitee's summary couldn't be read.", icon=":material/error:")
+        return
+
+    subject = meeting.display_subject()
+    st.download_button(
+        "Download summary",
+        data=transcript.summary_text(subject, chosen["name"], parsed),
+        file_name=f"{subject} - {chosen['name']} - summary.txt",
+        mime="text/plain",
+        key="meetings_summary_download",
+        icon=":material/download:",
+        help="This invitee's summary as a text file.",
+    )
+    _render_summary(parsed)
 
 
 def _pick_invitee(invitees: list[dict], key: str, only_closed: bool = False) -> dict | None:
@@ -1715,25 +2018,10 @@ def _render_detail(user_id: int, meeting_id: int) -> None:
         _render_invitee_status(meeting, user_id, invitees, fields)
 
     with chat:
-        chosen = _pick_invitee(invitees, "meetings_chat_pick")
-        if chosen is None:
-            st.info("This meeting has no invitees.", icon=":material/info:")
-        else:
-            try:
-                _render_transcript(db.list_messages_for_creator(meeting_id, chosen["invitee_id"], user_id))
-            except MeetingError as error:
-                st.error(str(error), icon=":material/error:")
+        _render_chat_tab(meeting, user_id, invitees)
 
     with summary:
-        chosen = _pick_invitee(invitees, "meetings_summary_pick", only_closed=True)
-        if chosen is None:
-            st.info("No invitee has finished their chat yet.", icon=":material/info:")
-        else:
-            parsed = summary_agent.from_json(chosen["summary_json"] or "")
-            if parsed is None:
-                st.warning("This invitee's summary couldn't be read.", icon=":material/error:")
-            else:
-                _render_summary(parsed)
+        _render_summary_tab(meeting, invitees)
 
     with comparisons:
         _render_comparisons(meeting, user_id, invitees, fields)

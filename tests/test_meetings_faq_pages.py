@@ -115,13 +115,42 @@ class TestOrganiser:
             ("faq.csv", b"Topic,Question,Answer\nHR,Is parking free?,Yes.\nHR,,\n", "text/csv")
         )
         app.run()
-        assert app.selectbox(key=f"meetings_faq_question_col_{meeting.meeting_id}").value == "Question"
-        assert app.selectbox(key=f"meetings_faq_answer_col_{meeting.meeting_id}").value == "Answer"
+        # Phase 56: the upload fills the table; nothing is saved until Save FAQ.
+        assert meetings_db.load_faq(meeting.meeting_id) is None
         app.button(key=f"meetings_faq_save_{meeting.meeting_id}").click().run()
 
         assert meetings_db.load_faq(meeting.meeting_id) == Faq(
             source_file="faq.csv", entries=[FaqEntry(question=PARKING, answer="Yes.")]
         )
+
+    def test_editing_the_table_saves_the_faq(self, tmp_path, monkeypatch):
+        meeting, _, _ = _setup(tmp_path, monkeypatch)
+        app = _organiser_app(meeting.meeting_id).run()
+        app.session_state[f"meetings_faq_table_{meeting.meeting_id}"] = {
+            "edited_rows": {0: {"Answer": "90 days."}},
+            "added_rows": [{"Question": PARKING, "Answer": "Yes."}],
+            "deleted_rows": [],
+        }
+        app.button(key=f"meetings_faq_save_{meeting.meeting_id}").click().run()
+
+        assert not app.exception
+        assert meetings_db.load_faq(meeting.meeting_id).entries == [
+            FaqEntry(question=NOTICE.question, answer="90 days."),
+            FaqEntry(question=PARKING, answer="Yes."),
+        ]
+
+    def test_saving_an_empty_table_removes_the_faq(self, tmp_path, monkeypatch):
+        meeting, _, _ = _setup(tmp_path, monkeypatch)
+        app = _organiser_app(meeting.meeting_id).run()
+        app.session_state[f"meetings_faq_table_{meeting.meeting_id}"] = {
+            "edited_rows": {},
+            "added_rows": [],
+            "deleted_rows": [0],
+        }
+        app.button(key=f"meetings_faq_save_{meeting.meeting_id}").click().run()
+
+        assert meetings_db.load_faq(meeting.meeting_id) is None
+        assert "FAQ removed." in " ".join(element.value for element in app.success)
 
     def test_an_answered_question_moves_into_the_faq(self, tmp_path, monkeypatch):
         meeting, invitee_id, _ = _setup(tmp_path, monkeypatch)

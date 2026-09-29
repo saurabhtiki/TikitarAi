@@ -106,6 +106,8 @@ class Meeting:
     context_sop: str = ""
     agenda: list[AgendaItem] = field(default_factory=list)
     created_at: str = ""
+    # The Settings profile the chat runs on (phase 56); None means the creator's default.
+    profile_id: int | None = None
 
     def agenda_titles(self) -> list[str]:
         return [item.item for item in self.agenda]
@@ -182,6 +184,9 @@ class AgendaTable:
     # For a For each list (phase 52): each invitee gets only the rows whose value here is
     # their name or email. Blank means everyone gets every row.
     match_column: str = ""
+    # For a For each list (phase 57): the column that names a row, e.g. Invoice No, so the
+    # chat can say "INV-102" instead of "row 2". Blank means rows are named by number.
+    label_column: str = ""
 
     def row_count(self) -> int:
         return len(self.base_data)

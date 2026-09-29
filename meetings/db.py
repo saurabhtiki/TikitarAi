@@ -261,17 +261,30 @@ ON meeting_faq_misses (meeting_id, miss_id);
 """
 
 
-def _ensure_match_column(connection: sqlite3.Connection) -> None:
-    """Phase 52: adds `match_column` to a `meeting_agenda_tables` written before it existed.
+def _ensure_list_columns(connection: sqlite3.Connection) -> None:
+    """Phase 52/57: adds `match_column` and `label_column` to an older `meeting_agenda_tables`.
 
     Guarded on `PRAGMA table_info` because SQLite has no `ADD COLUMN IF NOT EXISTS` and this
     runs on every process start.
     """
     columns = {row["name"] for row in connection.execute("PRAGMA table_info(meeting_agenda_tables);").fetchall()}
-    if "match_column" in columns:
-        return
-    connection.execute("ALTER TABLE meeting_agenda_tables ADD COLUMN match_column TEXT NOT NULL DEFAULT '';")
-    logger.info("Added match_column to meeting_agenda_tables.")
+    for column in ("match_column", "label_column"):
+        if column not in columns:
+            connection.execute(f"ALTER TABLE meeting_agenda_tables ADD COLUMN {column} TEXT NOT NULL DEFAULT '';")
+            logger.info("Added %s to meeting_agenda_tables.", column)
+
+
+def _ensure_model_columns(connection: sqlite3.Connection) -> None:
+    """Phase 56: the meeting's chosen model, and the model that last replied in each chat."""
+    added = {
+        "meetings": ("profile_id", "INTEGER"),
+        "meeting_sessions": ("model_used", "TEXT NOT NULL DEFAULT ''"),
+    }
+    for table, (column, kind) in added.items():
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table});").fetchall()}
+        if column not in columns:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind};")
+            logger.info("Added %s to %s.", column, table)
 
 
 @contextmanager
@@ -320,7 +333,7 @@ def init_meetings_tables(db_path: Path | str = DEFAULT_DB_PATH) -> None:
         connection.execute(_CREATE_FILES_INDEX)
         connection.execute(_CREATE_AGENDA_TABLES_TABLE)
         connection.execute(_CREATE_AGENDA_TABLES_INDEX)
-        _ensure_match_column(connection)
+        _ensure_list_columns(connection)
         connection.execute(_CREATE_TABLE_RESPONSES_TABLE)
         connection.execute(_CREATE_EVALUATION_FIELDS_TABLE)
         connection.execute(_CREATE_EVALUATION_FIELDS_INDEX)
@@ -329,6 +342,7 @@ def init_meetings_tables(db_path: Path | str = DEFAULT_DB_PATH) -> None:
         connection.execute(_CREATE_FAQS_TABLE)
         connection.execute(_CREATE_FAQ_MISSES_TABLE)
         connection.execute(_CREATE_FAQ_MISSES_INDEX)
+        _ensure_model_columns(connection)
 
 
 def _now() -> str:
@@ -411,6 +425,7 @@ def _row_to_meeting(row: sqlite3.Row) -> Meeting:
         context_sop=row["context_sop"],
         agenda=agenda_from_json(row["agenda_json"]),
         created_at=row["created_at"],
+        profile_id=row["profile_id"] if "profile_id" in row.keys() else None,
     )
 
 
@@ -428,8 +443,8 @@ def create_meeting(
 
     with _get_connection(db_path) as connection:
         cursor = connection.execute(
-            "INSERT INTO meetings (subject, created_by, meeting_context, persona, context_sop, agenda_json) "
-            "VALUES (?, ?, ?, ?, ?, ?);",
+            "INSERT INTO meetings (subject, created_by, meeting_context, persona, context_sop, agenda_json, "
+            "profile_id) VALUES (?, ?, ?, ?, ?, ?, ?);",
             (
                 subject,
                 user_id,
@@ -437,6 +452,7 @@ def create_meeting(
                 meeting.persona.strip(),
                 meeting.context_sop.strip(),
                 agenda_to_json(meeting.agenda),
+                meeting.profile_id,
             ),
         )
         meeting_id = cursor.lastrowid
@@ -475,6 +491,22 @@ def update_meeting(user_id: int, meeting: Meeting, db_path: Path | str = DEFAULT
                 meeting.meeting_id,
                 user_id,
             ),
+        )
+
+
+def set_meeting_profile(
+    meeting_id: int, user_id: int, profile_id: int | None, db_path: Path | str = DEFAULT_DB_PATH
+) -> None:
+    """Changes the model a meeting's chats run on (phase 56). Allowed at any time.
+
+    Raises:
+        MeetingStorageError: if it doesn't belong to user_id, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        connection.execute(
+            "UPDATE meetings SET profile_id = ? WHERE meeting_id = ? AND created_by = ?;",
+            (profile_id, meeting_id, user_id),
         )
 
 
@@ -551,7 +583,7 @@ def list_invitees(meeting_id: int, user_id: int, db_path: Path | str = DEFAULT_D
         rows = connection.execute(
             "SELECT i.invitee_id, i.meeting_id, i.name, i.email, i.token, i.access_code_enc, "
             "  s.closed, s.closed_at, s.summary_json, s.live_status_json, s.live_status_at, "
-            "  s.last_active_at "
+            "  s.last_active_at, s.model_used "
             "FROM meeting_invitees i "
             "LEFT JOIN meeting_sessions s "
             "  ON s.meeting_id = i.meeting_id AND s.invitee_id = i.invitee_id "
@@ -754,6 +786,15 @@ def add_message(
         return cursor.lastrowid
 
 
+def set_model_used(meeting_id: int, invitee_id: int, model_label: str, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+    """Notes which model last replied in this chat (phase 56), for the organiser's Status tab."""
+    with _get_connection(db_path) as connection:
+        connection.execute(
+            "UPDATE meeting_sessions SET model_used = ? WHERE meeting_id = ? AND invitee_id = ?;",
+            (model_label, meeting_id, invitee_id),
+        )
+
+
 def update_running_summary(
     meeting_id: int,
     invitee_id: int,
@@ -870,6 +911,7 @@ def _row_to_agenda_table(row: sqlite3.Row) -> AgendaTable:
         editable_columns=_json_list(row["editable_columns"]),
         base_data=_json_list(row["base_data"]),
         match_column=row["match_column"] or "",
+        label_column=row["label_column"] or "",
     )
 
 
@@ -918,12 +960,12 @@ def save_agenda_table(
             json.dumps(table.editable_columns),
             json.dumps(table.base_data),
             (table.match_column or "").strip(),
+            (table.label_column or "").strip(),
         )
         if existing is None:
             cursor = connection.execute(
-                "INSERT INTO meeting_agenda_tables "
-                "(meeting_id, item_ref, source_file, locked_columns, editable_columns, base_data, match_column) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?);",
+                "INSERT INTO meeting_agenda_tables (meeting_id, item_ref, source_file, locked_columns, "
+                "editable_columns, base_data, match_column, label_column) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
                 (meeting_id, item_ref, *payload),
             )
             return cursor.lastrowid
@@ -931,13 +973,39 @@ def save_agenda_table(
         table_id = existing["table_id"]
         connection.execute(
             "UPDATE meeting_agenda_tables SET source_file = ?, locked_columns = ?, "
-            "editable_columns = ?, base_data = ?, match_column = ? WHERE table_id = ?;",
+            "editable_columns = ?, base_data = ?, match_column = ?, label_column = ? WHERE table_id = ?;",
             (*payload, table_id),
         )
         # The rows people filled in answered the old sheet. Keeping them against a new one
         # would silently re-attribute an answer to a different question.
         connection.execute("DELETE FROM meeting_table_responses WHERE table_id = ?;", (table_id,))
         return table_id
+
+
+def update_list_settings(
+    meeting_id: int,
+    user_id: int,
+    item_ref: str,
+    label_column: str,
+    match_column: str,
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Changes a For each list's row name and match columns without touching its rows (phase 57).
+
+    Answers are kept: they are stored against row numbers, and the rows themselves don't change.
+
+    Raises:
+        MeetingStorageError: if the meeting isn't theirs, the list is missing, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        cursor = connection.execute(
+            "UPDATE meeting_agenda_tables SET label_column = ?, match_column = ? "
+            "WHERE meeting_id = ? AND item_ref = ?;",
+            ((label_column or "").strip(), (match_column or "").strip(), meeting_id, (item_ref or "").strip()),
+        )
+        if cursor.rowcount == 0:
+            raise MeetingStorageError("That list isn't attached any more — upload it again.")
 
 
 def list_agenda_tables(meeting_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> list[AgendaTable]:

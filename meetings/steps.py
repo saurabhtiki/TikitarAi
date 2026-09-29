@@ -407,6 +407,99 @@ def agenda_problems(agenda: list[AgendaItem]) -> list[str]:
     return problems
 
 
+@dataclass(frozen=True)
+class _Interval:
+    """The numbers a Number rule (or Go to condition) lets through."""
+
+    low: float = float("-inf")
+    high: float = float("inf")
+    low_included: bool = False
+    high_included: bool = False
+
+    def holds(self, number: float) -> bool:
+        above = number > self.low or (self.low_included and number == self.low)
+        below = number < self.high or (self.high_included and number == self.high)
+        return above and below
+
+    def covers(self, other: "_Interval") -> bool:
+        """Whether every number `other` lets through is let through here too."""
+        low_ok = other.low > self.low or (other.low == self.low and (self.low_included or not other.low_included))
+        high_ok = other.high < self.high or (
+            other.high == self.high and (self.high_included or not other.high_included)
+        )
+        return low_ok and high_ok
+
+    def meets(self, other: "_Interval") -> bool:
+        """Whether some number is let through by both."""
+        low, high = max(self.low, other.low), min(self.high, other.high)
+        if low < high:
+            return True
+        return low == high and self.holds(low) and other.holds(low)
+
+
+def _number_interval(parsed: tuple | None) -> _Interval | None:
+    """A parsed Number rule as an `_Interval`, or None for "any number"."""
+    if not parsed:
+        return None
+    if parsed[0] == "between":
+        return _Interval(parsed[1], parsed[2], True, True)
+    if parsed[0] == "compare":
+        operator, limit = parsed[1], parsed[2]
+        return {
+            ">": _Interval(low=limit),
+            ">=": _Interval(low=limit, low_included=True),
+            "<": _Interval(high=limit),
+            "<=": _Interval(high=limit, high_included=True),
+        }[operator]
+    return None
+
+
+def _range_words(interval: _Interval) -> str:
+    if interval.low != float("-inf") and interval.high != float("inf"):
+        return f"{_format_number(interval.low)} to {_format_number(interval.high)}"
+    if interval.low != float("-inf"):
+        return f"{'at least' if interval.low_included else 'more than'} {_format_number(interval.low)}"
+    return f"{'at most' if interval.high_included else 'less than'} {_format_number(interval.high)}"
+
+
+def agenda_warnings(agenda: list[AgendaItem]) -> list[str]:
+    """Notes (not errors) about a Number question whose Go to reaches past its Rule (phase 57).
+
+    The Rule is checked first, so an answer it refuses never gets to the Go to. With Rule
+    `between 10000 and 500000` and Go to `if > 100000 go to End`, 700000 is refused — which
+    surprises an organiser who expected it to end the questions.
+    """
+    warnings = []
+    for item in agenda:
+        if not item.is_question() or item.answer_type != ANSWER_NUMBER or not item.branch.strip():
+            continue
+        try:
+            rule = _number_interval(_parse_rule(item))
+            branches = parse_branches(item, agenda)
+        except RuleError:
+            continue  # `agenda_problems` already reports it.
+        if rule is None:
+            continue
+        for branch in branches:
+            try:
+                condition = _number_interval(_parse_rule(replace(item, rule=branch.condition)))
+            except RuleError:
+                continue
+            if condition is None or rule.covers(condition):
+                continue
+            if not rule.meets(condition):
+                warnings.append(
+                    f"{item.item}: 'if {branch.condition}' can never happen — the Rule only accepts "
+                    f"{_range_words(rule)}."
+                )
+            else:
+                warnings.append(
+                    f"{item.item}: 'if {branch.condition}' also covers numbers the Rule refuses (it only "
+                    f"accepts {_range_words(rule)}). Widen the Rule if bigger or smaller answers are fine."
+                )
+    return warnings
+
+
 def describe_rule(item: AgendaItem) -> str:
     """The expected answer in plain words, e.g. "a number between 20000 and 60000"."""
     try:
@@ -465,18 +558,11 @@ def check_answer(item: AgendaItem, value: str, today: datetime.date) -> AnswerCh
             number = _to_number(text)
         except ValueError:
             return refusal
-        if parsed and parsed[0] == "compare":
-            operator, limit = parsed[1], parsed[2]
-            passes = {
-                ">": number > limit,
-                ">=": number >= limit,
-                "<": number < limit,
-                "<=": number <= limit,
-            }[operator]
-            if not passes:
-                return refusal
-        if parsed and parsed[0] == "between" and not parsed[1] <= number <= parsed[2]:
-            return refusal
+        interval = _number_interval(parsed)
+        if interval is not None and not interval.holds(number):
+            # Saying which side it missed on helps: "700000 is too high" beats a bare range.
+            side = "too high" if number > interval.low else "too low"
+            return AnswerCheck(ok=False, reason=f"The answer needs to be {expected} — {_format_number(number)} is {side}.")
         return AnswerCheck(ok=True, value=_format_number(number))
 
     if answer_type == ANSWER_DATE:
@@ -660,6 +746,22 @@ def next_question(
     return walk(meeting, answers, loop_rows).current
 
 
+def questions_left(
+    meeting: Meeting, answers: dict[str, StepAnswer], loop_rows: dict[str, list[int]] | None = None
+) -> int:
+    """How many questions are still open on this invitee's path; 0 once they may close (phase 56).
+
+    Counts the open one and every unfinished step after it. A later Go to may still skip some,
+    so this is "at most", which is what a "3 left" note should say anyway.
+    """
+    current = next_question(meeting, answers, loop_rows)
+    if current is None:
+        return 0
+    flat = _flat_steps(meeting, loop_rows)
+    start = next((index for index, step in enumerate(flat) if step.key == current.key), 0)
+    return sum(1 for step in flat[start:] if not (step.key in answers and answers[step.key].is_finished()))
+
+
 def skipped_questions(
     meeting: Meeting, answers: dict[str, StepAnswer], loop_rows: dict[str, list[int]] | None = None
 ) -> list[str]:
@@ -672,8 +774,11 @@ def progress_text(
     current: Step,
     answers: dict[str, StepAnswer],
     loop_rows: dict[str, list[int]] | None = None,
+    row_label: str = "",
 ) -> str:
     """ "Question 3 of 4" along this invitee's path, or "Invoices: row 2 of 12, question 1 of 3".
+
+    `row_label` names the row (phase 57), giving "Invoices — INV-102: row 2 of 12, question 1 of 3".
 
     For an ordinary question the "of" is the ordinary questions asked so far plus the ones
     still ahead in agenda order, so it can drop after a jump.
@@ -683,8 +788,9 @@ def progress_text(
         row_number = rows.index(current.row) + 1 if current.row in rows else 1
         block = loop_questions(meeting, current.question.loop)
         question_number = next((index for index, item in enumerate(block, start=1) if item.item == current.item), 1)
+        name = f"{current.question.loop} — {row_label}" if row_label else current.question.loop
         return (
-            f"{current.question.loop}: row {row_number} of {len(rows)}, "
+            f"{name}: row {row_number} of {len(rows)}, "
             f"question {question_number} of {len(block)}"
         )
 
