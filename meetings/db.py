@@ -29,6 +29,7 @@ from meetings.model import (
     AgendaTable,
     ChatMessage,
     ChatSession,
+    ColumnRule,
     EvaluationAnswer,
     EvaluationField,
     Faq,
@@ -40,6 +41,7 @@ from meetings.model import (
     agenda_from_json,
     agenda_to_json,
 )
+from meetings.templates import MeetingTemplate
 from utils.env import get_data_dir
 
 logger = logging.getLogger(__name__)
@@ -260,6 +262,23 @@ CREATE INDEX IF NOT EXISTS idx_meeting_faq_misses_meeting
 ON meeting_faq_misses (meeting_id, miss_id);
 """
 
+# Phase 58: a creator's own templates. Saving under a name they already used updates it.
+_CREATE_TEMPLATES_TABLE = """
+CREATE TABLE IF NOT EXISTS meeting_templates (
+    template_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name            TEXT NOT NULL COLLATE NOCASE,
+    meeting_context TEXT NOT NULL DEFAULT '',
+    persona         TEXT NOT NULL DEFAULT '',
+    context_sop     TEXT NOT NULL DEFAULT '',
+    agenda_json     TEXT NOT NULL DEFAULT '{}',
+    evaluation_json TEXT NOT NULL DEFAULT '[]',
+    faq_json        TEXT NOT NULL DEFAULT '[]',
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (user_id, name)
+);
+"""
+
 
 def _ensure_list_columns(connection: sqlite3.Connection) -> None:
     """Phase 52/57: adds `match_column` and `label_column` to an older `meeting_agenda_tables`.
@@ -272,19 +291,33 @@ def _ensure_list_columns(connection: sqlite3.Connection) -> None:
         if column not in columns:
             connection.execute(f"ALTER TABLE meeting_agenda_tables ADD COLUMN {column} TEXT NOT NULL DEFAULT '';")
             logger.info("Added %s to meeting_agenda_tables.", column)
+    # Phase 59: Type / Rule / Required per editable column, as JSON.
+    if "column_rules" not in columns:
+        connection.execute("ALTER TABLE meeting_agenda_tables ADD COLUMN column_rules TEXT NOT NULL DEFAULT '{}';")
+        logger.info("Added column_rules to meeting_agenda_tables.")
 
 
 def _ensure_model_columns(connection: sqlite3.Connection) -> None:
-    """Phase 56: the meeting's chosen model, and the model that last replied in each chat."""
-    added = {
-        "meetings": ("profile_id", "INTEGER"),
-        "meeting_sessions": ("model_used", "TEXT NOT NULL DEFAULT ''"),
-    }
-    for table, (column, kind) in added.items():
+    """Phase 56: the meeting's chosen model, and the model that last replied in each chat.
+    Phase 59: the organiser's own "How to use this meeting" text."""
+    added = (
+        ("meetings", "profile_id", "INTEGER"),
+        ("meeting_sessions", "model_used", "TEXT NOT NULL DEFAULT ''"),
+        ("meetings", "how_to_use", "TEXT NOT NULL DEFAULT ''"),
+    )
+    for table, column, kind in added:
         columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table});").fetchall()}
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind};")
             logger.info("Added %s to %s.", column, table)
+
+
+def _ensure_template_faq_column(connection: sqlite3.Connection) -> None:
+    """Phase 61: a saved template keeps its FAQ too."""
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(meeting_templates);").fetchall()}
+    if "faq_json" not in columns:
+        connection.execute("ALTER TABLE meeting_templates ADD COLUMN faq_json TEXT NOT NULL DEFAULT '[]';")
+        logger.info("Added faq_json to meeting_templates.")
 
 
 @contextmanager
@@ -343,6 +376,8 @@ def init_meetings_tables(db_path: Path | str = DEFAULT_DB_PATH) -> None:
         connection.execute(_CREATE_FAQ_MISSES_TABLE)
         connection.execute(_CREATE_FAQ_MISSES_INDEX)
         _ensure_model_columns(connection)
+        connection.execute(_CREATE_TEMPLATES_TABLE)
+        _ensure_template_faq_column(connection)
 
 
 def _now() -> str:
@@ -426,6 +461,7 @@ def _row_to_meeting(row: sqlite3.Row) -> Meeting:
         agenda=agenda_from_json(row["agenda_json"]),
         created_at=row["created_at"],
         profile_id=row["profile_id"] if "profile_id" in row.keys() else None,
+        how_to_use=row["how_to_use"] if "how_to_use" in row.keys() else "",
     )
 
 
@@ -507,6 +543,20 @@ def set_meeting_profile(
         connection.execute(
             "UPDATE meetings SET profile_id = ? WHERE meeting_id = ? AND created_by = ?;",
             (profile_id, meeting_id, user_id),
+        )
+
+
+def set_how_to_use(meeting_id: int, user_id: int, text: str, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+    """Saves the organiser's "How to use this meeting" text (phase 59); blank = the automatic steps.
+
+    Raises:
+        MeetingStorageError: if it doesn't belong to user_id, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        connection.execute(
+            "UPDATE meetings SET how_to_use = ? WHERE meeting_id = ? AND created_by = ?;",
+            ((text or "").strip(), meeting_id, user_id),
         )
 
 
@@ -912,7 +962,24 @@ def _row_to_agenda_table(row: sqlite3.Row) -> AgendaTable:
         base_data=_json_list(row["base_data"]),
         match_column=row["match_column"] or "",
         label_column=row["label_column"] or "",
+        column_rules=_column_rules_from_json(row["column_rules"]),
     )
+
+
+def _column_rules_from_json(text: str) -> dict[str, ColumnRule]:
+    """Stored column rules; anything unreadable reads as no rules (every column Text)."""
+    try:
+        value = json.loads(text or "{}")
+    except (TypeError, ValueError):
+        logger.exception("Stored column rules could not be read.")
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {str(column): ColumnRule.from_dict(raw) for column, raw in value.items()}
+
+
+def _column_rules_to_json(rules: dict[str, ColumnRule]) -> str:
+    return json.dumps({column: rule.to_dict() for column, rule in (rules or {}).items()})
 
 
 def _json_list(text: str) -> list:
@@ -961,11 +1028,13 @@ def save_agenda_table(
             json.dumps(table.base_data),
             (table.match_column or "").strip(),
             (table.label_column or "").strip(),
+            _column_rules_to_json(table.column_rules),
         )
         if existing is None:
             cursor = connection.execute(
                 "INSERT INTO meeting_agenda_tables (meeting_id, item_ref, source_file, locked_columns, "
-                "editable_columns, base_data, match_column, label_column) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+                "editable_columns, base_data, match_column, label_column, column_rules) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
                 (meeting_id, item_ref, *payload),
             )
             return cursor.lastrowid
@@ -973,7 +1042,8 @@ def save_agenda_table(
         table_id = existing["table_id"]
         connection.execute(
             "UPDATE meeting_agenda_tables SET source_file = ?, locked_columns = ?, "
-            "editable_columns = ?, base_data = ?, match_column = ?, label_column = ? WHERE table_id = ?;",
+            "editable_columns = ?, base_data = ?, match_column = ?, label_column = ?, column_rules = ? "
+            "WHERE table_id = ?;",
             (*payload, table_id),
         )
         # The rows people filled in answered the old sheet. Keeping them against a new one
@@ -1006,6 +1076,28 @@ def update_list_settings(
         )
         if cursor.rowcount == 0:
             raise MeetingStorageError("That list isn't attached any more — upload it again.")
+
+
+def update_column_rules(
+    meeting_id: int,
+    user_id: int,
+    item_ref: str,
+    rules: dict[str, ColumnRule],
+    db_path: Path | str = DEFAULT_DB_PATH,
+) -> None:
+    """Changes a table's column rules without touching its rows or answers (phase 59).
+
+    Raises:
+        MeetingStorageError: if the meeting isn't theirs, the table is missing, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        cursor = connection.execute(
+            "UPDATE meeting_agenda_tables SET column_rules = ? WHERE meeting_id = ? AND item_ref = ?;",
+            (_column_rules_to_json(rules), meeting_id, (item_ref or "").strip()),
+        )
+        if cursor.rowcount == 0:
+            raise MeetingStorageError("That table isn't attached any more — upload it again.")
 
 
 def list_agenda_tables(meeting_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> list[AgendaTable]:
@@ -1401,7 +1493,6 @@ def save_faq(meeting_id: int, user_id: int, faq: Faq, db_path: Path | str = DEFA
     Raises:
         MeetingStorageError: if the meeting isn't theirs, or on a database failure.
     """
-    entries = [{"question": entry.question, "answer": entry.answer} for entry in faq.entries]
     with _get_connection(db_path) as connection:
         _get_owned_meeting(connection, meeting_id, user_id)
         connection.execute(
@@ -1409,7 +1500,7 @@ def save_faq(meeting_id: int, user_id: int, faq: Faq, db_path: Path | str = DEFA
             "VALUES (?, ?, ?, ?) ON CONFLICT(meeting_id) DO UPDATE SET "
             "source_file = excluded.source_file, entries_json = excluded.entries_json, "
             "updated_at = excluded.updated_at;",
-            (meeting_id, faq.source_file, json.dumps(entries), _now()),
+            (meeting_id, faq.source_file, _faq_entries_to_json(faq.entries), _now()),
         )
 
 
@@ -1425,12 +1516,19 @@ def load_faq(meeting_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> Faq | No
         ).fetchone()
     if row is None:
         return None
-    entries = [
+    return Faq(source_file=row["source_file"] or "", entries=_faq_entries_from_json(row["entries_json"]))
+
+
+def _faq_entries_to_json(entries: list[FaqEntry]) -> str:
+    return json.dumps([{"question": entry.question, "answer": entry.answer} for entry in entries])
+
+
+def _faq_entries_from_json(text: str) -> list[FaqEntry]:
+    return [
         FaqEntry(question=str(entry.get("question", "")), answer=str(entry.get("answer", "")))
-        for entry in _json_list(row["entries_json"])
+        for entry in _json_list(text)
         if isinstance(entry, dict)
     ]
-    return Faq(source_file=row["source_file"] or "", entries=entries)
 
 
 def delete_faq(meeting_id: int, user_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> None:
@@ -1518,3 +1616,79 @@ def delete_faq_misses(
             "DELETE FROM meeting_faq_misses WHERE meeting_id = ? AND miss_id = ?;",
             [(meeting_id, miss_id) for miss_id in miss_ids],
         )
+
+
+# --------------------------------------------------------------------------------------
+# A creator's own templates (phase 58)
+# --------------------------------------------------------------------------------------
+
+
+def _row_to_template(row: sqlite3.Row) -> MeetingTemplate:
+    evaluation = [
+        EvaluationField(question=str(entry.get("question") or ""), buckets=[str(b) for b in entry.get("buckets") or []])
+        for entry in _json_list(row["evaluation_json"])
+        if isinstance(entry, dict) and str(entry.get("question") or "").strip()
+    ]
+    agenda = agenda_from_json(row["agenda_json"])
+    faq_entries = _faq_entries_from_json(row["faq_json"])
+    return MeetingTemplate(
+        name=row["name"],
+        description=f"Your template — {len(agenda)} agenda row(s), {len(faq_entries)} FAQ row(s), "
+        f"saved {row['updated_at'][:10]}.",
+        meeting_context=row["meeting_context"],
+        persona=row["persona"],
+        context_sop=row["context_sop"],
+        agenda=agenda,
+        evaluation=evaluation,
+        faq=faq_entries,
+    )
+
+
+def list_templates(user_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> list[MeetingTemplate]:
+    """This creator's own templates, by name."""
+    with _get_connection(db_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM meeting_templates WHERE user_id = ? ORDER BY name;", (user_id,)
+        ).fetchall()
+    return [_row_to_template(row) for row in rows]
+
+
+def save_template(user_id: int, template: MeetingTemplate, db_path: Path | str = DEFAULT_DB_PATH) -> bool:
+    """Saves a template under its name; returns True if it replaced one of the same name.
+
+    Raises:
+        MeetingStorageError: on a database failure.
+    """
+    evaluation_json = json.dumps(
+        [{"question": field_spec.question, "buckets": field_spec.buckets} for field_spec in template.evaluation]
+    )
+    with _get_connection(db_path) as connection:
+        existed = connection.execute(
+            "SELECT 1 FROM meeting_templates WHERE user_id = ? AND name = ?;", (user_id, template.name.strip())
+        ).fetchone() is not None
+        connection.execute(
+            "INSERT INTO meeting_templates "
+            "(user_id, name, meeting_context, persona, context_sop, agenda_json, evaluation_json, faq_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id, name) DO UPDATE SET meeting_context = excluded.meeting_context, "
+            "persona = excluded.persona, context_sop = excluded.context_sop, "
+            "agenda_json = excluded.agenda_json, evaluation_json = excluded.evaluation_json, "
+            "faq_json = excluded.faq_json, updated_at = datetime('now');",
+            (
+                user_id,
+                template.name.strip(),
+                template.meeting_context.strip(),
+                template.persona.strip(),
+                template.context_sop.strip(),
+                agenda_to_json(template.agenda),
+                evaluation_json,
+                _faq_entries_to_json(template.faq),
+            ),
+        )
+    return existed
+
+
+def delete_template(user_id: int, name: str, db_path: Path | str = DEFAULT_DB_PATH) -> None:
+    """Removes one of this creator's templates. Meetings made from it are untouched."""
+    with _get_connection(db_path) as connection:
+        connection.execute("DELETE FROM meeting_templates WHERE user_id = ? AND name = ?;", (user_id, name.strip()))

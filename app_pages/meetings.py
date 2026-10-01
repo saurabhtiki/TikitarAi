@@ -27,6 +27,7 @@ from meetings import (
     extraction_agent,
     faq,
     flow,
+    guide,
     listing,
     llm_choice,
     loops,
@@ -50,6 +51,7 @@ from meetings.model import (
     TABLE_ITEM,
     AgendaItem,
     AgendaTable,
+    ColumnRule,
     EvaluationField,
     Faq,
     FaqEntry,
@@ -73,6 +75,8 @@ INVITEE_ROWS_KEY = "meetings_invitee_rows"
 EVALUATION_ROWS_KEY = "meetings_evaluation_rows"
 NEW_NOTICE_KEY = "meetings_new_notice"
 NEW_MODEL_KEY = "meetings_new_model"
+NEW_FAQ_ROWS_KEY = "meetings_new_faq_rows"
+NEW_FAQ_SOURCE_KEY = "meetings_new_faq_source"
 BLANK_TEMPLATE = "Blank"
 
 # What the creator picks in the agenda grid, and what it means in the stored agenda.
@@ -83,6 +87,7 @@ ITEM_TYPE_BY_LABEL = {TYPE_DISCUSSION: DISCUSSION_ITEM, TYPE_TABLE: TABLE_ITEM, 
 LABEL_BY_ITEM_TYPE = {value: key for key, value in ITEM_TYPE_BY_LABEL.items()}
 SKIPPED_CELL = steps.SKIPPED_CELL
 ROW_NUMBER_LABEL = "(row number)"
+RULE_COLUMNS = ("Column", "Type", "Rule", "Required")
 
 
 def _current_user_id() -> int | None:
@@ -139,10 +144,31 @@ def _evaluation_rows() -> pd.DataFrame:
     return st.session_state[EVALUATION_ROWS_KEY]
 
 
+def _new_faq_rows() -> pd.DataFrame:
+    """The New meeting FAQ table's backing frame (phase 61): empty until a template fills it."""
+    if NEW_FAQ_ROWS_KEY not in st.session_state:
+        st.session_state[NEW_FAQ_ROWS_KEY] = faq.frame_from_faq(None)
+    return st.session_state[NEW_FAQ_ROWS_KEY]
+
+
+def _new_faq_entries(frame: pd.DataFrame) -> list[FaqEntry]:
+    """The New meeting FAQ table as entries; none for an empty table.
+
+    Raises:
+        MeetingStorageError: if it holds more rows than the bot can take.
+    """
+    has_rows = any(not pd.isna(question) and str(question).strip() for question in frame[faq.QUESTION_COLUMN])
+    if not has_rows:
+        return []
+    return faq.entries_from_frame(frame, faq.QUESTION_COLUMN, faq.ANSWER_COLUMN)
+
+
 def _clear_creation_rows() -> None:
     st.session_state.pop(AGENDA_ROWS_KEY, None)
     st.session_state.pop(INVITEE_ROWS_KEY, None)
     st.session_state.pop(EVALUATION_ROWS_KEY, None)
+    st.session_state.pop(NEW_FAQ_ROWS_KEY, None)
+    st.session_state.pop(NEW_FAQ_SOURCE_KEY, None)
     st.session_state.pop(NEW_NOTICE_KEY, None)
 
 
@@ -153,13 +179,26 @@ def _replace_new_agenda(agenda: list[AgendaItem]) -> None:
     st.session_state.pop("meetings_new_agenda", None)
 
 
-def _apply_template() -> None:
+def _own_templates(user_id: int) -> dict[str, templates.MeetingTemplate]:
+    """The creator's saved templates by name (phase 58); none if they can't be read."""
+    try:
+        return {template.name: template for template in db.list_templates(user_id)}
+    except MeetingError:
+        logger.exception("Could not list the templates of user %s.", user_id)
+        return {}
+
+
+def _find_template(user_id: int, name: str) -> templates.MeetingTemplate | None:
+    return templates.TEMPLATE_BY_NAME.get(name) or _own_templates(user_id).get(name)
+
+
+def _apply_template(user_id: int) -> None:
     """Button callback: copies the chosen template into the New meeting window (phase 54).
 
     A callback, because it runs before the boxes are drawn — the only point at which a
     widget's value may be set from code.
     """
-    template = templates.TEMPLATE_BY_NAME.get(st.session_state.get("meetings_new_template", ""))
+    template = _find_template(user_id, st.session_state.get("meetings_new_template", ""))
     if template is None:
         st.session_state[NEW_NOTICE_KEY] = ("warning", "Pick a template first.")
         return
@@ -169,7 +208,68 @@ def _apply_template() -> None:
     _replace_new_agenda(template.agenda)
     st.session_state[EVALUATION_ROWS_KEY] = _evaluation_to_frame(template.evaluation)
     st.session_state.pop("meetings_new_evaluation", None)
+    st.session_state[NEW_FAQ_ROWS_KEY] = faq.frame_from_faq(Faq(entries=template.faq))
+    st.session_state[NEW_FAQ_SOURCE_KEY] = f"Template: {template.name}"
+    st.session_state.pop("meetings_new_faq", None)
     st.session_state[NEW_NOTICE_KEY] = ("success", f"Filled in from '{template.name}'. Edit anything before creating.")
+
+
+def _delete_template(user_id: int) -> None:
+    """Button callback: removes the picked template of the creator's own (phase 58)."""
+    name = st.session_state.get("meetings_new_template", "")
+    try:
+        db.delete_template(user_id, name)
+    except MeetingError as error:
+        logger.exception("Could not delete template '%s' of user %s.", name, user_id)
+        st.session_state[NEW_NOTICE_KEY] = ("error", str(error))
+        return
+    st.session_state.pop("meetings_new_template", None)
+    st.session_state[NEW_NOTICE_KEY] = ("success", f"Deleted template '{name}'.")
+
+
+def _render_save_template(user_id: int, key_prefix: str, build_template) -> None:
+    """Save as template (phase 58): a name box; a name already used updates that template.
+
+    `build_template(name)` returns what to save, read at click time so it has the latest edits.
+    """
+    own_names = list(_own_templates(user_id))
+    with st.popover(
+        "Save as template",
+        icon=":material/bookmark_add:",
+        key=f"{key_prefix}_popover",
+        help="Keep this setup (context, persona, SOP, agenda, evaluation questions, FAQ) to reuse from Start from.",
+    ):
+        name = st.text_input(
+            "Template name",
+            key=f"{key_prefix}_name",
+            placeholder="e.g. Vendor follow-up",
+            help="Type a new name for a new template, or one of yours to update it.",
+        ).strip()
+        existing = next((own for own in own_names if own.lower() == name.lower()), None) if name else None
+        if own_names:
+            st.caption(f":red[Your templates: {', '.join(own_names)}]")
+        if existing:
+            st.caption(f":red['{existing}' already exists — saving will update it.]")
+        if st.button(
+            "Update template" if existing else "Save template",
+            key=f"{key_prefix}_save",
+            icon=":material/save:",
+            disabled=not name,
+            help="Saves under this name. Subject and invitees are not saved.",
+        ):
+            if templates.is_builtin_name(name):
+                st.warning(f"'{name}' is a ready-made template — pick another name.", icon=":material/error:")
+                return
+            try:
+                updated = db.save_template(user_id, build_template(existing or name))
+            except MeetingError as error:
+                logger.exception("Could not save template '%s' for user %s.", name, user_id)
+                st.error(str(error), icon=":material/error:")
+                return
+            st.success(
+                f"Template '{existing or name}' {'updated' if updated else 'saved'}. Find it in Start from.",
+                icon=":material/info:",
+            )
 
 
 def _draft_from_description(user_id: int) -> None:
@@ -323,13 +423,15 @@ def _open_new_meeting_dialog(user_id: int) -> None:
             logger.exception("Could not read the default persona for user %s.", user_id)
             st.session_state["meetings_new_persona"] = ""
 
+    own = _own_templates(user_id)
     left, right = st.columns([3, 1], vertical_alignment="bottom")
     with left:
         chosen = st.selectbox(
             "Start from",
-            options=[BLANK_TEMPLATE, *templates.TEMPLATE_BY_NAME],
+            options=[BLANK_TEMPLATE, *templates.TEMPLATE_BY_NAME, *own],
+            format_func=lambda name: f"{name} (mine)" if name in own else name,
             key="meetings_new_template",
-            help="A ready-made meeting to edit instead of starting from a blank grid.",
+            help="A ready-made meeting, or one you saved with Save as template, to edit instead of a blank grid.",
         )
     with right:
         st.button(
@@ -337,11 +439,22 @@ def _open_new_meeting_dialog(user_id: int) -> None:
             key="meetings_new_template_apply",
             icon=":material/content_copy:",
             on_click=_apply_template,
+            args=(user_id,),
             disabled=chosen == BLANK_TEMPLATE,
-            help="Fills in the context, persona, SOP, agenda and evaluation questions. Replaces what is there.",
+            help="Fills in the context, persona, SOP, agenda, evaluation questions and FAQ. Replaces what is there.",
         )
-    if chosen in templates.TEMPLATE_BY_NAME:
-        st.caption(f":red[{templates.TEMPLATE_BY_NAME[chosen].description}]")
+    picked = templates.TEMPLATE_BY_NAME.get(chosen) or own.get(chosen)
+    if picked is not None:
+        st.caption(f":red[{picked.description}]")
+    if chosen in own:
+        st.button(
+            "Delete template",
+            key="meetings_new_template_delete",
+            icon=":material/delete:",
+            on_click=_delete_template,
+            args=(user_id,),
+            help="Removes this template of yours. Meetings already made from it are not touched.",
+        )
 
     profiles = llm_choice.owned_profiles(user_id)
     if profiles:
@@ -404,12 +517,34 @@ def _open_new_meeting_dialog(user_id: int) -> None:
     )
     evaluation_frame = _evaluation_editor(_evaluation_rows(), "meetings_new_evaluation")
 
-    st.caption("Invitees — each gets their own private link and access code.")
+    st.caption(
+        ":red[FAQ (optional) — side questions the bot may answer, with the only answer it may give, "
+        "e.g. 'Is the job remote?' · 'Hybrid: 3 days in the office.' You can change it later in Overview.]"
+    )
+    faq_frame = st.data_editor(
+        _new_faq_rows(),
+        num_rows="dynamic",
+        width="stretch",
+        key="meetings_new_faq",
+        column_config={
+            faq.QUESTION_COLUMN: st.column_config.TextColumn(
+                faq.QUESTION_COLUMN, help="A question invitees might ask, e.g. 'What is the notice period?'"
+            ),
+            faq.ANSWER_COLUMN: st.column_config.TextColumn(
+                faq.ANSWER_COLUMN, help="The only answer the bot may give to it, e.g. '60 days.'"
+            ),
+        },
+    )
+
+    st.caption(
+        ":red[Invitees (optional) — each gets their own private link and access code. "
+        "You can skip this and add them later in Invitees & status.]"
+    )
     invitee_frame = st.data_editor(
         _invitee_rows(),
         num_rows="dynamic",
         width="stretch",
-        key="meetings_new_invitees"
+        key="meetings_new_invitees",
     )
 
     save_default = st.checkbox(
@@ -418,7 +553,23 @@ def _open_new_meeting_dialog(user_id: int) -> None:
         help="Pre-fills the persona on every meeting you create from now on.",
     )
 
-    if st.button("Create meeting", key="meetings_new_save", icon=":material/save:", type="primary"):
+    _render_save_template(
+        user_id,
+        "meetings_new_tpl",
+        lambda name: templates.MeetingTemplate(
+            name=name,
+            description="",
+            meeting_context=meeting_context,
+            persona=persona,
+            context_sop=context_sop,
+            agenda=_agenda_from_frame(agenda_frame),
+            evaluation=_evaluation_from_frame(evaluation_frame, []),
+            faq=_new_faq_entries(faq_frame),
+        ),
+    )
+
+    if st.button("Create meeting", key="meetings_new_save", icon=":material/save:", type="primary",
+                 help="Creates the meeting. Invitees can be added now or later."):
         _handle_create_meeting(
             user_id,
             subject,
@@ -430,6 +581,7 @@ def _open_new_meeting_dialog(user_id: int) -> None:
             invitee_frame,
             save_default,
             st.session_state.get(NEW_MODEL_KEY),
+            faq_frame,
         )
 
 
@@ -461,7 +613,8 @@ def _agenda_from_frame(frame: pd.DataFrame) -> list[AgendaItem]:
 
 
 def _agenda_to_frame(agenda: list[AgendaItem]) -> pd.DataFrame:
-    """A stored agenda back into the editor's shape, with a blank row to grow into."""
+    """A stored agenda back into the editor's shape. Only an empty agenda gets a blank row to
+    type into; otherwise the grid's own + adds rows (phase 58)."""
     rows = [
         {
             "Agenda item": item.item,
@@ -475,8 +628,7 @@ def _agenda_to_frame(agenda: list[AgendaItem]) -> pd.DataFrame:
         }
         for item in agenda
     ]
-    rows.append(_blank_agenda_row())
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows or [_blank_agenda_row()])
 
 
 def _evaluation_from_frame(frame: pd.DataFrame, existing: list[EvaluationField]) -> list[EvaluationField]:
@@ -509,8 +661,7 @@ def _evaluation_to_frame(fields: list[EvaluationField]) -> pd.DataFrame:
         {"Question": field_spec.question, "Buckets": evaluation_buckets_to_text(field_spec.buckets)}
         for field_spec in fields
     ]
-    rows.append({"Question": "", "Buckets": ""})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows or [{"Question": "", "Buckets": ""}])
 
 
 def _invitees_from_frame(frame: pd.DataFrame) -> list[tuple[str, str]]:
@@ -534,6 +685,7 @@ def _handle_create_meeting(
     invitee_frame: pd.DataFrame,
     save_default: bool,
     profile_id: int | None = None,
+    faq_frame: pd.DataFrame | None = None,
 ) -> None:
     agenda = _agenda_from_frame(agenda_frame)
     fields = _evaluation_from_frame(evaluation_frame, [])
@@ -542,12 +694,15 @@ def _handle_create_meeting(
     if not subject.strip():
         st.warning("Give this meeting a subject.", icon=":material/error:")
         return
-    if not people:
-        st.warning("Add at least one invitee — a meeting with nobody to talk to can't start.", icon=":material/error:")
-        return
     problems = steps.agenda_problems(agenda)
     if problems:
         st.warning("Please fix the agenda first:\n\n" + "\n".join(f"- {problem}" for problem in problems), icon=":material/error:")
+        return
+    try:
+        faq_entries = _new_faq_entries(faq_frame) if faq_frame is not None else []
+    except MeetingError as error:
+        logger.warning("The New meeting FAQ was refused: %s", error)
+        st.warning(f"Please fix the FAQ first: {error}", icon=":material/error:")
         return
 
     meeting = Meeting(
@@ -563,6 +718,9 @@ def _handle_create_meeting(
         saved = db.create_meeting(user_id, meeting)
         if fields:
             db.replace_evaluation_fields(saved.meeting_id, user_id, fields)
+        if faq_entries:
+            source = st.session_state.get(NEW_FAQ_SOURCE_KEY) or "Typed in New meeting"
+            db.save_faq(saved.meeting_id, user_id, Faq(source_file=source, entries=faq_entries))
         for name, email in people:
             code = access.generate_access_code()
             db.add_invitee(
@@ -586,6 +744,8 @@ def _handle_create_meeting(
             f"Created '{saved.display_subject()}'. Attach the data for each table item and "
             "For each list in Overview before sharing the links."
         )
+    elif not people:
+        session.flash(f"Created '{saved.display_subject()}'. Add invitees in Invitees & status when you're ready.")
     else:
         session.flash(f"Created '{saved.display_subject()}'. Share the links below with your invitees.")
     st.rerun()
@@ -733,6 +893,22 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
             st.markdown(f"- {field_spec.question}" + (f" — _{buckets}_" if buckets else ""))
 
     _render_setup_editor(meeting, user_id, fields)
+    _render_save_template(
+        user_id,
+        f"meetings_tpl_{meeting.meeting_id}",
+        lambda name: templates.MeetingTemplate(
+            name=name,
+            description="",
+            meeting_context=meeting.meeting_context,
+            persona=meeting.persona,
+            context_sop=meeting.context_sop,
+            agenda=meeting.agenda,
+            evaluation=[
+                EvaluationField(question=field_spec.question, buckets=field_spec.buckets) for field_spec in fields
+            ],
+            faq=_saved_faq_entries(meeting.meeting_id),
+        ),
+    )
 
     for item in meeting.table_items():
         _render_table_setup(meeting, user_id, item)
@@ -740,6 +916,7 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
     for name in steps.loop_names(meeting):
         _render_list_setup(meeting, user_id, name)
 
+    _render_how_to_use_setup(meeting, user_id)
     _render_faq_setup(meeting, user_id)
 
     st.markdown("**Reference documents**")
@@ -829,6 +1006,148 @@ def _handle_save_setup(
     st.rerun()
 
 
+def _render_how_to_use_setup(meeting: Meeting, user_id: int) -> None:
+    """The invitee's "How to use this meeting" steps, editable (phase 59). Blank = automatic."""
+    try:
+        sheets = {table.item_ref: table for table in db.list_agenda_tables(meeting.meeting_id)}
+    except MeetingError:
+        logger.exception("Could not read the tables of meeting %s.", meeting.meeting_id)
+        sheets = {}
+    list_sizes = {key: table.row_count() for key, table in loops.list_tables(meeting, list(sheets.values())).items()}
+    default_lines = guide.default_steps(meeting, sheets, list_sizes)
+    custom = bool(meeting.how_to_use.strip())
+
+    with st.expander("Invitee instructions (How to use this meeting)", icon=":material/help:"):
+        st.caption(
+            ":red[Your own text]" if custom else ":red[Automatic steps — they follow your agenda, tables and lists.]"
+        )
+        shown = guide.invitee_text(meeting, default_lines)
+        text = st.text_area(
+            "What the invitee sees under How to use this meeting",
+            value=shown,
+            height=220,
+            # Keyed by its text too, so a save or an agenda change refills the box.
+            key=f"meetings_how_to_use_{meeting.meeting_id}_{abs(hash(shown))}",
+            help="Edit freely, e.g. add 'Keep your last 3 payslips ready before you start.' "
+            "Markdown works (**bold**, numbered lines). Leave it empty for the automatic steps.",
+        )
+        save_col, reset_col = st.columns(2)
+        if save_col.button(
+            "Save instructions",
+            key=f"meetings_how_to_use_save_{meeting.meeting_id}",
+            icon=":material/save:",
+            help="The invitee sees this text from their next page load.",
+        ):
+            _handle_save_how_to_use(meeting, user_id, guide.text_to_store(text, default_lines))
+        if reset_col.button(
+            "Use default",
+            key=f"meetings_how_to_use_reset_{meeting.meeting_id}",
+            icon=":material/restart_alt:",
+            disabled=not custom,
+            help="Go back to the automatic steps.",
+        ):
+            _handle_save_how_to_use(meeting, user_id, "")
+
+
+def _handle_save_how_to_use(meeting: Meeting, user_id: int, text: str) -> None:
+    try:
+        db.set_how_to_use(meeting.meeting_id, user_id, text)
+    except MeetingError as error:
+        logger.exception("Could not save the instructions of meeting %s.", meeting.meeting_id)
+        st.error(str(error), icon=":material/error:")
+        return
+    session.flash("Instructions saved." if text else "Back to the automatic steps.")
+    st.rerun()
+
+
+def _column_rules_editor(columns: list[str], current: dict[str, ColumnRule], key: str) -> pd.DataFrame:
+    """One row per column the invitee fills in: its Type, Rule and Required (phase 59)."""
+    rows = []
+    for column in columns:
+        rule = current.get(column) or ColumnRule()
+        rows.append(
+            {
+                "Column": column,
+                "Type": steps.ANSWER_TYPE_LABELS[rule.answer_type],
+                "Rule": rule.rule,
+                "Required": rule.required,
+            }
+        )
+    return st.data_editor(
+        pd.DataFrame(rows, columns=list(RULE_COLUMNS)),
+        num_rows="fixed",
+        hide_index=True,
+        width="stretch",
+        disabled=["Column"],
+        # The columns are part of the key, so picking other columns starts a fresh grid.
+        key=f"{key}_{abs(hash(tuple(columns)))}",
+        column_config={
+            "Column": st.column_config.TextColumn(help="A column the invitee fills in."),
+            "Type": st.column_config.SelectboxColumn(
+                options=list(steps.ANSWER_TYPE_LABELS.values()),
+                required=True,
+                help="Number, Date (calendar), Yes/No or Choice (dropdown), or Text.",
+            ),
+            "Rule": st.column_config.TextColumn(
+                help="Same words as Questions: Number `> 0` or `between 1 and 100`; Date `future`, "
+                "`within 30 days`; Choice `Paid, Partly paid, Disputed`; Text `at most 200 characters`. "
+                "Blank = any value of that type.",
+            ),
+            "Required": st.column_config.CheckboxColumn(
+                help="A row the invitee has started must have this column filled.",
+            ),
+        },
+    )
+
+
+def _rules_from_frame(frame: pd.DataFrame) -> dict[str, ColumnRule]:
+    rules = {}
+    for row in frame.to_dict(orient="records"):
+        column = str(row.get("Column") or "").strip()
+        if not column:
+            continue
+        rules[column] = ColumnRule(
+            answer_type=steps.ANSWER_TYPE_BY_LABEL.get(str(row.get("Type") or ""), ANSWER_TEXT),
+            rule=" ".join(str(row.get("Rule") or "").split()),
+            required=bool(row.get("Required")),
+        )
+    return rules
+
+
+def _rule_problems_shown(rules: dict[str, ColumnRule]) -> bool:
+    """Shows why the column rules can't be saved; True when there was a problem."""
+    problems = tables.column_rule_problems(rules)
+    if problems:
+        st.warning(
+            "Please fix the column rules first:\n\n" + "\n".join(f"- {problem}" for problem in problems),
+            icon=":material/error:",
+        )
+    return bool(problems)
+
+
+def _handle_column_rules(meeting_id: int, user_id: int, table: AgendaTable, rules: dict[str, ColumnRule]) -> None:
+    item_ref = table.item_ref
+    if _rule_problems_shown(rules):
+        return
+    try:
+        unreadable = tables.unreadable_answers(rules, db.load_all_table_responses(table.table_id))
+        if unreadable:
+            listed = "\n".join(f"- {answer}" for answer in unreadable[:10])
+            st.warning(
+                "Not saved — some answers already given don't fit the new Type and would be lost:"
+                f"\n\n{listed}\n\nKeep the old Type for those columns, or remove the table to start again.",
+                icon=":material/error:",
+            )
+            return
+        db.update_column_rules(meeting_id, user_id, item_ref, rules)
+    except MeetingError as error:
+        logger.exception("Could not save the column rules of '%s'.", item_ref)
+        st.error(str(error), icon=":material/error:")
+        return
+    session.flash(f"Column rules saved for '{item_ref}'.")
+    st.rerun()
+
+
 def _render_table_setup(meeting: Meeting, user_id: int, item: AgendaItem) -> None:
     """Attaching a sheet to one table agenda item, and marking its columns (spec 3a).
 
@@ -842,13 +1161,26 @@ def _render_table_setup(meeting: Meeting, user_id: int, item: AgendaItem) -> Non
         st.error(str(error), icon=":material/error:")
         return
 
+    key = f"{meeting.meeting_id}_{item.item}"
     with st.expander(f"Table data — {item.item}", expanded=attached is None):
         if attached is not None:
+            filled = ", ".join(tables.describe_column(column, attached.rule_for(column)) for column in attached.editable_columns)
             st.caption(
-                f"{attached.source_file or 'Uploaded sheet'} · {attached.row_count()} row(s) · "
-                f"locked: {', '.join(attached.locked_columns) or 'none'} · "
-                f"editable: {', '.join(attached.editable_columns) or 'none'}"
+                f":red[{attached.source_file or 'Uploaded sheet'} · {attached.row_count()} row(s) · "
+                f"locked: {', '.join(attached.locked_columns) or 'none'} · editable: {filled or 'none'}]"
             )
+            if attached.editable_columns:
+                st.markdown("**Column rules**")
+                saved_rules = _column_rules_editor(
+                    attached.editable_columns, attached.column_rules, f"meetings_table_rules_saved_{key}"
+                )
+                if st.button(
+                    "Save column rules",
+                    key=f"meetings_table_rules_save_{key}",
+                    icon=":material/rule:",
+                    help="Changes what each column accepts. Answers already saved are kept.",
+                ):
+                    _handle_column_rules(meeting.meeting_id, user_id, attached, _rules_from_frame(saved_rules))
             if st.button(
                 "Remove this table",
                 key=f"meetings_table_remove_{meeting.meeting_id}_{item.item}",
@@ -882,6 +1214,13 @@ def _render_table_setup(meeting: Meeting, user_id: int, item: AgendaItem) -> Non
             key=f"meetings_table_editable_{meeting.meeting_id}_{item.item}",
             help="Everything else is shown read-only, for reference.",
         )
+        new_rules = None
+        if editable:
+            st.markdown("**Column rules** — what each column accepts")
+            ordered = [column for column in frame.columns if column in editable]
+            new_rules = _column_rules_editor(
+                ordered, attached.column_rules if attached is not None else {}, f"meetings_table_rules_new_{key}"
+            )
 
         if st.button(
             "Attach table",
@@ -890,7 +1229,8 @@ def _render_table_setup(meeting: Meeting, user_id: int, item: AgendaItem) -> Non
             type="primary",
             help="Saves this sheet as the grid every invitee fills in for this item.",
         ):
-            _handle_attach_table(meeting.meeting_id, user_id, item.item, uploaded.name, frame, editable)
+            rules = _rules_from_frame(new_rules) if new_rules is not None else {}
+            _handle_attach_table(meeting.meeting_id, user_id, item.item, uploaded.name, frame, editable, rules)
 
 
 def _handle_attach_table(
@@ -900,12 +1240,15 @@ def _handle_attach_table(
     filename: str,
     frame: pd.DataFrame,
     editable: list[str],
+    rules: dict[str, ColumnRule],
 ) -> None:
     if not editable:
         st.warning(
             "Mark at least one column as editable — a grid with nothing to fill in is only a document.",
             icon=":material/error:",
         )
+        return
+    if _rule_problems_shown(rules):
         return
 
     table = AgendaTable(
@@ -917,6 +1260,7 @@ def _handle_attach_table(
         locked_columns=[column for column in frame.columns if column not in editable],
         editable_columns=[column for column in frame.columns if column in editable],
         base_data=tables.base_data_from_frame(frame),
+        column_rules=rules,
     )
 
     try:
@@ -1127,6 +1471,16 @@ def _handle_remove_list(meeting: Meeting, user_id: int, name: str) -> None:
 
     session.flash(f"List removed from '{name}'.")
     st.rerun()
+
+
+def _saved_faq_entries(meeting_id: int) -> list[FaqEntry]:
+    """The meeting's saved FAQ rows, for Save as template (phase 61).
+
+    Raises:
+        MeetingStorageError: if it can't be read — Save as template shows the message.
+    """
+    saved = db.load_faq(meeting_id)
+    return saved.entries if saved else []
 
 
 def _faq_misses(meeting: Meeting, user_id: int) -> list:

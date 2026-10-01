@@ -108,6 +108,8 @@ class Meeting:
     created_at: str = ""
     # The Settings profile the chat runs on (phase 56); None means the creator's default.
     profile_id: int | None = None
+    # The organiser's own "How to use this meeting" text (phase 59); blank = the automatic steps.
+    how_to_use: str = ""
 
     def agenda_titles(self) -> list[str]:
         return [item.item for item in self.agenda]
@@ -160,6 +162,33 @@ class ChatMessage:
 
 
 @dataclass
+class ColumnRule:
+    """What one invitee-filled column accepts (phase 59), in the same words as a Question.
+
+    `required` means a row the invitee has started must have this column filled.
+    """
+
+    answer_type: str = ANSWER_TEXT
+    rule: str = ""
+    required: bool = False
+
+    def to_dict(self) -> dict:
+        return {"answer_type": self.answer_type, "rule": self.rule, "required": self.required}
+
+    @classmethod
+    def from_dict(cls, raw) -> "ColumnRule":
+        """Never raises: an unreadable entry is a plain Text column."""
+        if not isinstance(raw, dict):
+            return cls()
+        answer_type = str(raw.get("answer_type") or ANSWER_TEXT)
+        return cls(
+            answer_type=answer_type if answer_type in ANSWER_TYPES else ANSWER_TEXT,
+            rule=str(raw.get("rule") or ""),
+            required=bool(raw.get("required")),
+        )
+
+
+@dataclass
 class AgendaTable:
     """The grid behind one table agenda item (spec 3a).
 
@@ -187,6 +216,11 @@ class AgendaTable:
     # For a For each list (phase 57): the column that names a row, e.g. Invoice No, so the
     # chat can say "INV-102" instead of "row 2". Blank means rows are named by number.
     label_column: str = ""
+    # Phase 59: Type / Rule / Required per editable column. A column missing here is plain Text.
+    column_rules: dict[str, ColumnRule] = field(default_factory=dict)
+
+    def rule_for(self, column: str) -> ColumnRule:
+        return self.column_rules.get(column) or ColumnRule()
 
     def row_count(self) -> int:
         return len(self.base_data)

@@ -16,6 +16,7 @@ from meetings.model import (
     QUESTION_ITEM,
     AgendaItem,
     EvaluationField,
+    FaqEntry,
 )
 
 
@@ -28,6 +29,12 @@ class MeetingTemplate:
     context_sop: str
     agenda: list[AgendaItem] = field(default_factory=list)
     evaluation: list[EvaluationField] = field(default_factory=list)
+    # Phase 61: the side questions the bot may answer, copied into the meeting's FAQ.
+    faq: list[FaqEntry] = field(default_factory=list)
+
+
+def _faq(*pairs: tuple[str, str]) -> list[FaqEntry]:
+    return [FaqEntry(question=question, answer=answer) for question, answer in pairs]
 
 
 def _question(title: str, answer_type: str, rule: str = "", branch: str = "", loop: str = "", note: str = "") -> AgendaItem:
@@ -55,6 +62,24 @@ TEMPLATES = [
             EvaluationField(question="Years of experience", buckets=["Under 3", "3 to 7", "Over 7"]),
             EvaluationField(question="Communication", buckets=["Good", "Average", "Poor"]),
         ],
+        faq=_faq(
+                ("Can you explain this role?", "This role is responsible for [key responsibilities] and requires experience in [skills/domain]. For more details Plz refer Job Description."),
+                ("What is the interview process?", "The process may include an HR round, functional or technical evaluation, hiring-manager discussion, and final selection review."),
+                ("What skills are you looking for?", "We assess job-specific capability, communication, problem-solving, teamwork, and relevant experience."),
+                ("Is this a remote, hybrid, or office-based role?", "The work arrangement depends on the role, location, and company policy."),
+                ("What is the expected salary range?", "Compensation depends on experience, role level, location, and internal pay structure."),
+                ("What are the working hours?", "Working hours depend on the department, location, and business requirements."),
+                ("What growth opportunities are available?", "Employees may have opportunities for training, performance-based growth, internal mobility, and leadership development."),
+                ("How should I prepare for the interview?", "Review the job description and prepare examples of achievements, challenges handled, and measurable results."),
+                ("Can I reschedule my interview?", "Yes. Please share your preferred date and time, and I will check available interview slots."),
+                ("When will I receive feedback?", "We aim to provide an update within [X] business days, subject to interview completion and internal review."),
+                ("Can I apply for more than one role?", "Yes, if your experience is relevant to multiple open roles."),
+                ("What is the probation period?", " The probation period is based on company policy ,normally 3 to 6 months and will be communicated in the offer letter."),
+                ("What is the company culture like?", "Our culture focuses on accountability, collaboration, learning, ethical conduct, and business results."),
+                ("What documents are required?", " An updated resume is generally required. Qualification, identity, employment, and background verification documents may be requested later."),
+                ("How company handle performance evaluations, and how often do they occur?","We conduct formal performance and salary reviews annually, supplemented by mid-year check-ins. Your manager will also hold bi-monthly 1-on-1s to ensure your goals stay aligned."),
+
+        ),
     ),
     MeetingTemplate(
         name="Vendor purchase",
@@ -70,6 +95,24 @@ TEMPLATES = [
             AgendaItem(item="Quality and past issues", ai_note="Ask how they handle rejected material."),
         ],
         evaluation=[EvaluationField(question="Delivery confidence", buckets=["High", "Medium", "Low"])],
+        faq=_faq(
+            ("How can I submit my quotation for this RFQ?", " Please submit your quotation through this Chat or email before the RFQ closing date, along with all requested documents."),
+            ("What information must be included in the quotation?", "Include item description, specification compliance, quantity, unit price, taxes, delivery lead time, payment terms, validity, and warranty details."),
+            ("What is the RFQ closing date and time?", "The submission deadline is stated in the RFQ. Quotations received after the deadline may not be considered."),
+            ("Can I submit a quotation after the deadline?", "Late submissions are subject to procurement policy and may be accepted only with approved justification."),
+            ("Can I offer an alternative product or specification?", "Yes. Clearly identify the alternative, provide technical specifications, explain deviations, and state any commercial impact."),
+            ("Can I quote for only some RFQ items?", "Yes, unless the RFQ specifically requires a complete quotation. Clearly mention which items you are quoting for."),
+            ("Can I revise my quotation?", "You may revise your quotation before the submission deadline. Please clearly mark it as a revised version."),
+            ("What should be the quotation validity period?", "Please follow the validity period requested in the RFQ. If you cannot meet it, state your proposed validity period clearly."),
+            ("Are taxes and freight included in the quoted price?", "Please specify whether prices are inclusive or exclusive of taxes, freight, insurance, packaging, installation, or other charges."),
+            ("What delivery terms should I mention?", "State the delivery location, lead time, Incoterms if applicable, dispatch terms, and any conditions affecting delivery."),
+            ("What payment terms are acceptable?", "Please quote your standard payment terms. Final terms are subject to company procurement policy and commercial approval."),
+            ("Do I need to submit technical documents?", "Yes, where applicable. Include product catalogues, datasheets, compliance certificates, drawings, and warranty information."),
+            ("How will suppliers be evaluated?", "Evaluation considers technical compliance, price, quality, delivery capability, commercial terms, past performance, and supplier eligibility."),
+            ("Can I contact the team for clarification?", "Yes. Send clarification questions through the official RFQ communication channel before the clarification deadline."),
+            ("When will the purchase decision be communicated?", "Selected suppliers will be notified after technical and commercial evaluation, approvals, and final procurement review."),
+
+        ),
     ),
     MeetingTemplate(
         name="Sales quotation",
@@ -85,6 +128,11 @@ TEMPLATES = [
             _question("Best competing price", ANSWER_NUMBER, "> 0"),
             _question("Decision date", ANSWER_DATE, "within 90 days"),
         ],
+        faq=_faq(
+            ("When will I get the quotation?", "Within 2 working days after this chat."),
+            ("Is delivery included in the price?", "Delivery charges are shown separately in the quotation."),
+            ("Can I get a sample?", "Yes, our sales team will arrange one after the quotation."),
+        ),
     ),
     MeetingTemplate(
         name="Project review",
@@ -99,6 +147,10 @@ TEMPLATES = [
             _question("Responsible person", ANSWER_TEXT),
             _question("Next steps", ANSWER_TEXT),
         ],
+        faq=_faq(
+            ("Who sees my answers?", "Only the Project Manager running this review."),
+            ("Can I change the deadline later?", "Yes, tell the Project Manager in the next weekly review."),
+        ),
     ),
     MeetingTemplate(
         name="AR review",
@@ -114,7 +166,17 @@ TEMPLATES = [
             _question("Reason for delay", ANSWER_TEXT, loop="Outstanding invoices"),
             AgendaItem(item="Any disputes", ai_note="Ask if any invoice is disputed and why."),
         ],
+        faq=_faq(
+            ("How can I pay?", "By bank transfer to the account printed on the invoice."),
+            ("Can I get a copy of the invoice?", "Yes, our accounts team will email it to you after this chat."),
+            ("Whom do I contact about a wrong invoice?", "Tell us here under Any disputes; accounts will call you."),
+        ),
     ),
 ]
 
 TEMPLATE_BY_NAME = {template.name: template for template in TEMPLATES}
+
+
+def is_builtin_name(name: str) -> bool:
+    """True for a ready-made template's name, in any case — a user's own can't reuse one."""
+    return name.strip().lower() in {template.name.lower() for template in TEMPLATES}

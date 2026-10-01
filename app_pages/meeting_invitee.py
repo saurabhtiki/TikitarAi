@@ -32,6 +32,7 @@ from meetings import (
     chat_agent,
     db,
     extraction_agent,
+    guide,
     llm_choice,
     loops,
     running_summary,
@@ -44,11 +45,16 @@ from meetings import (
 from meetings.access import verify_code
 from meetings.exceptions import MeetingAgentError, MeetingError
 from meetings.model import (
+    ANSWER_CHOICE,
+    ANSWER_DATE,
+    ANSWER_NUMBER,
+    ANSWER_YES_NO,
     SENDER_AI,
     SENDER_USER,
     STEP_ANSWERED,
     STEP_NOT_ANSWERED,
     AgendaTable,
+    ColumnRule,
     Faq,
     Meeting,
     StepAnswer,
@@ -224,7 +230,7 @@ def _render_chat(meeting: Meeting, invitee: dict) -> None:
     lists = _invitee_lists(meeting, invitee)
 
     if not messages and not chat_session.closed:
-        _open_conversation(meeting, profile, meeting_id, invitee_id, fields, answers, lists)
+        _open_conversation(meeting, profile, invitee, fields, answers, lists)
         return
 
     side, main = st.columns([1, 3])
@@ -298,38 +304,6 @@ def _table_sheets(meeting: Meeting, meeting_id: int) -> dict[str, AgendaTable]:
         return {}
 
 
-def _how_to_use(meeting: Meeting, sheets: dict[str, AgendaTable], lists: loops.InviteeLists) -> list[str]:
-    """The plain steps in the How to use panel, naming this meeting's own tabs and lists."""
-    lines = ["Type your reply in the box at the bottom of the chat and press Enter."]
-    if meeting.question_items():
-        lines.append(
-            "Some questions are asked one at a time, e.g. 'Question 2 of 5'. If an answer can't be "
-            "accepted you are told why and asked again."
-        )
-    for name in steps.loop_names(meeting):
-        rows = lists.rows.get(steps.loop_key(name), [])
-        if rows:
-            lines.append(
-                f"Questions about each row of **{name}** ({len(rows)} row(s)) are asked in the chat — "
-                "see the list on the left."
-            )
-    lines.append("You can ask your own question at any time, e.g. 'What is the notice period?'.")
-    for item in meeting.table_items():
-        sheet = sheets.get(item.item)
-        if sheet is None:
-            continue
-        columns = ", ".join(sheet.editable_columns)
-        fill = f"fill in **{columns}**" if columns else "check the rows"
-        lines.append(f"Open the tab **📋 {item.item}** and {fill}, then press Save progress.")
-    lines.append("Use Attach a file to share a document with the organiser.")
-    if meeting.question_items():
-        lines.append("When every question is done, press Close chat to get your summary.")
-    else:
-        lines.append("When you are done, press Close chat to get your summary.")
-    lines.append("You can leave and come back later with the same link — nothing is lost.")
-    return lines
-
-
 def _render_side_panel(
     meeting: Meeting,
     meeting_id: int,
@@ -341,8 +315,8 @@ def _render_side_panel(
     """The left 1/4: how to use, the agenda, the For each lists, reference documents, attach."""
     sheets = _table_sheets(meeting, meeting_id)
     with st.expander("How to use this meeting", icon=":material/help:"):
-        lines = _how_to_use(meeting, sheets, lists)
-        st.markdown("\n".join(f"{number}. {line}" for number, line in enumerate(lines, start=1)))
+        list_sizes = {key: len(rows) for key, rows in lists.rows.items()}
+        st.markdown(guide.invitee_text(meeting, guide.default_steps(meeting, sheets, list_sizes)))
     with st.expander("Agenda", icon=":material/list:", expanded=True):
         if meeting.agenda:
             st.markdown("\n".join(f"- {item.item}" for item in meeting.agenda))
@@ -419,8 +393,7 @@ def _render_discussion(
         _handle_turn(
             meeting,
             profile,
-            meeting_id,
-            invitee_id,
+            invitee,
             chat_session.running_summary,
             messages,
             prompt,
@@ -462,10 +435,17 @@ def _render_table_tab(meeting_id: int, invitee_id: int, item, closed: bool) -> N
         return
 
     st.caption(tables.completion_label(table, len(responses)))
+    if table.editable_columns and not closed:
+        st.markdown(
+            ":material/edit: **You can fill in:** "
+            + ", ".join(tables.describe_column(column, table.rule_for(column)) for column in table.editable_columns)
+            + " — the other columns are for reference. Existing values are shown; change them or leave them."
+        )
 
     edited = st.data_editor(
         tables.display_frame(table, responses),
         num_rows="fixed",
+        column_config=_grid_column_config(table),
         # The whole grid, not just the locked columns, once the chat is closed: a closed
         # session is a locked record, and an editable cell that silently saves nothing would
         # be worse than one that can't be typed in.
@@ -487,12 +467,40 @@ def _render_table_tab(meeting_id: int, invitee_id: int, item, closed: bool) -> N
         _handle_save_table(table, invitee_id, edited)
 
 
+def _grid_column_config(table: AgendaTable) -> dict:
+    """Each editable column as its own kind of cell (phase 59): numbers, a calendar, a dropdown."""
+    today = datetime.date.today()
+    return {column: _column_cell(column, table.rule_for(column), today) for column in table.editable_columns}
+
+
+def _column_cell(column: str, rule: ColumnRule, today: datetime.date):
+    question = tables.column_question(column, rule)
+    tip = tables.describe_column(column, rule)
+    if rule.answer_type == ANSWER_NUMBER:
+        return st.column_config.NumberColumn(help=tip)
+    if rule.answer_type == ANSWER_DATE:
+        first, last = steps.date_limits(question, today)
+        return st.column_config.DateColumn(help=tip, format="DD-MM-YYYY", min_value=first, max_value=last)
+    if rule.answer_type == ANSWER_YES_NO:
+        # A dropdown, not a tick box: a tick box has no blank, so every row would look filled.
+        return st.column_config.SelectboxColumn(help=tip, options=["Yes", "No"])
+    if rule.answer_type == ANSWER_CHOICE:
+        return st.column_config.SelectboxColumn(help=tip, options=steps.choice_options(rule.rule))
+    return st.column_config.TextColumn(help=tip, max_chars=steps.max_length(question))
+
+
 def _handle_save_table(table: AgendaTable, invitee_id: int, edited) -> None:
-    """Stores the invitee's rows. Explicit rather than per-cell, as spec 3a asks."""
+    """Stores the invitee's rows once every column rule passes (phase 59). Explicit rather than
+    per-cell, as spec 3a asks; on a problem nothing is saved and the grid keeps what was typed."""
+    rows, problems = tables.check_rows(table, tables.responses_from_frame(table, edited), datetime.date.today())
+    if problems:
+        shown = "\n".join(f"- {problem}" for problem in problems[:10])
+        more = f"\n- …and {len(problems) - 10} more" if len(problems) > 10 else ""
+        logger.info("Table %s rows refused for invitee %s: %s", table.table_id, invitee_id, problems)
+        st.error(f"Nothing saved yet — please fix these:\n\n{shown}{more}", icon=":material/error:")
+        return
     try:
-        saved = db.save_table_responses(
-            table.table_id, invitee_id, tables.responses_from_frame(table, edited)
-        )
+        saved = db.save_table_responses(table.table_id, invitee_id, rows)
     except MeetingError as error:
         logger.exception("Could not save table rows for invitee %s.", invitee_id)
         st.error(str(error), icon=":material/error:")
@@ -504,8 +512,7 @@ def _handle_save_table(table: AgendaTable, invitee_id: int, edited) -> None:
 def _open_conversation(
     meeting: Meeting,
     profile: dict,
-    meeting_id: int,
-    invitee_id: int,
+    invitee: dict,
     fields: list,
     answers: dict[str, StepAnswer],
     lists: loops.InviteeLists,
@@ -515,6 +522,8 @@ def _open_conversation(
     A meeting with question steps opens by asking the first one, so the invitee's first
     reply is already an answer to something the app is tracking.
     """
+    meeting_id = invitee["meeting_id"]
+    invitee_id = invitee["invitee_id"]
     first = steps.next_question(meeting, answers, lists.rows)
     guidance = ""
     if first is not None:
@@ -533,6 +542,8 @@ def _open_conversation(
                 step_guidance=guidance,
                 step_tag=first.item if first is not None else "",
                 faq=_meeting_faq(meeting_id),
+                invitee_name=invitee.get("name", ""),
+                sheets=_table_sheets(meeting, meeting_id),
             )
         db.add_message(meeting_id, invitee_id, SENDER_AI, opening.reply, opening.agenda_tag)
         _note_model(meeting_id, invitee_id, profile)
@@ -546,8 +557,7 @@ def _open_conversation(
 def _handle_turn(
     meeting: Meeting,
     profile: dict,
-    meeting_id: int,
-    invitee_id: int,
+    invitee: dict,
     summary_so_far: str,
     messages: list,
     prompt: str,
@@ -561,6 +571,8 @@ def _handle_turn(
     costs them the reply and not what they typed. While a question step is open the reply is
     steered by `_advance_question`; a failure while reading the answer uses no try.
     """
+    meeting_id = invitee["meeting_id"]
+    invitee_id = invitee["invitee_id"]
     current = steps.next_question(meeting, answers, lists.rows)
     try:
         db.add_message(meeting_id, invitee_id, SENDER_USER, prompt, current.item if current else "")
@@ -591,6 +603,8 @@ def _handle_turn(
                 step_guidance=guidance,
                 step_tag=step_tag,
                 faq=_meeting_faq(meeting_id),
+                invitee_name=invitee.get("name", ""),
+                sheets=_table_sheets(meeting, meeting_id),
             )
         db.add_message(meeting_id, invitee_id, SENDER_AI, turn.reply, turn.agenda_tag)
         _note_model(meeting_id, invitee_id, profile)

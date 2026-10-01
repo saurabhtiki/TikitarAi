@@ -8,7 +8,7 @@ A rule is a short phrase the organiser types in the agenda grid:
 
     Number   > 0 | >= 1000 | < 90 | <= 90 | between 20000 and 60000
     Date     future | past | after 01-10-2026 | before 31-12-2026 | within 30 days
-    Text     at least 20 characters
+    Text     at least 20 characters | at most 200 characters
     Choice   Morning, Evening, Night          (required: the options themselves)
     Yes/No   (no rule)
 
@@ -56,13 +56,14 @@ ANSWER_TYPE_LABELS = {
 }
 ANSWER_TYPE_BY_LABEL = {label: answer_type for answer_type, label in ANSWER_TYPE_LABELS.items()}
 
-_DATE_FORMATS = ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y")
+_DATE_FORMATS = ("%d-%m-%Y", "%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S")
 _NUMBER = r"(-?[\d,]*\.?\d+)"
 _COMPARE_RULE = re.compile(rf"^(>=|<=|>|<)\s*{_NUMBER}$")
 _BETWEEN_RULE = re.compile(rf"^between\s+{_NUMBER}\s+and\s+{_NUMBER}$")
 _DATE_EDGE_RULE = re.compile(r"^(after|before)\s+(\S+)$")
 _WITHIN_RULE = re.compile(r"^within\s+(\d+)\s+days?$")
 _MIN_LENGTH_RULE = re.compile(r"^at least\s+(\d+)\s+characters?$")
+_MAX_LENGTH_RULE = re.compile(r"^at most\s+(\d+)\s+characters?$")
 
 _YES_WORDS = {"yes", "y", "true", "yeah", "yep", "haan", "ha"}
 _NO_WORDS = {"no", "n", "false", "nope", "nahi"}
@@ -70,7 +71,7 @@ _NO_WORDS = {"no", "n", "false", "nope", "nahi"}
 _RULE_EXAMPLES = {
     ANSWER_NUMBER: "For a number, write it like `> 5000` or `between 20000 and 60000`.",
     ANSWER_DATE: "For a date, write `future`, `past`, `after 01-10-2026`, `before 31-12-2026` or `within 30 days`.",
-    ANSWER_TEXT: "For text, write `at least 20 characters`, or leave it blank.",
+    ANSWER_TEXT: "For text, write `at least 20 characters`, `at most 200 characters`, or leave it blank.",
     ANSWER_CHOICE: "For a choice, list the options with commas, like `Morning, Evening, Night`.",
     ANSWER_YES_NO: "A Yes/No question needs no rule — leave it blank.",
 }
@@ -206,6 +207,22 @@ def _format_date(value: datetime.date) -> str:
     return value.strftime("%d-%m-%Y")
 
 
+def parse_number(text) -> float | None:
+    """A number written like "45000" or "45,000", or None."""
+    try:
+        return _to_number(text)
+    except ValueError:
+        return None
+
+
+def parse_date(text) -> datetime.date | None:
+    """A date written dd-mm-yyyy (or yyyy-mm-dd, dd/mm/yyyy), or None."""
+    try:
+        return _to_date(text)
+    except ValueError:
+        return None
+
+
 def choice_options(rule: str) -> list[str]:
     return [option.strip() for option in str(rule or "").split(",") if option.strip()]
 
@@ -246,6 +263,8 @@ def _parse_rule(item: AgendaItem) -> tuple | None:
         elif answer_type == ANSWER_TEXT:
             if match := _MIN_LENGTH_RULE.match(lowered):
                 return ("min_length", int(match.group(1)))
+            if match := _MAX_LENGTH_RULE.match(lowered):
+                return ("max_length", int(match.group(1)))
     except ValueError as error:
         logger.info("Rule '%s' on '%s' did not parse: %s", rule, item.item, error)
 
@@ -530,7 +549,39 @@ def describe_rule(item: AgendaItem) -> str:
         return "one of: " + ", ".join(choice_options(item.rule))
     if parsed and parsed[0] == "min_length":
         return f"a text answer of at least {parsed[1]} characters"
+    if parsed and parsed[0] == "max_length":
+        return f"a text answer of at most {parsed[1]} characters"
     return "a text answer"
+
+
+def max_length(item: AgendaItem) -> int | None:
+    """N for a Text rule `at most N characters`, else None."""
+    try:
+        parsed = _parse_rule(item)
+    except RuleError:
+        return None
+    return parsed[1] if parsed and parsed[0] == "max_length" else None
+
+
+def date_limits(item: AgendaItem, today: datetime.date) -> tuple[datetime.date | None, datetime.date | None]:
+    """The first and last day a Date rule allows (None = open), for a calendar picker."""
+    try:
+        parsed = _parse_rule(item)
+    except RuleError:
+        return None, None
+    one_day = datetime.timedelta(days=1)
+    kind = parsed[0] if parsed else ""
+    if kind == "future":
+        return today + one_day, None
+    if kind == "past":
+        return None, today - one_day
+    if kind == "after":
+        return parsed[1] + one_day, None
+    if kind == "before":
+        return None, parsed[1] - one_day
+    if kind == "within":
+        return today, today + datetime.timedelta(days=parsed[1])
+    return None, None
 
 
 def check_answer(item: AgendaItem, value: str, today: datetime.date) -> AnswerCheck:
@@ -594,6 +645,8 @@ def check_answer(item: AgendaItem, value: str, today: datetime.date) -> AnswerCh
         return refusal
 
     if parsed and parsed[0] == "min_length" and len(text) < parsed[1]:
+        return refusal
+    if parsed and parsed[0] == "max_length" and len(text) > parsed[1]:
         return refusal
     return AnswerCheck(ok=True, value=text)
 

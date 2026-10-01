@@ -5,19 +5,26 @@ edits back into rows to store. No Streamlit and no SQL, so the arithmetic that d
 40 rows updated" — which the status list, the MoM and the comparison matrix all quote — can
 be tested without either.
 
+Phase 59: each editable column can have a Type, a Rule and Required (`ColumnRule`), checked
+with the same code as a Question (`steps.check_answer`). Number and Date columns go into the
+grid as real numbers and dates, so the grid itself refuses letters and offers a calendar.
+
 The row's identity is its **position in `base_data`**, not a value in it. A bill number would
 be a nicer key right up to the first sheet that repeats one, and a duplicate key here would
 silently merge two invitees' answers to two different rows.
 """
 
+import datetime
 import logging
+import math
 from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
 
+from meetings import steps
 from meetings.exceptions import MeetingStorageError
-from meetings.model import AgendaTable
+from meetings.model import ANSWER_DATE, ANSWER_NUMBER, QUESTION_ITEM, AgendaItem, AgendaTable, ColumnRule
 
 logger = logging.getLogger(__name__)
 
@@ -80,19 +87,86 @@ def base_data_from_frame(frame: pd.DataFrame) -> list[dict]:
     ]
 
 
-def display_frame(table: AgendaTable, responses: dict[int, dict]) -> pd.DataFrame:
-    """The grid as the invitee sees it: locked columns, then their own answers.
+def column_question(column: str, rule: ColumnRule) -> AgendaItem:
+    """A column rule dressed as a Question, so `steps` can read and check it."""
+    return AgendaItem(item=column, item_type=QUESTION_ITEM, answer_type=rule.answer_type, rule=rule.rule)
 
-    Built from `base_data` every time rather than from anything stored per invitee, so the
-    locked columns are always the creator's — an invitee cannot end up looking at a bill
-    amount their own earlier edit changed.
+
+def column_rule_problems(rules: dict[str, ColumnRule]) -> list[str]:
+    """Why these column rules can't be saved, e.g. "Status: a Choice question needs at least two options"."""
+    problems = []
+    for column, rule in rules.items():
+        problem = steps.rule_problem(column_question(column, rule))
+        if problem:
+            # `rule_problem` speaks of questions; only its wording after "Column: " is changed.
+            problems.append(f"{column}: " + problem.removeprefix(f"{column}: ").replace("question", "column"))
+    return problems
+
+
+def _fits_type(rule: ColumnRule, value: str) -> bool:
+    if rule.answer_type == ANSWER_NUMBER:
+        return steps.parse_number(value) is not None
+    if rule.answer_type == ANSWER_DATE:
+        return steps.parse_date(value) is not None
+    return True
+
+
+def unreadable_answers(rules: dict[str, ColumnRule], all_responses: dict[int, dict[int, dict]]) -> list[str]:
+    """Saved answers a new Number or Date type can't show, e.g. "Expected price: 'approx 40k'".
+
+    The grid would show them blank and the invitee's next save would wipe them, so a type
+    change that hits one is refused. A changed Rule is fine: the answer still shows, and is
+    checked on the next save.
+    """
+    found = []
+    for rows in all_responses.values():
+        for values in rows.values():
+            for column, value in values.items():
+                if not _fits_type(rules.get(column) or ColumnRule(), str(value)):
+                    found.append(f"{column}: '{value}'")
+    return found
+
+
+def describe_column(column: str, rule: ColumnRule) -> str:
+    """ "Expected price (a number more than 0, required)" — for the bot and the How to use steps.
+    A plain Text column with no rule is just its name."""
+    if rule == ColumnRule():
+        return column
+    words = steps.describe_rule(column_question(column, rule))
+    return f"{column} ({words}{', required' if rule.required else ''})"
+
+
+def _grid_value(rule: ColumnRule, text: str):
+    """A stored answer in the grid's own type: a number, a date, or text. Unreadable = blank."""
+    if rule.answer_type == ANSWER_NUMBER:
+        number = steps.parse_number(text) if text else None
+        return float("nan") if number is None else number
+    if rule.answer_type == ANSWER_DATE:
+        return steps.parse_date(text) if text else None
+    return text
+
+
+def sheet_value(table: AgendaTable, index: int, column: str) -> str:
+    """What the uploaded sheet itself holds in this cell ("" when the row or column is missing)."""
+    if 0 <= index < len(table.base_data):
+        return str(table.base_data[index].get(column, "") or "").strip()
+    return ""
+
+
+def display_frame(table: AgendaTable, responses: dict[int, dict]) -> pd.DataFrame:
+    """The grid as the invitee sees it: locked columns, then the editable ones.
+
+    An editable cell shows the invitee's saved answer, else the value in the uploaded sheet,
+    so they update what is there instead of retyping it. Built from `base_data` every time,
+    so the locked columns are always the creator's.
     """
     rows = []
     for index, base_row in enumerate(table.base_data):
         row = {column: str(base_row.get(column, "")) for column in table.locked_columns}
         answers = responses.get(index, {})
         for column in table.editable_columns:
-            row[column] = str(answers.get(column, ""))
+            text = str(answers.get(column, "") or "") or sheet_value(table, index, column)
+            row[column] = _grid_value(table.rule_for(column), text)
         rows.append(row)
 
     columns = table.all_columns()
@@ -104,6 +178,8 @@ def display_frame(table: AgendaTable, responses: dict[int, dict]) -> pd.DataFram
 def responses_from_frame(table: AgendaTable, frame: pd.DataFrame) -> dict[int, dict]:
     """The invitee's edits, as `{row_index: {column: value}}`.
 
+    Only cells the invitee changed count: a value still equal to the uploaded sheet's (as the
+    grid shows it) is not an answer, so a pre-filled grid doesn't read as "all rows filled".
     Only the editable columns are read back. An edit to a locked column is discarded rather
     than rejected: `st.data_editor` is told to disable them, so a value arriving in one is
     not a user decision to honour.
@@ -118,14 +194,58 @@ def responses_from_frame(table: AgendaTable, frame: pd.DataFrame) -> dict[int, d
     answers: dict[int, dict] = {}
     records = frame.to_dict(orient="records")
     for index, row in enumerate(records[: len(table.base_data)]):
-        values = {
-            column: str(row.get(column, "") or "").strip()
-            for column in table.editable_columns
-            if str(row.get(column, "") or "").strip()
-        }
+        values = {}
+        for column in table.editable_columns:
+            text = cell_text(row.get(column))
+            original = cell_text(_grid_value(table.rule_for(column), sheet_value(table, index, column)))
+            if text and text != original:
+                values[column] = text
         if values:
             answers[index] = values
     return answers
+
+
+def cell_text(value) -> str:
+    """A grid cell as text: blank for empty, dd-mm-yyyy for a date, 45000 (not 45000.0) for a number."""
+    if value is None or (isinstance(value, float) and math.isnan(value)) or value is pd.NaT:
+        return ""
+    if isinstance(value, (datetime.date, pd.Timestamp)):
+        return value.strftime("%d-%m-%Y")
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
+def check_rows(
+    table: AgendaTable, rows: dict[int, dict], today: datetime.date
+) -> tuple[dict[int, dict], list[str]]:
+    """The invitee's rows checked against the column rules: `(cleaned rows, problems)`.
+
+    A cleaned value is the stored form ("45,000" -> "45000", a date as dd-mm-yyyy, "yes" -> "Yes").
+    Only the cells the invitee changed are checked. Required only applies to a row the
+    invitee has started (a value from the uploaded sheet counts as filled), so part-way saves
+    still work.
+    """
+    cleaned: dict[int, dict] = {}
+    problems = []
+    for index, values in sorted(rows.items()):
+        kept = {}
+        for column in table.editable_columns:
+            rule = table.rule_for(column)
+            text = str(values.get(column, "") or "").strip()
+            if not text:
+                if rule.required and not sheet_value(table, index, column):
+                    problems.append(f"Row {index + 1}, {column}: this column is required.")
+                continue
+            check = steps.check_answer(column_question(column, rule), text, today)
+            if check.ok:
+                kept[column] = check.value
+            else:
+                reason = check.reason.removeprefix("The answer ")
+                problems.append(f"Row {index + 1}, {column}: '{text}' — {reason}")
+        if kept:
+            cleaned[index] = kept
+    return cleaned, problems
 
 
 def completion(table: AgendaTable, filled_rows: int) -> tuple[int, int, int]:

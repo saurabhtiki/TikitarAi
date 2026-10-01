@@ -32,6 +32,7 @@ from meetings.model import (
     OPENING_TAG,
     OTHER_TAG,
     AgendaItem,
+    AgendaTable,
     ChatMessage,
     EvaluationField,
     Faq,
@@ -41,6 +42,7 @@ from meetings.model import (
 from meetings.faq import faq_block
 from meetings.running_summary import render_turns
 from meetings.steps import describe_rule
+from meetings.tables import describe_column
 
 logger = logging.getLogger(__name__)
 
@@ -165,8 +167,14 @@ def system_instructions(
     evaluation_fields: list[EvaluationField] | None = None,
     step_guidance: str = "",
     faq: Faq | None = None,
+    *,
+    invitee_name: str = "",
+    sheets: dict[str, AgendaTable] | None = None,
 ) -> str:
     """The persona, the context, the SOP and the agenda, as one instruction block.
+
+    Phase 59: `invitee_name` makes the chat personal ("Hi Ravi"), and `sheets` (the table
+    grids by title) lets the bot explain what each column to fill in accepts.
 
     Assembled per turn from the meeting as it stands rather than cached, so a creator who
     fixes a wrong figure in an agenda item's note has it apply to the very next message
@@ -180,6 +188,13 @@ def system_instructions(
 
     persona = meeting.persona.strip()
     parts.append(persona or "You are a professional meeting facilitator.")
+
+    name = " ".join(str(invitee_name or "").split())
+    if name:
+        parts.append(
+            f"You are talking to {name}. Greet them by name in your first message (for example "
+            f"\"Hi {name}, ...\") and use their name now and then after that, not in every reply."
+        )
 
     if meeting.meeting_context.strip():
         parts.append(f"Why this conversation is happening:\n{meeting.meeting_context.strip()}")
@@ -212,6 +227,10 @@ def system_instructions(
         for item in table_items:
             note = f" — {item.ai_note.strip()}" if item.ai_note.strip() else ""
             table_lines.append(f"- {item.item}{note}")
+            sheet = (sheets or {}).get(item.item)
+            if sheet is not None and sheet.editable_columns:
+                columns = "; ".join(describe_column(column, sheet.rule_for(column)) for column in sheet.editable_columns)
+                table_lines.append(f"  Columns the invitee fills in: {columns}")
         parts.append(
             "These items are filled in on their own tabs as tables, not in this chat:\n"
             + "\n".join(table_lines)
@@ -227,19 +246,34 @@ def system_instructions(
             "them out as a form or a checklist:\n" + "\n".join(question_lines)
         )
 
+    # Phase 58: side questions are answered only from what the organiser wrote, FAQ or not —
+    # a model left to itself happily explains "payment terms" from general knowledge.
+    no_general_knowledge = (
+        "Never answer from your own general knowledge, not even for common terms (for example "
+        "what 'payment terms' or 'notice period' means). To explain one of your own questions, "
+        "use only its wording, rule, options and background note."
+    )
     faq_text = faq_block(faq)
     if faq_text:
-        # Phase 53: the organiser's answers are the only ones the bot may give, and a
-        # question they don't cover is logged (via `unanswered_question`) rather than guessed.
+        # Phase 53: a question the FAQ doesn't cover is logged (via `unanswered_question`).
         parts.append(
             "FAQ — the organiser's answers to questions invitees often ask:\n"
             + faq_text
-            + "\nWhen the invitee asks you a question of their own, answer it only from this FAQ, "
-            "in your own words and briefly (you may still explain what one of your own questions "
-            "means). If the FAQ does not answer it, do not guess: say you don't have that answer, "
+            + "\nWhen the invitee asks you a question of their own, answer it only from this FAQ "
+            "and the context, rules and agenda notes above, in your own words and briefly. "
+            + no_general_knowledge
+            + " If none of these answers it, do not guess: say you don't have that answer, "
             "that you have noted it for the organiser who will get back to them, and set "
             "unanswered_question to their question. Leave unanswered_question empty otherwise. "
             "Then carry on with the conversation where it was."
+        )
+    else:
+        parts.append(
+            "When the invitee asks you a question of their own, answer it only from the context, "
+            "rules and agenda notes above, in your own words and briefly. "
+            + no_general_knowledge
+            + " If they don't answer it, do not guess: say you don't have that answer, then "
+            "carry on with the conversation where it was."
         )
 
     parts.append(
@@ -281,6 +315,8 @@ def opening_message(
     step_guidance: str = "",
     step_tag: str = "",
     faq: Faq | None = None,
+    invitee_name: str = "",
+    sheets: dict[str, AgendaTable] | None = None,
     key_path: Path | str | None = None,
 ) -> ChatTurnOutput:
     """The AI's own first message, generated before the invitee has said anything.
@@ -291,11 +327,14 @@ def opening_message(
     """
     result = run_structured(
         profile,
-        "Write your opening message to the invitee now. Introduce yourself in character, say "
+        "Write your opening message to the invitee now. Greet them (by name if you know it), "
+        "introduce yourself in character, say "
         "briefly why this conversation is happening, list the agenda items you will go "
         "through, and invite them to begin with the first one.",
         ChatTurnOutput,
-        instructions=system_instructions(meeting, evaluation_fields, step_guidance, faq),
+        instructions=system_instructions(
+            meeting, evaluation_fields, step_guidance, faq, invitee_name=invitee_name, sheets=sheets
+        ),
         text_field="reply",
         key_path=key_path,
     )
@@ -316,6 +355,8 @@ def send_turn(
     step_guidance: str = "",
     step_tag: str = "",
     faq: Faq | None = None,
+    invitee_name: str = "",
+    sheets: dict[str, AgendaTable] | None = None,
     key_path: Path | str | None = None,
 ) -> ChatTurnOutput:
     """One reply to one invitee message.
@@ -337,7 +378,9 @@ def send_turn(
         profile,
         prompt,
         ChatTurnOutput,
-        instructions=system_instructions(meeting, evaluation_fields, step_guidance, faq),
+        instructions=system_instructions(
+            meeting, evaluation_fields, step_guidance, faq, invitee_name=invitee_name, sheets=sheets
+        ),
         text_field="reply",
         key_path=key_path,
     )
