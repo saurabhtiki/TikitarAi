@@ -43,14 +43,27 @@ with cols1:
     )
 with cols2:
     #Download sample Replace Values file: [Replace_Values_Sample.xlsx]
-    with open(f"data/ReplaceValues.xlsx", "rb") as file:
-        st.download_button(
-        "Download sample Replace Values file",
-        data=file,
-        file_name='ReplaceValues.xlsx',
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        width='stretch',
+    # Built in memory: the data/ folder is git-ignored, so it is not on the server.
+    sample_rows = pd.DataFrame(
+        {
+            "REPLACE": ["LTD", "LTD.", "PVT", "PVT.", "&", "(P)", "M/S"],
+            "REPLACE WITH": ["LIMITED", "LIMITED", "PRIVATE", "PRIVATE", "AND", "PRIVATE", ""],
+        }
     )
+    try:
+        sample_buffer = io.BytesIO()
+        sample_rows.to_excel(sample_buffer, index=False, sheet_name="Sheet1")
+        st.download_button(
+            "Download sample Replace Values file",
+            data=sample_buffer.getvalue(),
+            file_name="ReplaceValues.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            width="stretch",
+            key="replace_sample_download",
+            help="Sample file with REPLACE and REPLACE WITH columns, e.g. PVT. becomes PRIVATE.",
+        )
+    except Exception as error:
+        st.error(f"Could not build the sample Replace Values file: {error}")
 
 if not left_file or not right_file:
     st.info("Upload both the Left and Right files to continue.")
