@@ -1,29 +1,29 @@
-# Phase 61 — Meetings: templates carry their own FAQ
+# Phase 62 — Utilities: prebuilt "Reports" (your own HTML dashboards)
 
 **Status: done.**
 
 ## What changes
 
-**1. Every ready-made template has an FAQ.**
-- Example: HR interview comes with "Is the job remote?" → "Hybrid: 3 days in the office."
-- Kept in `meetings/templates.py` next to the agenda (`faq=[FaqEntry(...), ...]`).
+**1. A folder for your HTML dashboards: `static/reports/`.**
+- Copy each self-contained HTML file there, e.g. `sales_report.html`.
+- The file name becomes the report name: `sales_report.html` → "Sales Report",
+  `CashFlowDashboard.html` → "Cash Flow Dashboard".
+- No list to edit, no expected columns (skipped for now).
 
-**2. The New meeting window gets an "FAQ (optional)" table** (Question | Answer).
-- Use template fills it from the template, like the agenda.
-- Create meeting saves it as the meeting's FAQ (empty = no FAQ). More than 300 rows is refused
-  before anything is created.
+**2. A new menu item: Utilities → Reports** (every logged-in user).
+- Pick a report from a dropdown → **Open report** opens it in a **new browser tab**.
+- The user uploads their xlsx in that tab, as before.
+- Empty folder → a short note saying where to put the files.
+- Works because static serving is on (`.streamlit/config.toml`: `enableStaticServing = true`),
+  which serves the file at `app/static/reports/<file>` as a normal web page.
 
-**3. Save as template keeps the FAQ.**
-- From New meeting: the FAQ table. From Overview: the meeting's saved FAQ.
-- Stored in a new `faq_json` column on `meeting_templates` (added to older databases on start).
-- "Start from" text for your own template says how many FAQ rows it has.
+Code: `utils/prebuilt_dashboards.py` (find, name and link the files),
+`app_pages/prebuilt_reports.py`, `streamlit_app.py` (menu), `.streamlit/config.toml`.
 
-Code: `meetings/templates.py`, `meetings/db.py`, `app_pages/meetings.py`.
+## Tests (`tests/test_prebuilt_reports.py`)
 
-## Tests (`tests/test_meetings_phase61.py`)
-
-- Every built-in template has FAQ rows with both a question and an answer.
-- A saved template's FAQ comes back from `list_templates`; an old table gains `faq_json`.
-- Use template fills the FAQ table; Create meeting stores it as the meeting's FAQ.
-- An empty FAQ table creates a meeting with no FAQ.
-- Save as template from Overview keeps the meeting's FAQ.
+- Files are listed by readable name, sorted; non-HTML files are ignored.
+- A missing folder gives an empty list (no crash).
+- The link is `app/static/reports/<file>` (spaces made safe).
+- The page shows the dropdown and Open report when a file exists.
+- The page shows the "no reports yet" note when the folder is empty.

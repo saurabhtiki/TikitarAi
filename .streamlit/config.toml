@@ -1,3 +1,8 @@
+[server]
+# Serves `static/` at app/static/..., so Utilities → Reports can open its HTML
+# dashboards (static/reports/) in a new tab (phase 62).
+enableStaticServing = true
+
 [theme]
 base = "light"
 primaryColor =  "rgb(56, 99, 193)"

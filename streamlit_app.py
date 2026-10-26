@@ -149,7 +149,15 @@ else:
             st.Page("app_pages/mergedata.py", title="Merge Files", icon="🔀"),
             st.Page("app_pages/PdfExtracter.py", title="PDF Extracter", icon="🗂️"),
             st.Page("app_pages/reco_any.py", title="Reconcile Data", icon="↔️"),
-            st.Page("app_pages/reco2B.py", title="Reconcile GSTR-2B", icon="📄")
+            st.Page("app_pages/reco2B.py", title="Reconcile GSTR-2B", icon="📄"),
+            # Prebuilt HTML dashboards from `static/reports/` (phase 62). The file is
+            # not `run_task.py`, which already uses the "Reports" title under Automate.
+            st.Page(
+                "app_pages/prebuilt_reports.py",
+                title="Reports",
+                icon="📈",
+                url_path="prebuilt_reports",
+            ),
         ],
         "Account": [st.Page("app_pages/settings.py", title="Settings", icon=":material/settings:")],
     }
