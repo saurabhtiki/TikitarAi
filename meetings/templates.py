@@ -74,9 +74,9 @@ TEMPLATES = [
                 ("Can I reschedule my interview?", "Yes. Please share your preferred date and time, and I will check available interview slots."),
                 ("When will I receive feedback?", "We aim to provide an update within [X] business days, subject to interview completion and internal review."),
                 ("Can I apply for more than one role?", "Yes, if your experience is relevant to multiple open roles."),
-                ("What is the probation period?", " The probation period is based on company policy ,normally 3 to 6 months and will be communicated in the offer letter."),
+                ("What is the probation period?", "The probation period is based on company policy, normally 3 to 6 months and will be communicated in the offer letter."),
                 ("What is the company culture like?", "Our culture focuses on accountability, collaboration, learning, ethical conduct, and business results."),
-                ("What documents are required?", " An updated resume is generally required. Qualification, identity, employment, and background verification documents may be requested later."),
+                ("What documents are required?", "An updated resume is generally required. Qualification, identity, employment, and background verification documents may be requested later."),
                 ("How company handle performance evaluations, and how often do they occur?","We conduct formal performance and salary reviews annually, supplemented by mid-year check-ins. Your manager will also hold bi-monthly 1-on-1s to ensure your goals stay aligned."),
 
         ),
@@ -96,7 +96,7 @@ TEMPLATES = [
         ],
         evaluation=[EvaluationField(question="Delivery confidence", buckets=["High", "Medium", "Low"])],
         faq=_faq(
-            ("How can I submit my quotation for this RFQ?", " Please submit your quotation through this Chat or email before the RFQ closing date, along with all requested documents."),
+            ("How can I submit my quotation for this RFQ?", "Please submit your quotation through this Chat or email before the RFQ closing date, along with all requested documents."),
             ("What information must be included in the quotation?", "Include item description, specification compliance, quantity, unit price, taxes, delivery lead time, payment terms, validity, and warranty details."),
             ("What is the RFQ closing date and time?", "The submission deadline is stated in the RFQ. Quotations received after the deadline may not be considered."),
             ("Can I submit a quotation after the deadline?", "Late submissions are subject to procurement policy and may be accepted only with approved justification."),

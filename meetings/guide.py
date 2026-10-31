@@ -16,7 +16,13 @@ def default_steps(meeting: Meeting, sheets: dict[str, AgendaTable], list_sizes: 
     `sheets` are the table grids by title; `list_sizes` the row count of each For each list,
     keyed by `steps.loop_key` (a list with no rows is not mentioned).
     """
-    lines = ["Type your reply in the box at the bottom of the chat and press Enter."]
+    lines = [
+        "Type your reply in the box at the bottom of the chat and press Enter.",
+        "Or tap 🎤 Speak to say your reply — the words go into the box for you to check (your "
+        "browser turns speech into text; in Chrome this goes through Google). Replies are read "
+        "aloud — turn off 🔊 Read replies aloud above the chat box to stop this; tap 🔊 under a "
+        "reply to hear it again.",
+    ]
     if meeting.question_items():
         lines.append(
             "Some questions are asked one at a time, e.g. 'Question 2 of 5'. If an answer can't be "

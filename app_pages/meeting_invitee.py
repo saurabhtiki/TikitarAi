@@ -17,6 +17,9 @@ file attach box. Close chat waits until every question on the invitee's path is 
 Phase 57 names each table tab and its columns in How to use, and adds each For each list
 (with a done / now column) and the organiser's reference documents to that panel.
 
+Phase 64 adds voice: 🎤 Speak above the chat box and 🔊 under each bot reply, both done by
+the invitee's browser (`app_pages.voice_controls`).
+
 Phase 2 adds the tab strip spec 3a asks for: every discussion item shares one **General
 Discussion** tab, and each table item gets its own grid tab. Ten discussion items and two
 tables are three tabs, not twelve.
@@ -42,6 +45,7 @@ from meetings import (
     summary_agent,
     tables,
 )
+from app_pages.voice_controls import auto_read_switch, listen_button, speak_button
 from meetings.access import verify_code
 from meetings.exceptions import MeetingAgentError, MeetingError
 from meetings.model import (
@@ -64,6 +68,7 @@ from utils.dates import show_dataframe
 logger = logging.getLogger(__name__)
 
 DISCUSSION_TAB = "💬 General Discussion"
+AUTO_READ_KEY = "invitee_auto_read"
 
 
 def render_invitee_page(meeting_id: int, token: str) -> None:
@@ -377,9 +382,22 @@ def _render_discussion(
     meeting_id = invitee["meeting_id"]
     invitee_id = invitee["invitee_id"]
 
-    for message in messages:
+    # Phase 65: the newest reply is read out by itself — only when the bot spoke last, and
+    # never once the chat is closed. The switch is drawn below the messages, so its value is
+    # read from session state here (on until the invitee turns it off).
+    auto_read = not chat_session.closed and st.session_state.get(AUTO_READ_KEY, True)
+    newest = len(messages) - 1
+    for index, message in enumerate(messages):
         with st.chat_message("assistant" if message.is_from_ai() else "user"):
             st.write(message.text)
+            if message.is_from_ai():
+                reply_id = f"{meeting_id}-{invitee_id}-{message.message_id or index}"
+                listen_button(
+                    message.text,
+                    key=f"invitee_listen_{message.message_id or index}",
+                    reply_id=reply_id,
+                    auto=auto_read and index == newest,
+                )
 
     if chat_session.closed:
         return
@@ -388,6 +406,8 @@ def _render_discussion(
     if current is not None:
         st.caption(f":red[{_progress(meeting, current, answers, lists)}]")
 
+    auto_read_switch(key=AUTO_READ_KEY)
+    speak_button("invitee_chat_input", key="invitee_speak")
     prompt = st.chat_input("Type your reply", key="invitee_chat_input")
     if prompt:
         _handle_turn(
