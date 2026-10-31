@@ -70,6 +70,9 @@ def _current(name: str, fallback=None):
 #: changes their mind about what to do with it has not changed their mind about the table.
 _SEEDED_FOR_KEY = "tf_form_seeded_for"
 
+#: Kinds whose box lists the chosen table's columns.
+_COLUMN_KINDS = frozenset({ParamKind.COLUMN, ParamKind.COLUMNS})
+
 #: The prefix the input-role pickers are keyed under, kept across an operation switch.
 _INPUT_PREFIX = f"{FORM_PREFIX}input_"
 
@@ -139,11 +142,15 @@ def render_step_form(
         say why — a greyed-out button beats an error the user has to trigger to discover.
     """
     available = frame_names(workspace)
-    chosen_inputs = _render_inputs(spec, available)
+    with st.container(border=True):
+        st.markdown("**1. Which table?**" if len(spec.inputs) == 1 else "**1. Which tables?**")
+        chosen_inputs = _render_inputs(spec, available)
     columns_by_role = _columns_by_role(spec, chosen_inputs, workspace)
 
     raw_values = _render_params(spec, columns_by_role)
-    output_mode, output_name = _render_output(spec, chosen_inputs, workspace, existing_step)
+    with st.container(border=True):
+        st.markdown(f"**{'3' if spec.params else '2'}. Where should the answer go?**")
+        output_mode, output_name = _render_output(spec, chosen_inputs, workspace, existing_step)
 
     missing = missing_required(spec.params, raw_values)
     missing += [
@@ -228,11 +235,22 @@ def _render_params(spec: OperationSpec, columns_by_role: dict[str, list[str]]) -
     appears because of the box above it appears on the same run the user changes it.
     """
     values = {param.name: _current(param.name) for param in spec.params}
+    if not spec.params:
+        return values
 
-    for param in visible_params(spec.params, values):
-        values[param.name] = _WIDGET_BUILDERS[param.kind](param, columns_by_role)
-        # Re-read so the next parameter's `depends_on` sees this one's new value.
-        values = {**values, param.name: values[param.name]}
+    with st.container(border=True):
+        st.markdown("**2. Settings**")
+        hidden_for_table = False
+        for param in visible_params(spec.params, values):
+            if param.kind in _COLUMN_KINDS and not option_columns(param, columns_by_role):
+                # Nothing to pick from yet: hide the box rather than show a greyed-out one.
+                hidden_for_table = True
+                continue
+            values[param.name] = _WIDGET_BUILDERS[param.kind](param, columns_by_role)
+            # Re-read so the next parameter's `depends_on` sees this one's new value.
+            values = {**values, param.name: values[param.name]}
+        if hidden_for_table:
+            st.caption(":red[Choose the table(s) above to see the column boxes.]")
 
     return values
 
@@ -375,8 +393,6 @@ def _render_output(
     existing_step: TransformStep | None,
 ) -> tuple[str, str]:
     """The "update this table / save as a new one" block."""
-    st.divider()
-
     primary = chosen_inputs.get(spec.primary_role)
     if isinstance(primary, list):
         primary = primary[0] if primary else ""

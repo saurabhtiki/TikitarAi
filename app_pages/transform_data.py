@@ -336,9 +336,7 @@ def _render_stored_as_text(held: NamedFrame, stats) -> None:
 
 def _open_store_as(table_name: str, operation: str, params: dict) -> None:
     """Opens the add dialog with `operation`, `table_name` and `params` already chosen."""
-    spec = get_operation(operation)
-    st.session_state[PICK_CATEGORY_KEY] = spec.category
-    st.session_state[PICK_OPERATION_KEY] = spec
+    preselect_operation(get_operation(operation))
     preset_source_table(table_name, operation, params)
     session.open_dialog("add")
 
@@ -379,9 +377,7 @@ def _render_fix_headers(held: NamedFrame) -> None:
 
 def _open_fix_headers(table_name: str) -> None:
     """Opens the add dialog with Skip rows and `table_name` already chosen."""
-    spec = get_operation("skip_rows")
-    st.session_state[PICK_CATEGORY_KEY] = spec.category
-    st.session_state[PICK_OPERATION_KEY] = spec
+    preselect_operation(get_operation("skip_rows"))
     preset_source_table(table_name)
     session.open_dialog("add")
 
@@ -552,14 +548,14 @@ def _render_step_dialog(workspace: dict[str, NamedFrame], *, editing: bool) -> N
 
     seed_form(spec, existing)
     st.caption(f":red[{spec.summary}]")
-    st.divider()
 
     step, missing = render_step_form(spec, base_workspace, existing)
 
     if missing:
         st.caption(":red[Still needed: " + ", ".join(missing) + "]")
+    elif step is not None:
+        _render_step_sentence(spec, step)
 
-    st.divider()
     preview, commit, cancel = st.columns([2, 2, 1])
 
     with preview:
@@ -596,6 +592,16 @@ def _render_step_dialog(workspace: dict[str, NamedFrame], *, editing: bool) -> N
             st.rerun(scope="app")
 
 
+def _render_step_sentence(spec, step: dict) -> None:
+    """The step in plain words, the way the step list will show it once added."""
+    try:
+        sentence = spec.describe(step)
+    except (KeyError, TypeError, ValueError):
+        logger.exception("Could not describe the '%s' step being built.", spec.operation)
+        return
+    st.caption(f":red[This step will: {sentence}]")
+
+
 def _render_operation_picker(existing: dict | None):
     """Category, then operation within it. Locked to its operation when editing."""
     grouped = operations_by_category()
@@ -609,23 +615,54 @@ def _render_operation_picker(existing: dict | None):
         )
         return spec
 
-    category = st.selectbox(
+    categories = list(grouped)
+    if st.session_state.get(PICK_CATEGORY_KEY) not in categories:
+        st.session_state[PICK_CATEGORY_KEY] = categories[0]
+
+    st.markdown("**What do you want to do?**")
+    category = st.segmented_control(
         "What do you want to do?",
-        options=list(grouped),
+        options=categories,
         key=PICK_CATEGORY_KEY,
-        help="Steps are grouped by the kind of job they do.",
+        label_visibility="collapsed",
+        width="stretch",
+        help="Steps are grouped by the kind of job they do. Click one to see its steps.",
     )
-    specs = grouped.get(category, [])
+    # A click on the chosen button un-chooses it; keep showing that group's steps.
+    specs = grouped.get(category or categories[0], [])
     if not specs:
         return None
 
-    return st.selectbox(
-        "Step",
+    st.markdown("**Which step?**")
+    step_key = operation_pick_key(category or categories[0])
+    if step_key not in st.session_state:
+        st.session_state[step_key] = specs[0]
+    spec = st.pills(
+        "Which step?",
         options=specs,
-        format_func=lambda spec: spec.label,
-        key=PICK_OPERATION_KEY,
-        help="Pick the step to add. Its description appears underneath.",
+        format_func=lambda option: option.label,
+        key=step_key,
+        label_visibility="collapsed",
+        help="Click the step to add. Its description appears underneath.",
     )
+    if spec is None:
+        st.caption(":red[Click a step above to start.]")
+    return spec
+
+
+def operation_pick_key(category: str) -> str:
+    """The step buttons' state key for one group.
+
+    One key per group, because the buttons' options change with the group and a value left
+    over from another group is not one of them.
+    """
+    return f"{PICK_OPERATION_KEY}_{category}"
+
+
+def preselect_operation(spec) -> None:
+    """Points the picker at one operation, for the shortcut buttons that open the dialog."""
+    st.session_state[PICK_CATEGORY_KEY] = spec.category
+    st.session_state[operation_pick_key(spec.category)] = spec
 
 
 def _render_preview(workspace: dict[str, NamedFrame], step: dict | None) -> None:
