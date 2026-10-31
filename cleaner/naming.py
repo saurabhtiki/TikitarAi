@@ -40,7 +40,9 @@ def sanitize_sheet_name(name: str, *, fallback: str = "Sheet") -> str:
 
     cleaned = _FORBIDDEN_SHEET_CHARACTERS.sub("_", str(name))
     cleaned = re.sub(r"\s+", " ", cleaned).strip().strip("'").strip()
-    cleaned = cleaned[:MAX_SHEET_NAME_LENGTH]
+    # Strip again: cutting at 31 characters can leave a trailing space or apostrophe,
+    # which would make two names that are really the same look different.
+    cleaned = cleaned[:MAX_SHEET_NAME_LENGTH].strip().strip("'").strip()
 
     if not cleaned or cleaned.lower() in _RESERVED_SHEET_NAMES:
         return fallback
