@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Transform data</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Transform data</h1>
+<p class="lead">Work with more than one table: join two files, look up a price, add up twelve monthly files, then summarise. You build the work as a list of simple steps.</p>
+
+<p>Data cleaner works on one table at a time. Use <b>Transform data</b> when you need two or more tables together.</p>
+
+<h2>The idea</h2>
+<p>Each step takes a table and creates a new table. The new table can be used in the next step. Like a recipe: step 1, then step 2, then step 3.</p>
+
+<h2>Steps</h2>
+<ol>
+  <li><b>Upload</b> your CSV or Excel files (you can upload many). Each Excel sheet becomes its own table. If asked, choose the sheets and click <span class="ui">Load</span>.</li>
+  <li>Click <span class="ui">Add a step</span>. Choose a group and the action, choose which table(s) to use, fill the boxes, click <span class="ui">Preview</span> to see the result, then <span class="ui">Add step</span>.</li>
+  <li>Prefer typing? Click <span class="ui">Describe a step</span> and write in plain English, for example <code>add a calculated column bonus = salary * 0.12</code>, then click <span class="ui">Read it</span>. The app turns it into steps for you to check. It only uses the same actions as the list, so it never writes hidden code.</li>
+  <li>Repeat. Only the <b>last</b> step can be edited or deleted.</li>
+  <li>Under <span class="ui">Download</span>, choose the tables you want and click <span class="ui">Download workbook</span>.</li>
+</ol>
+<div class="box tip"><b>Tip</b>Every cell is first read as text, so codes like <code>00123</code> keep their zeros. Before adding or joining on numbers, use <span class="ui">Change column type</span> to make that column a number.</div>
+
+<h2>Actions available</h2>
+<table>
+<tr><th>Group</th><th>What you can do</th></tr>
+<tr><td><b>Combine tables</b></td><td>Join two tables; Look up columns from another table; Append tables (stack one below another).</td></tr>
+<tr><td><b>Calculated columns</b></td><td>Add a calculated column (a formula); Add an if/else column; Put numbers into ranges; Percentage of total; Drop the minus sign; Smallest or largest across columns; Rank rows; Running total.</td></tr>
+<tr><td><b>Summarise</b></td><td>Group and total; Pivot; Unpivot.</td></tr>
+<tr><td><b>Filter &amp; sort</b></td><td>Filter rows; Sort rows.</td></tr>
+<tr><td><b>Columns</b></td><td>Change column type; Drop columns; Rename a column; Split a column; Combine columns; Take part of a code.</td></tr>
+<tr><td><b>Dates</b></td><td>Get a date part (month, year); Time between two dates; Today's date; Add or subtract days; Start or end of month.</td></tr>
+<tr><td><b>Tidy up</b></td><td>Skip rows; Remove empty rows; Trim spaces; Remove special characters; Change letter case; Find &amp; replace; Fix numbers stored as text; Round numbers; Fill blanks; Remove duplicate rows.</td></tr>
+</table>
+
+<h2>Example 1: find the price of each sale</h2>
+<p>You have <code>sales.xlsx</code> (Item, Qty) and <code>prices.xlsx</code> (Item, Rate). You want the amount for every sale.</p>
+<ol>
+  <li>Upload both files.</li>
+  <li>Step 1, <b>Look up columns from another table</b>: look up <i>Rate</i> in the prices table. Matching column in sales = <code>Item</code>, in prices = <code>Item</code>.</li>
+  <li>Step 2, <b>Add a calculated column</b>: new column <code>Amount</code>, formula <code>Qty * Rate</code>.</li>
+  <li>Step 3, <b>Group and total</b>: group by Item, total up Amount.</li>
+  <li>Download the workbook.</li>
+</ol>
+
+<h2>Example 2: join 12 monthly files</h2>
+<ol>
+  <li>Upload <code>Apr.xlsx</code> ... <code>Mar.xlsx</code>.</li>
+  <li>Step 1, <b>Append tables</b>: pick all 12 tables. Tick <i>Add a column saying which table each row came from</i> so you know the month.</li>
+  <li>Step 2, <b>Pivot</b>: rows = Party, columns = month, values = Amount.</li>
+</ol>
+
+<h2>Save as pipeline: repeat it next month</h2>
+<ul>
+  <li><span class="ui">Save as pipeline</span> stores your uploaded table names and all steps under a name.</li>
+  <li>Next time: pick the pipeline, upload the new files, and run it.</li>
+  <li><span class="ui">Show expected files</span> tells you what files it needs. <span class="ui">Update pipeline</span> replaces it with what is on screen.</li>
+</ul>
+
+<h2>Send the result onward</h2>
+<p>Use <span class="ui">Export to</span> to send tables to <b>Chat with Data</b>, or to a <b>Report</b> (the app first asks which table is which file the report expects). <span class="ui">Start over</span> clears the page.</p>
+<div class="box warn"><b>Watch out</b>If a step shows a red message, read it. The usual reason is that an earlier step changed or removed a column that this step needs.</div>
+
+</main>
+</body>
+</html>

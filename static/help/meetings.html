@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Meetings</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Meetings: how to set up a meeting</h1>
+<p class="lead">A meeting is a chat where the AI talks to your people (candidates, vendors, customers) for you, asks your questions, and collects the answers. You only set it up once.</p>
+
+<nav>
+<b>Contents</b>
+<ol>
+  <li><a href="#quick">Set up in 7 steps</a></li>
+  <li><a href="#agenda">Agenda: what to ask</a></li>
+  <li><a href="#question">Question items (Answer type, Rule, Tries)</a></li>
+  <li><a href="#flow">Flow: Go to</a></li>
+  <li><a href="#foreach">For each (a list)</a></li>
+  <li><a href="#table">Table items</a></li>
+  <li><a href="#eval">Evaluation questions</a></li>
+  <li><a href="#faq">FAQ</a></li>
+  <li><a href="#after">After you create it</a></li>
+  <li><a href="#fix">Common problems</a></li>
+</ol>
+</nav>
+
+<h2 id="quick">1. Set up in 7 steps</h2>
+<p>Click <span class="ui">New meeting</span>. A window opens. Fill it from top to bottom.</p>
+<ol>
+  <li><b>Start from.</b> Pick a ready template (HR interview, Vendor purchase, Sales quotation, Project review, AR review) and click <span class="ui">Use template</span>. Everything below fills in. You can change it. Or choose to start blank.<br>
+      <i>Short on time?</i> Type what you want in <span class="ui">Describe it in plain English</span>, for example "Interview an accountant, ask salary and notice period", and click <span class="ui">Draft with AI</span>.</li>
+  <li><b>Subject.</b> The meeting name. Example: <code>Accountant interview - November</code>.</li>
+  <li><b>Meeting context.</b> Tell the AI the purpose in 2-3 lines. Example: <code>We are hiring an accountant for our Pune office. Be polite and short.</code></li>
+  <li><b>Persona (optional).</b> Who the AI should act as. Example: <code>HR executive of ABC Traders</code>.</li>
+  <li><b>Context / SOP (optional).</b> Rules the AI must follow. Example: <code>Never promise a job. Salary talk only with the HR head.</code></li>
+  <li><b>Agenda.</b> The list of things to ask. See <a href="#agenda">section 2</a>.</li>
+  <li><b>Invitees (optional).</b> Add name and email of each person. You can also add them later. Then click <span class="ui">Create meeting</span>.</li>
+</ol>
+<div class="box tip"><b>Tip</b>Like what you built? Click <span class="ui">Save as template</span> to reuse it next time. Your templates show as "(mine)" in Start from.</div>
+
+<h2 id="agenda">2. Agenda: what to ask</h2>
+<p>Each row of the agenda grid is one thing to cover. Every row has a <b>Type</b>:</p>
+<table>
+<tr><th>Type</th><th>Use it when</th><th>Example</th></tr>
+<tr><td><b>Discussion</b></td><td>You want the AI to talk about a topic freely.</td><td>"Tell about our company and the job."</td></tr>
+<tr><td><b>Question</b></td><td>You need one exact answer, checked by rules.</td><td>"Expected salary?" (a number)</td></tr>
+<tr><td><b>Table</b></td><td>The person must fill a grid of rows and columns.</td><td>A vendor's price list.</td></tr>
+</table>
+<p>Items are covered in the order you list them. Question items are asked first, one at a time ("Question 2 of 5").</p>
+
+<h2 id="question">3. Question items</h2>
+<p>For a <b>Question</b> row, fill these cells:</p>
+<table>
+<tr><th>Cell</th><th>What it means</th></tr>
+<tr><td><b>Answer type</b></td><td>Text, Number, Date, Yes/No, or Choice.</td></tr>
+<tr><td><b>Rule</b></td><td>What a correct answer looks like. Empty = anything is fine.</td></tr>
+<tr><td><b>Tries</b></td><td>How many times the person may try. If a wrong answer is given, the AI asks again and uses one try. After the last try, "Not answered" is saved and the chat moves on. A side question does not use a try.</td></tr>
+<tr><td><b>Go to</b></td><td>Skip ahead depending on the answer. See <a href="#flow">section 4</a>.</td></tr>
+<tr><td><b>For each</b></td><td>Repeat for every row of a list. See <a href="#foreach">section 5</a>.</td></tr>
+</table>
+
+<h3>Rule examples</h3>
+<table>
+<tr><th>Answer type</th><th>Rule you type</th><th>Meaning</th></tr>
+<tr><td>Number</td><td><code>between 20000 and 60000</code></td><td>Salary must be in this range</td></tr>
+<tr><td>Date</td><td><code>future</code></td><td>Date must be after today</td></tr>
+<tr><td>Date</td><td><code>past</code></td><td>Date must be before today</td></tr>
+<tr><td>Date</td><td><code>after 01-10-2026</code></td><td>Date must be after this day</td></tr>
+<tr><td>Date</td><td><code>within 30 days</code></td><td>Date must be within 30 days of today</td></tr>
+<tr><td>Text</td><td><code>at least 20 characters</code></td><td>Not too short</td></tr>
+<tr><td>Choice</td><td><code>Morning, Evening, Night</code></td><td>Only these choices are allowed</td></tr>
+</table>
+<div class="box eg"><b>Example</b>Row: <i>Preferred shift</i> | Question | Choice | <code>Morning, Evening, Night</code> | Tries 3.<br>
+The candidate writes "evening please". The AI understands it as <b>Evening</b> and saves it. If they write "lunch time", it asks again (1 try used).</div>
+<div class="box tip"><b>Good to know</b>The AI only turns the reply into the right form (for example "45k" becomes 45000). The app itself checks the Rule, so the AI cannot let a wrong answer pass.</div>
+
+<h2 id="flow">4. Flow: skip questions with Go to</h2>
+<p>Use <b>Go to</b> when the next question depends on the last answer. You write <code>if (condition) go to (question name)</code>. For several conditions, separate them with <code>;</code>. The first one that matches wins.</p>
+<ul>
+  <li>Go to only jumps <b>forward</b>: to a later question or to <code>End</code>. Never back.</li>
+  <li>Number conditions: <code>if &gt; 60000</code>, <code>if &lt; 10</code>. Yes/No or Choice: <code>if No</code>, <code>if Evening</code>. Text answers cannot branch.</li>
+  <li>If the question was "Not answered", it never branches. The chat just goes to the next question.</li>
+</ul>
+
+<h3>Full example: stop early if the salary is too high</h3>
+<p><b>Goal:</b> If the expected salary is above 60,000, end politely. Otherwise ask the notice period.</p>
+<p><b>Step 1.</b> Fill the agenda grid:</p>
+<table>
+<tr><th>Item</th><th>Type</th><th>Answer type</th><th>Rule</th><th>Go to</th></tr>
+<tr><td>Expected salary</td><td>Question</td><td>Number</td><td><code>between 10000 and 200000</code></td><td><code>if &gt; 60000 go to End; if &gt; 0 go to Notice period</code></td></tr>
+<tr><td>Notice period</td><td>Question</td><td>Number</td><td><code>between 0 and 90</code></td><td></td></tr>
+<tr><td>Can you join on 1st of next month?</td><td>Question</td><td>Yes/No</td><td></td><td></td></tr>
+</table>
+<p><b>Step 2.</b> Look at the <b>Flow picture</b> under the grid. Blue arrows are your Go to jumps. A red <b>?</b> means a Go to points to a place that does not exist, or backwards. Fix it before you click Create meeting.</p>
+<pre>Expected salary --(if &gt; 60000)--------------------&gt; End
+      |
+      '--(if &gt; 0)--&gt; Notice period --&gt; Can you join...? --&gt; End</pre>
+<p><b>Step 3.</b> Here is what happens in the chat:</p>
+<table>
+<tr><th>Candidate says</th><th>What the app does</th></tr>
+<tr><td>"80000"</td><td>80000 is more than 60000, so the first Go to matches. Notice period and the joining question are skipped, and the chat ends politely.</td></tr>
+<tr><td>"45k"</td><td>AI reads 45000. It is not above 60000, so the second Go to matches. The AI asks Notice period, then the joining question.</td></tr>
+<tr><td>"5 lakh"</td><td>500000 is above the Rule limit (200000). The AI says "500000 is too high" and asks again. One try is used.</td></tr>
+</table>
+<div class="box warn"><b>Watch out</b>If your Go to uses a number beyond the Rule's limit, for example <code>if &gt; 300000</code> with Rule <code>between 10000 and 200000</code>, that jump can never happen. The app shows a red note about it.</div>
+
+<h2 id="foreach">5. For each: ask the same questions for every row of a list</h2>
+<p>Example: a customer has 3 unpaid invoices. You want to ask, for each invoice, "When will you pay?" Instead of writing 3 sets of questions, type the same list name in <b>For each</b>, for example <code>Outstanding invoices</code>.</p>
+<ol>
+  <li>Give these question rows the same name in the <b>For each</b> cell. Keep them together, one below the other.</li>
+  <li>Create the meeting. Open <span class="ui">Overview</span> and upload the list (Excel or CSV).</li>
+  <li>By default every invitee gets all rows. To give each person only their own rows, open <b>Advanced</b> and set the <b>Match column</b> (a column with the person's name or email).</li>
+  <li>Choose the <b>Row name column</b> (for example Invoice no.), so the chat says "INV-102: row 2 of 3".</li>
+</ol>
+<p>Inside such a list, a Go to can say <code>Next row</code> to jump straight to the next row of the list.</p>
+
+<h2 id="table">6. Table items: the person fills a grid</h2>
+<p>Use a Table when chatting is not enough, for example a vendor sending prices for many items.</p>
+<h3>Full example: a vendor price list</h3>
+<p><b>Step 1.</b> In the agenda add one row: Item = <code>Price list</code>, Type = <b>Table</b>.</p>
+<p><b>Step 2.</b> Click <span class="ui">Create meeting</span>. Open <span class="ui">Overview</span> and upload an Excel/CSV for that item. Fill what you know and leave the rest blank for the vendor:</p>
+<table>
+<tr><th>Item name</th><th>Qty</th><th>Your price</th><th>Delivery date</th></tr>
+<tr><td>Steel pipe</td><td>100</td><td></td><td></td></tr>
+<tr><td>Copper wire</td><td>50</td><td></td><td></td></tr>
+<tr><td>Bolts</td><td>500</td><td></td><td></td></tr>
+</table>
+<p><b>Step 3.</b> In Overview set the <b>column rules</b> for the columns the vendor fills, then click <span class="ui">Save column rules</span>:</p>
+<table>
+<tr><th>Column</th><th>Type</th><th>Rule</th><th>Required</th></tr>
+<tr><td>Your price</td><td>Number</td><td>more than 0</td><td>Yes</td></tr>
+<tr><td>Delivery date</td><td>Date</td><td>future</td><td>Yes</td></tr>
+</table>
+<p><b>Step 4.</b> What the vendor sees:</p>
+<ul>
+  <li>A separate tab with this grid and a line "You can fill in: Your price, Delivery date".</li>
+  <li>Item name and Qty are already filled and cannot be changed.</li>
+  <li>If they type "abc" as a price, the app refuses it when they click <span class="ui">Save progress</span>.</li>
+</ul>
+<p><b>Step 5.</b> You compare all vendors in <span class="ui">Comparisons &rarr; Table comparisons</span>.</p>
+
+<h2 id="eval">7. Evaluation questions: compare people on the same points</h2>
+<p>These are optional. The AI slips them naturally into the chat and notes the answer. The person does not see this list. Later you can compare everyone side by side.</p>
+<h3>Full example: hiring an accountant</h3>
+<p>In the <b>Evaluation questions</b> grid:</p>
+<table>
+<tr><th>Question</th><th>Buckets (optional)</th></tr>
+<tr><td>How much Tally experience does the candidate have?</td><td>Beginner, Intermediate, Expert</td></tr>
+<tr><td>How confident did the candidate sound about GST work?</td><td>Low, Medium, High</td></tr>
+<tr><td>Would the candidate be happy to work on Saturdays?</td><td></td></tr>
+</table>
+<ul>
+  <li>The candidate says "I have used Tally for 6 years". The AI marks <b>Expert</b>.</li>
+  <li>With <b>Buckets</b>, the answer is one of the words you gave. Good for counting and filtering.</li>
+  <li>With no buckets (the third question), the AI writes a short answer in its own words.</li>
+  <li>See everyone together in <span class="ui">Comparisons &rarr; Evaluation answers</span>.</li>
+</ul>
+
+<h2 id="faq">8. FAQ: let the AI answer side questions</h2>
+<p>People ask things like "Where is the office?" The AI answers <b>only</b> from your context, SOP, agenda notes and FAQ. It never guesses from general knowledge.</p>
+<ul>
+  <li>In the FAQ table add pairs: Question | Answer. Or click <span class="ui">Download template</span>, fill it in Excel, and upload it (maximum 300 rows).</li>
+  <li>Example: Question <code>What are the working hours?</code> Answer <code>9:30 AM to 6:00 PM, Monday to Saturday.</code></li>
+  <li>If the AI cannot answer, the question is saved for you in Overview. Type the answer and click <span class="ui">Add to FAQ</span>. Next time it is answered.</li>
+</ul>
+
+<h2 id="after">9. After you create the meeting</h2>
+<p>Open the meeting from the list (use <span class="ui">Find a meeting</span> to search). It has these tabs:</p>
+<table>
+<tr><th>Tab</th><th>What you do there</th></tr>
+<tr><td><b>Overview</b></td><td>Change the AI model, upload lists and tables, set column rules, edit the FAQ, edit the "How to use" steps shown to invitees, see the Flow picture.</td></tr>
+<tr><td><b>Invitees &amp; status</b></td><td>See who has joined, who is finished, files they attached. Use <span class="ui">Add invitee</span> for more people.</td></tr>
+<tr><td><b>View chat</b></td><td>Read each chat. Download as .txt or Excel.</td></tr>
+<tr><td><b>View summary</b></td><td>Read the AI summary. Download as .txt.</td></tr>
+<tr><td><b>Comparisons</b></td><td>Question answers, List answers, Consolidated MoM, Evaluation answers, Table comparisons.</td></tr>
+<tr><td><b>Share</b></td><td>Copy each invitee's personal link and code and send it to them.</td></tr>
+</table>
+<div class="box eg"><b>What your invitee does</b>They open their link, enter the code, and chat. A panel on the left shows How to use, the Agenda and Attach a file. When all questions are done, <span class="ui">Close chat</span> becomes available.</div>
+
+<h2 id="fix">10. Common problems</h2>
+<table>
+<tr><th>Problem</th><th>What to do</th></tr>
+<tr><td>Red <b>?</b> in the Flow picture</td><td>A Go to points to a question that does not exist or comes earlier. Check the spelling of the question name, and point only forward.</td></tr>
+<tr><td>Create meeting shows an error about the agenda</td><td>Read the red message. Usual causes: a Question row without Answer type, a Rule that does not fit the type, or a Go to condition on a Text answer.</td></tr>
+<tr><td>Invitee cannot open the link</td><td>Check the link and code in <b>Share</b>. Send them again.</td></tr>
+<tr><td>The AI model is missing</td><td>The model you picked was deleted. The default one is used instead. Pick another in Overview.</td></tr>
+<tr><td>For each list shows 0 rows</td><td>The Match column found no row for that person. Clear the Match column to give everyone all rows, or fix the names/emails in your sheet.</td></tr>
+<tr><td>Dates</td><td>Always write dates as dd-mm-yyyy, for example 15-11-2026.</td></tr>
+</table>
+</main>
+</body>
+</html>

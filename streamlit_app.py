@@ -28,6 +28,7 @@ from tasks.db import init_tasks_table
 from tasks.exceptions import TaskStorageError
 from transform.db import init_transform_pipelines_table
 from transform.exceptions import PipelineStorageError
+from utils.help_pages import show_help_button
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -232,4 +233,8 @@ else:
         ]
 
 navigation = st.navigation(pages)
+if is_authenticated():
+    # One place for every page's Help button (phase 63): shown only when
+    # `static/help/<url_path>.html` exists, so a page needs no code of its own.
+    show_help_button(navigation.url_path)
 navigation.run()

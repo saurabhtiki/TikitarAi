@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Merge Files</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Merge Files</h1>
+<p class="lead">Join Excel files side by side using a matching column, like VLOOKUP, but for whole tables. You can merge many tables one after another.</p>
+
+<h2>Steps</h2>
+<ol>
+  <li><b>Step 1: Upload.</b> Select one or more Excel files. Every sheet becomes its own dataset. A table lists them with rows and columns.</li>
+  <li><b>Step 2: Preview.</b> Open any dataset to see its first 20 rows.</li>
+  <li><b>Step 3: Merge.</b>
+    <ol>
+      <li>Choose the <b>Left dataset</b> and the column(s) to match on.</li>
+      <li>Choose the <b>Right dataset</b> and its matching column(s). Left and Right need the same number of matching columns.</li>
+      <li>Choose the <b>Merge type</b> (see below).</li>
+      <li>Choose the <b>columns to include</b> in the result. By default all are included.</li>
+      <li>Click <span class="ui">Merge these two datasets</span>.</li>
+    </ol></li>
+  <li>The result becomes the new Left. Pick another remaining dataset on the Right and merge again, until all are used.</li>
+  <li>Click <span class="ui">Download final merged dataset (Excel)</span>. The file also has a <b>Merge_Log</b> sheet that records each step.</li>
+</ol>
+
+<h2>Merge type: which rows to keep</h2>
+<table>
+<tr><th>Type</th><th>Keeps</th></tr>
+<tr><td><b>left</b></td><td>All rows of the Left. Right details are filled where a match exists, blank otherwise.</td></tr>
+<tr><td><b>right</b></td><td>All rows of the Right.</td></tr>
+<tr><td><b>inner</b></td><td>Only rows that match on both sides.</td></tr>
+<tr><td><b>outer</b></td><td>Everything from both sides.</td></tr>
+</table>
+
+<h2>Example: add city to the sales list</h2>
+<p><code>sales.xlsx</code> has Customer Code, Amount. <code>customers.xlsx</code> has Code, Name, City.</p>
+<ol>
+  <li>Upload both. Left = sales, matching column <code>Customer Code</code>.</li>
+  <li>Right = customers, matching column <code>Code</code>.</li>
+  <li>Merge type = <b>left</b> (keep every sale even if the customer is not found).</li>
+  <li>Click Merge. Each sale now has Name and City. Download.</li>
+</ol>
+<div class="box tip"><b>Good to know</b>
+<ul>
+<li>Made a mistake? Click <span class="ui">Undo</span> in the Merge log. It undoes the last merge only.</li>
+<li>If the two matching columns are of different kinds (one number, one text), the app warns you and compares both as text.</li>
+<li>If both tables have a column with the same name, the app adds the dataset name to each so nothing is lost.</li>
+<li>If you remove an uploaded file that was already merged, the merge is reset.</li>
+</ul></div>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Reports (ready-made dashboards)</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Reports (ready-made dashboards)</h1>
+<p class="lead">Open a ready-made dashboard in a new tab and see your Excel data as charts and tables.</p>
+
+<h2>Steps</h2>
+<ol>
+  <li>In the <b>Report</b> box, pick the dashboard you want (for example Cash Flow Dashboard).</li>
+  <li>Click <span class="ui">Open report</span>. It opens in a <b>new browser tab</b>.</li>
+  <li>In the new tab, upload your Excel file. The charts and tables fill from it.</li>
+</ol>
+<div class="box tip"><b>Good to know</b>
+<ul>
+<li>Your Excel file is used only in your own browser tab. It is not sent to the app.</li>
+<li>The dashboard needs <b>internet</b> to draw its charts.</li>
+<li>Your Excel must follow the layout the dashboard expects. If it does not fill, check the column headings with whoever gave you the dashboard.</li>
+<li>If you see "No reports yet", no dashboard has been added. Ask the administrator.</li>
+</ul></div>
+<div class="box warn"><b>Different from Automate &rarr; Reports</b>That page runs saved report tasks. This page only opens ready-made HTML dashboards.</div>
+
+</main>
+</body>
+</html>

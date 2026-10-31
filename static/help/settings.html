@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Settings</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Settings</h1>
+<p class="lead">Change your profile and password, and manage the AI models the app uses.</p>
+
+<p>At the top choose a section: <b>Profile</b>, <b>Password</b> or <b>LLM providers</b>.</p>
+
+<h2>Profile</h2>
+<ol>
+  <li>Change your <b>Name</b>.</li>
+  <li>Upload a <b>Profile photo</b> if you like.</li>
+  <li>Click <span class="ui">Save profile</span>.</li>
+</ol>
+
+<h2>Password</h2>
+<ol>
+  <li>Type your <b>Current password</b>.</li>
+  <li>Type the <b>New password</b> and the same again in <b>Confirm new password</b>.</li>
+  <li>Click <span class="ui">Change password</span>.</li>
+</ol>
+<div class="box warn"><b>If it is refused</b>The current password may be wrong, or the two new passwords may not match. Try again.</div>
+
+<h2>LLM providers (the AI models)</h2>
+<p>The AI that answers your questions, writes summaries and talks in meetings is a "model". Here you store the connections to the models. Each saved connection is a <b>profile</b>.</p>
+
+<h3>Add a model</h3>
+<ol>
+  <li>Click <span class="ui">Add new</span>.</li>
+  <li>Choose the <b>Provider type</b>:
+    <ul>
+      <li><b>cloud</b>: a company service such as OpenAI. Needs an API key.</li>
+      <li><b>local</b>: a program on your own computer (LM Studio, Ollama). No key needed.</li>
+      <li><b>custom</b>: any other service that works the same way. Needs a Base URL.</li>
+    </ul></li>
+  <li>Give a <b>Nickname</b> you will recognise, for example <code>My OpenAI</code>.</li>
+  <li>Fill the <b>Base URL</b> (needed for local and custom) and the <b>API key</b> (stored encrypted).</li>
+  <li>In <b>Models</b> type the model names, one per line or separated by commas, for example <code>gpt-4o-mini, gpt-4o</code>. One profile is saved for each model.</li>
+  <li>Click <span class="ui">Save</span>.</li>
+</ol>
+
+<h3>Use your profiles</h3>
+<table>
+<tr><th>Button</th><th>What it does</th></tr>
+<tr><td><b>Test connection</b></td><td>Checks that the model answers. Do this after adding one.</td></tr>
+<tr><td><b>Set as default</b></td><td>Every new session starts on this model. <i>Unset default</i> removes it.</td></tr>
+<tr><td><b>Set as light model</b></td><td>Used automatically for small, quick jobs such as reading a typed instruction or drafting a checklist. Pick a cheap, fast model. <i>Unset light model</i> removes it.</td></tr>
+<tr><td><b>Edit</b></td><td>Change a profile's details. Leave the key blank to keep the saved one, or tick <i>Remove saved key</i>.</td></tr>
+<tr><td><b>Delete</b></td><td>Removes a profile after you confirm. A meeting that used it falls back to your default model.</td></tr>
+</table>
+<div class="box tip"><b>Tip</b>The key is saved on each profile. If you change a key later, edit every profile of that group.</div>
+<div class="box eg"><b>Example</b>Add one OpenAI group with models <code>gpt-4o</code> and <code>gpt-4o-mini</code>. Set <code>gpt-4o</code> as default (best answers) and <code>gpt-4o-mini</code> as light model (cheap, fast).</div>
+
+</main>
+</body>
+</html>

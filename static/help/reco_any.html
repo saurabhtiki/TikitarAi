@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Reconcile Data</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Reconcile Data</h1>
+<p class="lead">Match two Excel lists and see what agrees and what does not. For example your books against the bank, or your ledger against the party's ledger.</p>
+
+<h2>Steps</h2>
+<ol>
+  <li><b>Upload</b> the <b>Left</b> and <b>Right</b> Excel files. The first sheet of each is used. Open <i>Preview</i> to check them.</li>
+  <li><b>Replace Values file (optional).</b> Names are often written differently ("PVT LTD" and "PRIVATE LIMITED"). This small Excel (columns <b>REPLACE</b> and <b>REPLACE WITH</b>) makes both sides look the same before matching. Click <span class="ui">Download sample Replace Values file</span> to see the format.</li>
+  <li><b>Rounding-off tolerance.</b> A difference up to this much (0 to 100, default 1) is treated as matched.</li>
+  <li><b>Reconciliation method.</b>
+     <ul><li><b>Sum Value:</b> totals the amounts of each key on both sides, then compares the totals. Best when one side has many lines and the other has one.</li>
+     <li><b>Row Value:</b> matches single rows one to one, within each key, if their values are within tolerance.</li></ul></li>
+  <li><b>Mapping Columns.</b> The columns that say two lines are the same record (for example Invoice No and GST No). Choose how many pairs, then pick the Left column and the Right column of each pair.</li>
+  <li><b>Reconciliation Columns.</b> The amount columns to compare (must be numbers). Choose pairs the same way.</li>
+  <li>Click <span class="ui">Reconcile</span>.</li>
+</ol>
+
+<h2>Reading the result</h2>
+<ul>
+  <li>One tab per amount pair. It shows total on the Left, total on the Right, and the difference.</li>
+  <li><b>Reconciled</b> = matched. <b>Unreconciled</b> = not matched, so look at these.</li>
+  <li>Open the previews to see the first 50 rows of each group.</li>
+  <li>Click <span class="ui">Download Reconciliation Report</span> for the full Excel with Summary, Reconciled and Unreconciled sheets.</li>
+</ul>
+
+<h2>Example: our ledger vs supplier's statement</h2>
+<table>
+<tr><th>Left (our books)</th><th>Right (supplier statement)</th></tr>
+<tr><td>Invoice No, Party, Amount</td><td>Bill No, Name, Value</td></tr>
+</table>
+<ol>
+  <li>Upload both files.</li>
+  <li>Tolerance = 1. Method = Sum Value.</li>
+  <li>Mapping pairs = 1: Left <code>Invoice No</code> with Right <code>Bill No</code>.</li>
+  <li>Reconciliation pairs = 1: Left <code>Amount</code> with Right <code>Value</code>.</li>
+  <li>Click Reconcile. Invoices where the amounts agree (within ₹1) are Reconciled. The rest need your attention, for example an invoice missing on one side.</li>
+</ol>
+<div class="box warn"><b>If you see "don't look numeric"</b>You picked a text column as an amount column. Pick a column that holds numbers.</div>
+
+</main>
+</body>
+</html>

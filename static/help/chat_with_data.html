@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Chat with data</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Chat with data</h1>
+<p class="lead">Upload your Excel or CSV files and ask questions in plain English. The AI finds the answer, shows a table or chart, and you can pin good answers to a Dashboard.</p>
+
+<p>At the top there is a switch with 4 views: <b>Setup, Chat, Checks, Dashboard</b>. You start in <b>Setup</b>.</p>
+<nav><b>Contents</b><ol>
+<li><a href="#setup">Setup (do this first)</a></li><li><a href="#chat">Chat: ask questions</a></li><li><a href="#pin">Pin to Dashboard</a></li>
+<li><a href="#checks">Checks: find exceptions</a></li><li><a href="#dash">Dashboard view</a></li><li><a href="#type">Chat type: save your setup</a></li><li><a href="#fix">Common problems</a></li></ol></nav>
+
+<h2 id="setup">1. Setup</h2>
+<h3>Step 1: Upload your files</h3>
+<ol>
+  <li>Click <span class="ui">Upload CSV or Excel files</span> and choose your files. You can choose many. Each Excel sheet becomes a table.</li>
+  <li>Click <span class="ui">Load</span> to read them. Open a table's <i>Preview</i> to check it. To remove a table, use its <span class="ui">Remove</span> button.</li>
+</ol>
+<h3>Step 2: How the tables link up</h3>
+<p>Skip this if you have only one table. With more tables, tell the app which column connects them. Example: the <b>Salary</b> table has <code>Employee Code</code>, and <b>Employee Master</b> also has <code>Employee Code</code>.</p>
+<ul>
+  <li>Click <span class="ui">Add a link</span>. Choose the Child table and column (Salary / Employee Code) and the Parent table and column (Employee Master / Employee Code), then <span class="ui">Add this link</span>.</li>
+  <li>The app also suggests links. Click <span class="ui">Accept</span> on the right ones, or <span class="ui">Remove</span> the wrong ones. It warns you if some rows have no match, and lets you see those rows.</li>
+  <li>Click <span class="ui">Confirm links</span> when done.</li>
+</ul>
+<h3>Step 3: What the columns mean</h3>
+<p>Write a short meaning for each column, for example <code>Basic = monthly basic pay in rupees</code>. This helps the AI answer correctly. Click <span class="ui">Suggest with AI</span> to get a first draft, correct it, then <span class="ui">Save descriptions</span>.</p>
+<div class="box tip"><b>Tip</b>Steps 2 and 3 are optional but make the answers much better, especially with many tables.</div>
+
+<h2 id="chat">2. Chat</h2>
+<p>Switch to <b>Chat</b> and type your question in the box at the bottom.</p>
+<table>
+<tr><th>You type</th><th>What you get</th></tr>
+<tr><td>Which 5 departments have the highest salary cost?</td><td>A table with the answer.</td></tr>
+<tr><td>Show month-wise sales as a chart</td><td>A table. Then click <span class="ui">Generate chart</span> and, if you like, <span class="ui">Customize chart</span> (colours, titles, type).</td></tr>
+<tr><td>Add a column Bonus = Basic * 0.12</td><td>The column is added to your table in this session.</td></tr>
+</table>
+<ul>
+  <li>Open <span class="ui">SQL that ran</span> under an answer to see exactly how the answer was worked out.</li>
+  <li><span class="ui">Actions &rarr; Show current data</span> shows your tables as they are now, including added columns.</li>
+  <li><span class="ui">Clear chat</span> empties the conversation. Your tables and links stay.</li>
+  <li>Adding, changing and deleting columns is done by asking in chat. Your original file is never changed.</li>
+</ul>
+<div class="box tip"><b>Ask better</b>Use the column names as they appear. Say what you want to see. Example: <i>"From Salary, total Net Pay by Department for April, highest first."</i></div>
+
+<h2 id="pin">3. Pin to Dashboard</h2>
+<p>Under every answer there is <span class="ui">Pin to Dashboard</span>. Click it for each answer you want in your report. It shows "Pinned" once done. Then open the <b>Dashboard</b> page in the left menu to arrange and download them. See that page's help.</p>
+
+<h2 id="checks">4. Checks: find exceptions</h2>
+<p>Use <b>Checks</b> to test a business rule on your data and list the rows that break it.</p>
+<ol>
+  <li>Click <span class="ui">Add criteria</span> and give it a name, for example <code>Overtime above 50 hours</code>.</li>
+  <li>Write the rule in plain language: <code>Employees whose overtime hours are more than 50 in a month.</code></li>
+  <li>Click <span class="ui">Generate &amp; test SQL</span>. The AI writes the query and runs it. You see the exceptions found.</li>
+  <li>Wrong result? Reword the rule and click <span class="ui">Regenerate SQL</span>.</li>
+  <li>Click <span class="ui">Save to report</span> to send the result to the Dashboard page.</li>
+</ol>
+<ul>
+  <li>Save all your rules as a <b>criteria set</b> (<span class="ui">Save set</span>) and reload it next month with <span class="ui">Load set</span>. It brings back the rules, not the results. Use <span class="ui">Run saved SQL</span> to run them on new data.</li>
+  <li><span class="ui">Write summary</span> makes an overview of all the checks.</li>
+  <li>The Actions part can draft an email or note about the exceptions. Check the draft, click <span class="ui">Confirm</span>, then <span class="ui">Download</span>.</li>
+</ul>
+
+<h2 id="dash">5. Dashboard view</h2>
+<p>This view builds an interactive web page from your data that works offline.</p>
+<ol>
+  <li>Click <span class="ui">Generate Dashboard</span>. The AI shows a checklist of charts it plans. Edit the list if you like.</li>
+  <li>Click <span class="ui">Build this dashboard</span>.</li>
+  <li>To change something, click <span class="ui">Update the dashboard</span> and say it in a sentence, for example <code>make the first chart horizontal and add a filter for Department</code>. Each visual also has its own Edit button. <span class="ui">Undo this</span> brings the earlier version back.</li>
+  <li>Under <span class="ui">Dashboard look and title</span> choose colours and theme.</li>
+  <li>Click <span class="ui">Download this dashboard</span>. You get one HTML file you can email.</li>
+</ol>
+
+<h2 id="type">6. Chat type: save your setup</h2>
+<p>If you do the same work every month, save your setup so you only upload new files.</p>
+<ul>
+  <li>At the top type a <b>Name</b> (example: <code>Salary processing</code>) and click <span class="ui">Save chat type</span>. It stores the table names, links and column meanings.</li>
+  <li>Next month pick it from <span class="ui">Chat type</span> and upload the files. Done.</li>
+  <li><span class="ui">Show schema</span> shows what the chat type expects.</li>
+</ul>
+
+<h2 id="fix">7. Common problems</h2>
+<table>
+<tr><th>Problem</th><th>What to do</th></tr>
+<tr><td>The upload box looks empty after I come back</td><td>Your tables are still loaded. To remove one, use that table's <b>Remove</b> button.</td></tr>
+<tr><td>Wrong answer</td><td>Fill Step 3 (column meanings) and Step 2 (links). Then ask again using column names. Open "SQL that ran" to see what happened.</td></tr>
+<tr><td>Numbers read as text</td><td>Clean the file first in <b>Utilities &rarr; Data cleaner</b>, then use its Export to send it here.</td></tr>
+<tr><td>Dashboard page is empty</td><td>You have not pinned anything. Pin answers in Chat first. The dashboard lives only for this session, so download it before closing the tab.</td></tr>
+</table>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Chat with reports</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Chat with reports</h1>
+<p class="lead">Ask questions about the latest data of a report that has already been run. No upload, no setup.</p>
+
+<h2>Steps</h2>
+<ol>
+  <li>Pick a <b>report</b> from the list. Only reports that have been run at least once appear here.</li>
+  <li>The page shows when the data was last refreshed and by whom, and the tables you can ask about.</li>
+  <li>Type your question at the bottom. Ask for a number, a table or a chart.</li>
+  <li>Open <span class="ui">SQL that ran</span> under an answer to see how it was worked out.</li>
+  <li>Use <span class="ui">Clear this chat</span> to start fresh, or <span class="ui">Pick another report</span> to switch.</li>
+</ol>
+
+<h2>Examples</h2>
+<table>
+<tr><th>You type</th><th>You get</th></tr>
+<tr><td>Top 10 customers by sales this month</td><td>A table of 10 rows.</td></tr>
+<tr><td>Show department-wise net pay as a chart</td><td>A chart of the answer.</td></tr>
+<tr><td>How many employees have overtime above 50 hours?</td><td>A number.</td></tr>
+</table>
+
+<div class="box tip"><b>Good to know</b>
+<ul>
+<li>The report's data is <b>shared</b>: everyone who logs in can ask questions of it. The report's recipe stays with its owner.</li>
+<li>It is <b>read only</b>. You cannot add or change columns here, because everyone reads the same data. Ask for that in <b>Chat with data</b> instead.</li>
+<li>Nothing is saved: the chat is not stored, and there is no Pin to Dashboard. For something to keep, use <b>Chat with data</b>.</li>
+<li>The buttons <span class="ui">Chat with data</span> and <span class="ui">Dashboard</span> on this page open the same data in those pages.</li>
+</ul></div>
+<div class="box eg"><b>No reports in the list?</b>Run a report once on the <b>Reports</b> page. Its data is saved, and it then appears here.</div>
+
+</main>
+</body>
+</html>

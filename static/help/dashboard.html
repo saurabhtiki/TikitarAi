@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Dashboard</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Dashboard</h1>
+<p class="lead">Arrange the answers you pinned in Chat with data into a neat report, then download it as HTML or Excel.</p>
+
+<div class="box warn"><b>Important</b>This report lives only for this session. <b>Download it before you close the tab</b> or refresh the page.</div>
+
+<h2>Steps</h2>
+<ol>
+  <li>In <b>Chat with data</b>, click <span class="ui">Pin to Dashboard</span> under every answer you want. You can also pin whole loaded tables here with <i>Pin a loaded table</i>.</li>
+  <li>Come to this page. Type the <b>Report title</b> (example: <code>Q3 sales review</code>). You can also add a logo.</li>
+  <li>The view <b>Build</b> has two sides: your pinned items (the pool) and your report's sections.</li>
+  <li>Click <span class="ui">Add section</span> and name it, for example <code>Sales</code>. You can add a subsection inside it with <span class="ui">Add subsection</span>.</li>
+  <li>For each pinned item choose where it goes in <span class="ui">Place in</span> and click <span class="ui">Place</span>.</li>
+  <li>Use the arrows to move items up and down. Use <span class="ui">Show in columns with above</span> to put two charts side by side.</li>
+  <li>Add your own text with <span class="ui">Add a block</span> (notes, a picture such as an Excel chart, a link button).</li>
+  <li>Switch to <b>Preview &amp; Download</b>. Read the report from top to bottom. Choose a <span class="ui">Style</span>, or <span class="ui">Customize style</span> for fonts and colours.</li>
+  <li>Click <span class="ui">Download HTML</span> (to email or open in a browser) or <span class="ui">Download Excel</span> (one sheet per item).</li>
+</ol>
+
+<h2>Example</h2>
+<p>You asked 3 questions in Chat with data: monthly sales, top 5 customers, region-wise sales. You pinned all three.</p>
+<ol>
+  <li>Title: <code>Sales report - October</code>.</li>
+  <li>Section <code>Sales</code>. Place "monthly sales" in it.</li>
+  <li>Section <code>Customers</code>. Place "top 5 customers" and "region-wise sales" in it, and tick <i>Show in columns with above</i> on the second so they sit side by side.</li>
+  <li>Add a block with one line of comment under each chart.</li>
+  <li>Preview. Download HTML.</li>
+</ol>
+<div class="box tip"><b>Tip</b>Save themes you like (<i>Saved themes</i>) and load them for the next report, so every report looks the same.</div>
+<div class="box eg"><b>Nothing here?</b>If you see "Nothing pinned yet", click <span class="ui">Go to Chat with data</span>, ask a question and pin the answer.</div>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Reports (run a saved report)</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Reports (run a saved report)</h1>
+<p class="lead">Run a report that someone already built. Upload this month's files, click Run, and get the finished report. You type nothing.</p>
+
+<p>A saved report is called a <b>task</b>. It remembers the files it expects, how they link, the questions asked, the checks, and the layout. It is built once in <b>Report builder</b> and run every month here.</p>
+
+<h2>Steps</h2>
+<ol>
+  <li><b>Pick a report.</b> Use <span class="ui">Search tasks</span> to find it, or sort by Last saved or Name (A-Z). Click its <b>Run</b> button.
+      <br><i>Not sure what to upload?</i> Click <span class="ui">Schema</span>. It lists the files the report expects and their columns. You can <span class="ui">Download a blank file</span> for each, with the right headings.</li>
+  <li><b>Step 1: Current files.</b> Upload this month's Excel or CSV files.</li>
+  <li><b>Step 2: Does it match the task?</b> The app compares your files with what the report expects and tells you what is missing or different.
+      <ul><li>If a file or column has a different name (for example "Emp Code" instead of "Employee Code"), use the <b>mapping</b> boxes to say which uploaded file is which table and which column is which. Use <span class="ui">Clear the mapping</span> to undo.</li></ul></li>
+  <li>Keep the box about <b>redrafting comments</b> ticked if you want fresh comments for this month's figures. Untick it to keep the wording saved with the report (use this if you wrote the comments yourself).</li>
+  <li>Click <span class="ui">Run task</span>. The app shows what it is doing, step by step.</li>
+  <li><b>The report.</b> Read the summary (it tells you if any step failed). Then view, update and download the report: <b>Preview, Update, Download</b>.</li>
+</ol>
+
+<h2>Example: monthly salary report</h2>
+<ol>
+  <li>Search "Salary" and click Run on <code>Salary Review</code>.</li>
+  <li>Click Schema. It needs <code>Employee Master</code> and <code>Salary</code>. Upload this month's two files.</li>
+  <li>The match shows "Salary: column Net Pay not found". Your file calls it "Net Amount". Map Net Amount to Net Pay.</li>
+  <li>Click Run task. Wait for it to finish.</li>
+  <li>Open <b>Download</b>, and download the HTML or Excel report.</li>
+</ol>
+
+<h2>After the run</h2>
+<ul>
+  <li><span class="ui">Chat</span> opens <b>Chat with reports</b> on this report's data, so you can ask more questions. No upload needed.</li>
+  <li><span class="ui">Dashboard</span> shows the report's saved dashboard on its latest data (view and download only).</li>
+  <li><span class="ui">Pick another</span> goes back to the list. <span class="ui">Start over</span> and <span class="ui">Clear all files</span> clear the page.</li>
+</ul>
+<div class="box warn"><b>Watch out</b>
+<ul>
+<li>Running restores the report's links and column meanings onto your files, and replaces any you set by hand in this session.</li>
+<li>You only see your own reports. If the list is empty, a report has to be built first in <b>Report builder</b> (admins only).</li>
+</ul></div>
+
+</main>
+</body>
+</html>

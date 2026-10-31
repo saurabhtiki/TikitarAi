@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Data cleaner</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Data cleaner</h1>
+<p class="lead">Upload a messy Excel or CSV file, clean it with a few clicks, and download a neat Excel file. Your original file is never changed.</p>
+
+<h2>Clean a file in 5 steps</h2>
+<ol>
+  <li><b>Upload.</b> Drag your CSV or Excel files into the upload box. Every sheet of an Excel file becomes its own table, shown as its own tab.</li>
+  <li><b>Look at the preview.</b> Check the table before you change anything.</li>
+  <li><b>Pick an action.</b> Above the preview you see groups of buttons (Structure, Values, Text, Rows, Summarise). Click one, for example <span class="ui">Skip rows</span>. A small window opens.</li>
+  <li><b>Fill the window and click Apply.</b> The preview changes at once. Each action you apply is saved as a numbered step. Wrong step? Use <span class="ui">Reset to raw</span> to start that table again.</li>
+  <li><b>Download.</b> Under <span class="ui">Download</span>, click <span class="ui">Download cleaned workbook</span>. All your tables come in one Excel file, one sheet per table.</li>
+</ol>
+
+<h2>What each action does</h2>
+<table>
+<tr><th>Group</th><th>Action</th><th>Use it to</th></tr>
+<tr><td rowspan="4"><b>Structure</b></td><td>Skip rows</td><td>Throw away title lines at the top (for example a company name and date above the real headings).</td></tr>
+<tr><td>Empty rows</td><td>Remove rows with nothing in them.</td></tr>
+<tr><td>Delete columns</td><td>Remove columns you don't need.</td></tr>
+<tr><td>Rename column</td><td>Change a heading, for example "Amt" to "Amount".</td></tr>
+<tr><td rowspan="4"><b>Values</b></td><td>Column types</td><td>Tell the app a column is a number, a date or text. For dates, you choose the format (dd-mm-yyyy etc.) and the app tells you if it fits.</td></tr>
+<tr><td>Missing values</td><td>Fill blanks (with 0, a value you choose, the value above, the average) or drop those rows.</td></tr>
+<tr><td>Numbers as text</td><td>Fix numbers like "1,25,000" that Excel keeps as text.</td></tr>
+<tr><td>Round numbers</td><td>Round to nearest, up or down, to the decimals you choose.</td></tr>
+<tr><td rowspan="4"><b>Text</b></td><td>Trim whitespace</td><td>Remove extra spaces at the start and end.</td></tr>
+<tr><td>Special characters</td><td>Remove symbols such as # or * from text.</td></tr>
+<tr><td>Letter case</td><td>Make text UPPER, lower or Title Case.</td></tr>
+<tr><td>Find &amp; replace</td><td>Change one word with another, for example "PVT LTD" to "PRIVATE LIMITED".</td></tr>
+<tr><td rowspan="2"><b>Rows</b></td><td>Duplicates</td><td>Remove repeated rows. You choose which columns decide a repeat, and whether to keep the first or the last.</td></tr>
+<tr><td>Reset to raw</td><td>Remove all steps of this table and go back to the uploaded file.</td></tr>
+<tr><td rowspan="3"><b>Summarise</b></td><td>Group &amp; total</td><td>Make totals, for example party-wise total of amount.</td></tr>
+<tr><td>Pivot</td><td>Make a cross-table, for example months across the top.</td></tr>
+<tr><td>Unpivot</td><td>Turn many month columns into rows (one column of months, one of values).</td></tr>
+</table>
+<div class="box tip"><b>Tip</b>Many files with the same layout? Tick <span class="ui">Apply to all loaded tables</span> in the action window to do it once for every table.</div>
+
+<h2>Example: clean a party ledger</h2>
+<p>Your Excel has 3 title lines on top, extra spaces in party names, and amounts saved as text.</p>
+<ol>
+  <li>Upload <code>ledger.xlsx</code>.</li>
+  <li><b>Skip rows</b>: 3, then Apply. The real headings now come first.</li>
+  <li><b>Trim whitespace</b>: tick the Party column, Apply.</li>
+  <li><b>Numbers as text</b>: tick Amount, Apply.</li>
+  <li><b>Group &amp; total</b>: group by Party, total up Amount. Give the new table a name in <span class="ui">Save as</span> (for example "Party totals") and click <span class="ui">Save summary</span>. A new tab appears.</li>
+  <li><span class="ui">Download cleaned workbook</span>. You get both sheets, the clean ledger and Party totals.</li>
+</ol>
+
+<h2>Cleaning templates: do it in one click next month</h2>
+<p>At the top there is a <b>Cleaning template</b> box.</p>
+<ul>
+  <li>Finished cleaning? Click <span class="ui">Save as template</span>, give a name (for example "Receivables") and save. All steps of all files, and your summaries, are stored.</li>
+  <li>Next month, upload the new files, pick the template, and click <span class="ui">Apply cleaning steps</span>. The same cleaning runs again.</li>
+  <li><span class="ui">Show expected files</span> tells you which files the template needs. If one is missing, Apply is refused until you upload it.</li>
+  <li><span class="ui">Update template</span> replaces a saved template with what is on screen. The old version is not kept.</li>
+</ul>
+
+<h2>Send to another page</h2>
+<p>Under <span class="ui">Export to</span> you can send the cleaned tables to <b>Chat with Data</b> and ask questions about them. <span class="ui">Start over</span> clears everything on this page.</p>
+
+<div class="box warn"><b>Watch out</b>If you rename a column, a step you added earlier that used the old name may be skipped. Rename late.</div>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - PDF Extracter</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>PDF Extracter</h1>
+<p class="lead">Pull numbers and details out of many PDFs (invoices, certificates, statements) into one Excel file. All PDFs must have the same layout.</p>
+
+<h2>Steps</h2>
+<ol>
+  <li><b>Upload PDFs.</b> Select all your PDF files. They must come from the same format (for example all are invoices of the same supplier). Text PDFs work. Scanned photos are not read.</li>
+  <li><b>Review extracted fields.</b> The app lists every field it found (<code>json_key</code>) with an example value. Names come from the labels in your PDF. Open <i>Preview extracted data per file</i> to see one file in full. Fields from tables start with <code>T1 |</code>, <code>T2 |</code> ... meaning first table, second table, and so on.</li>
+  <li><b>Download Mapping Excel.</b> This gives a starter file with two columns: <b>Output Column Name</b> and <b>JSON Key</b>.</li>
+  <li><b>Edit the mapping in Excel.</b> Keep only the fields you want and change the first column to the heading you want. Do not change the second column.</li>
+  <li><b>Upload the mapping Excel.</b> The app shows it.</li>
+  <li>Click <span class="ui">Generate Output Excel</span>, check the result, and click <span class="ui">Download Output Excel</span>.</li>
+</ol>
+
+<h2>Example: GST invoices</h2>
+<p>You have 20 PDF invoices from one supplier. You want Invoice No, Date and Total.</p>
+<ol>
+  <li>Upload the 20 PDFs. The app finds fields like <code>Invoice No</code>, <code>Date</code>, <code>Grand Total</code>.</li>
+  <li>Download the starter mapping. Delete all rows except those three. Change the first column to <code>Bill Number</code>, <code>Bill Date</code>, <code>Amount</code>.</li>
+  <li>Upload it and click Generate Output Excel. Each PDF gives one line per field: the file name, your column name, and the value. Download.</li>
+</ol>
+<div class="box warn"><b>Watch out</b>If a field is not found in a PDF, the value is <b>0</b>. If a result looks wrong, check the key spelling in your mapping. Capital or small letters do not matter.</div>
+
+</main>
+</body>
+</html>

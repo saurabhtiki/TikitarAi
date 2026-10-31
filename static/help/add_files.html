@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Append Files</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Append Files</h1>
+<p class="lead">Stack many Excel files, one below another, into one sheet. Good for 12 monthly files with the same columns.</p>
+
+<h2>Steps</h2>
+<ol>
+  <li>Click the upload box and select all your <b>.xlsx</b> files. All files must have the <b>same columns in the same order</b>.</li>
+  <li>If each file has title lines above the headings, type how many in <span class="ui">Skip top rows</span>. If there is a total line at the bottom, type how many in <span class="ui">Skip bottom rows</span>. Leave 0 if none.</li>
+  <li>Click <span class="ui">Combine Files</span>.</li>
+  <li>Check the table shown. The first column, <b>Source File</b>, tells you which file each row came from.</li>
+  <li>Click <span class="ui">Download Excel</span>.</li>
+</ol>
+
+<h2>Example</h2>
+<p>You have <code>Apr.xlsx</code>, <code>May.xlsx</code>, <code>Jun.xlsx</code>. Each has 2 title lines at the top and 1 "Grand Total" line at the bottom.</p>
+<ul>
+  <li>Upload the 3 files. Skip top rows = 2. Skip bottom rows = 1.</li>
+  <li>Click Combine Files. You see all rows of the three months in one table, with Source File = Apr, May or Jun.</li>
+  <li>Download Excel.</li>
+</ul>
+<div class="box tip"><b>Tip</b>Skipping applies to <b>every</b> file, so make the files alike before you upload. Only the first sheet of each file is read.</div>
+<div class="box warn"><b>If a file is listed in red</b>That file could not be read (wrong format or damaged). The other files are still combined.</div>
+<p>Need to join files side by side by a matching column (like VLOOKUP)? Use <b>Merge Files</b> instead.</p>
+
+</main>
+</body>
+</html>

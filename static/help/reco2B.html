@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Reconcile GSTR-2B</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Reconcile GSTR-2B</h1>
+<p class="lead">Match your Purchase Register with the GST 3B working file, invoice by invoice, for IGST, CGST and SGST, and update the ITC Availability.</p>
+
+<h2>Before you start</h2>
+<ul>
+  <li><b>GST 3B file</b> (.xlsx): must have a sheet named <code>B2B AND B2BA</code>.</li>
+  <li><b>Purchase Register file</b> (.xlsx): must have a sheet named <code>WORKING</code>.</li>
+</ul>
+<p>If a sheet name is different, the app shows an error. Rename the sheet in Excel and upload again.</p>
+
+<h2>Steps</h2>
+<ol>
+  <li>Upload the GST 3B file in box 1 and the Purchase Register in box 2.</li>
+  <li><b>Rounding-off tolerance (₹).</b> A difference up to this amount is ignored and treated as matched. Default is 1. You can choose 0 to 100.</li>
+  <li>Click <span class="ui">Reconcile</span>.</li>
+</ol>
+
+<h2>Reading the result</h2>
+<ul>
+  <li>Three tabs: <b>IGST, CGST, SGST</b>. Each shows the total as per Purchase Register, the total as per 3B, and the difference.</li>
+  <li><b>Reconciled</b> and <b>Unreconciled</b> amounts are shown for both sides, with counts of rows. Open the preview to see the first 50 unreconciled rows.</li>
+  <li><b>ITC Availability - updated counts</b> shows how many invoices are now marked in each ITC Availability status.</li>
+</ul>
+
+<h2>Downloads</h2>
+<table>
+<tr><th>Button</th><th>What you get</th></tr>
+<tr><td>Download Reconciliation Report</td><td>An Excel with 15 sheets: Summary, Reconciled and Unreconciled, each for IGST, CGST and SGST.</td></tr>
+<tr><td>Download GST 3B file with ITC Availability updated</td><td>Your 3B file with the ITC Availability column filled in from the match.</td></tr>
+</table>
+<div class="box eg"><b>Example</b>Purchase Register IGST total = 5,00,000. 3B IGST total = 4,80,000. Difference = 20,000. Open the IGST tab, look at the unreconciled rows, and you find 3 invoices the supplier has not filed yet. Raise this with the supplier before claiming that ITC.</div>
+
+</main>
+</body>
+</html>

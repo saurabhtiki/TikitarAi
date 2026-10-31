@@ -314,10 +314,10 @@ def _render_side_panel(
 ) -> None:
     """The left 1/4: how to use, the agenda, the For each lists, reference documents, attach."""
     sheets = _table_sheets(meeting, meeting_id)
-    with st.expander("How to use this meeting", icon=":material/help:"):
+    with st.expander("How to use this meeting", icon=":material/help:", expanded=True):
         list_sizes = {key: len(rows) for key, rows in lists.rows.items()}
         st.markdown(guide.invitee_text(meeting, guide.default_steps(meeting, sheets, list_sizes)))
-    with st.expander("Agenda", icon=":material/list:", expanded=True):
+    with st.expander("Agenda", icon=":material/list:"):
         if meeting.agenda:
             st.markdown("\n".join(f"- {item.item}" for item in meeting.agenda))
         else:

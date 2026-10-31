@@ -8,7 +8,8 @@ as its own page in a new tab, at `app/static/reports/<file>`.
 import logging
 import re
 from pathlib import Path
-from urllib.parse import quote
+
+from utils.static_files import static_url
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ def display_name(file_path: Path) -> str:
 
 def dashboard_url(file_path: Path) -> str:
     """The static-serving URL that opens the file in its own tab."""
-    return f"app/static/reports/{quote(file_path.name)}"
+    return static_url("reports", file_path)
 
 
 def list_dashboards(folder: Path = DASHBOARDS_DIR) -> dict[str, Path]:

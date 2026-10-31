@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Report builder</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Report builder</h1>
+<p class="lead">Build a report once, save it as a task, and run it every month with new files. For admins and superusers.</p>
+
+<p>Report builder is like Chat with data, with one big difference: everything you do is written down as a <b>recipe</b>, so next month anyone can run it on new files from the <b>Reports</b> page.</p>
+
+<h2>First: pick or create a task</h2>
+<ul>
+  <li>To change an old task, pick it and click <span class="ui">Open</span>.</li>
+  <li>To make a new one, type a <b>Task name</b> (example: <code>Salary Review</code>) and click <span class="ui">Create task</span>.</li>
+  <li>Once open, the name is the heading. Use <span class="ui">Rename</span>, <span class="ui">Switch task</span> and <span class="ui">Save task</span> at the top. A name that already exists updates that task.</li>
+</ul>
+
+<h2>The 5 views</h2>
+<p>A switch at the top has these views, in the order of work: <b>Setup &rarr; Report-Items &rarr; Checks &rarr; Report &rarr; Dashboard</b>.</p>
+
+<h3>1. Setup</h3>
+<ul>
+  <li>Upload a sample of your files (this month's files).</li>
+  <li><b>How the tables link up:</b> add or accept the links between tables, then confirm them.</li>
+  <li><b>What the columns mean:</b> write a short meaning for each column. Use <span class="ui">Suggest with AI</span> for a draft.</li>
+  <li>At the bottom set the <b>Persona and context</b> (who the report is written as, and what it is about) and an optional <b>Description</b>. The persona is used for all comments in the report.</li>
+</ul>
+<p>This is the same as Setup in Chat with data.</p>
+
+<h3>2. Report-Items</h3>
+<p>This is an ordered list. There are two kinds of line:</p>
+<table>
+<tr><th>Kind</th><th>What it does</th><th>Example</th></tr>
+<tr><td><b>Report item</b></td><td>Asks one question and gives a table, a chart and a comment.</td><td>"Department-wise total net pay."</td></tr>
+<tr><td><b>Column step</b></td><td>Changes the data for every item <i>below</i> it.</td><td>"Add a column Bonus = Basic * 0.12."</td></tr>
+</table>
+<ol>
+  <li>Click <span class="ui">Add report item</span> (or <span class="ui">Add column step</span>) and give it a heading.</li>
+  <li>Describe it in plain language in <i>What this should show</i> (or <i>The column change</i>).</li>
+  <li>Click <span class="ui">Generate SQL &amp; run</span>. Check the table. Not right? Reword and click <span class="ui">Regenerate SQL</span>.</li>
+  <li>Optionally <span class="ui">Generate chart</span> / <span class="ui">Customize chart</span>, and <span class="ui">Write comment</span>.</li>
+  <li>Click <span class="ui">Pin to report</span> to include it in the report.</li>
+</ol>
+<p>The order matters. A column step affects only the items under it.</p>
+
+<h3>3. Checks</h3>
+<p>Write business rules in plain language (example: <i>"Employees with overtime above 50 hours"</i>). The AI writes and tests the query. Save results to the report. Works like Checks in Chat with data.</p>
+
+<h3>4. Report</h3>
+<p>Arrange the pinned items into sections, preview and download. Same as the Dashboard page: <b>Build</b>, then <b>Preview &amp; Download</b>.</p>
+
+<h3>5. Dashboard</h3>
+<p>Build an interactive web page from the data: <span class="ui">Generate Dashboard</span>, ask for changes in a sentence, then download. This is saved with the task and can be viewed later from the Reports page.</p>
+
+<h2>Finish</h2>
+<ol>
+  <li>Click <span class="ui">Save task</span>.</li>
+  <li>Test it: go to <b>Reports</b>, run the task on a file set and check the output.</li>
+  <li>Tell your team the task name and the files it expects (the Schema button lists them).</li>
+</ol>
+
+<div class="box warn"><b>Watch out</b>
+<ul>
+<li>Each item stores its SQL, so a re-run does not need the AI to produce the numbers (except for rewriting comments, which can be switched off when running). If next month's files change column names, the user will map them during the run.</li>
+<li>Only the owner can change a task. Other users can run it.</li>
+<li>If you delete a task, it cannot be brought back.</li>
+</ul></div>
+
+</main>
+</body>
+</html>

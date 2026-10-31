@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Help - Home: which tool should I use?</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#2563eb; --soft:#eff6ff; --ok:#ecfdf5; --warn:#fef2f2; --bg:#fff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink:#e5e7eb; --muted:#9ca3af; --line:#374151; --accent:#60a5fa; --soft:#1e293b; --ok:#12301f; --warn:#3b1c1c; --bg:#111827; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width:860px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.9rem; margin:0 0 4px; }
+  h2 { font-size:1.35rem; margin:40px 0 8px; padding-top:8px; border-top:1px solid var(--line); color:var(--accent); }
+  h3 { font-size:1.05rem; margin:24px 0 6px; }
+  p, li { margin:6px 0; }
+  .lead { color:var(--muted); margin-bottom:16px; }
+  nav { background:var(--soft); border-radius:10px; padding:12px 18px; }
+  nav ol { margin:4px 0; padding-left:20px; columns:2; }
+  nav a { color:var(--accent); text-decoration:none; }
+  table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.95rem; display:block; overflow-x:auto; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--soft); }
+  code { background:var(--soft); padding:1px 6px; border-radius:4px; font-size:.92em; }
+  .box { border-radius:10px; padding:10px 16px; margin:12px 0; }
+  .tip { background:var(--ok); } .warn { background:var(--warn); } .eg { background:var(--soft); }
+  .box b:first-child { display:block; margin-bottom:2px; }
+  pre { background:var(--soft); padding:12px 16px; border-radius:10px; overflow-x:auto; font-size:.9rem; }
+  .ui { font-weight:600; }
+</style>
+</head>
+<body>
+<main>
+<h1>Home: which tool should I use?</h1>
+<p class="lead">A quick guide to what each part of TikitarAi does. Click Help on any page for detailed steps.</p>
+
+<h2>I want to...</h2>
+<table>
+<tr><th>I want to...</th><th>Go to</th></tr>
+<tr><td>Ask questions about my Excel/CSV data and get tables and charts</td><td><b>Explore &rarr; Chat with data</b></td></tr>
+<tr><td>Arrange the answers I liked into a report and download it</td><td><b>Explore &rarr; Dashboard</b></td></tr>
+<tr><td>Talk to many people (candidates, vendors) through an AI chat and compare their answers</td><td><b>Meetings</b></td></tr>
+<tr><td>Run a report that is already built, on this month's files</td><td><b>Automate &rarr; Reports</b></td></tr>
+<tr><td>Ask questions on the last data of a report, without uploading</td><td><b>Automate &rarr; Chat with reports</b></td></tr>
+<tr><td>Build a report once so others can run it (admins only)</td><td><b>Automate &rarr; Report builder</b></td></tr>
+<tr><td>Tidy a messy file (extra spaces, wrong dates, duplicates)</td><td><b>Utilities &rarr; Data cleaner</b></td></tr>
+<tr><td>Join, look up, calculate or summarise across several files</td><td><b>Utilities &rarr; Transform data</b></td></tr>
+<tr><td>Stack many files with the same columns into one</td><td><b>Utilities &rarr; Append Files</b></td></tr>
+<tr><td>Join files side by side with a matching column (like VLOOKUP)</td><td><b>Utilities &rarr; Merge Files</b></td></tr>
+<tr><td>Get data from many PDFs into Excel</td><td><b>Utilities &rarr; PDF Extracter</b></td></tr>
+<tr><td>Match two lists and see differences (books vs bank, ledger vs ledger)</td><td><b>Utilities &rarr; Reconcile Data</b></td></tr>
+<tr><td>Match GST 3B with the Purchase Register</td><td><b>Utilities &rarr; Reconcile GSTR-2B</b></td></tr>
+<tr><td>Open a ready-made dashboard</td><td><b>Utilities &rarr; Reports</b></td></tr>
+<tr><td>Change my name, photo, password, or AI model</td><td><b>Account &rarr; Settings</b></td></tr>
+<tr><td>Add or remove users (superuser only)</td><td><b>Admin &rarr; User management</b></td></tr>
+</table>
+
+<h2>A good order for new users</h2>
+<ol>
+  <li>If your file is messy, clean it in <b>Data cleaner</b>.</li>
+  <li>Open <b>Chat with data</b>, upload the file and ask a question.</li>
+  <li>Click <b>Pin to Dashboard</b> under the answers you like.</li>
+  <li>Open <b>Dashboard</b>, arrange them and download the report.</li>
+</ol>
+<div class="box tip"><b>Tip</b>Most pages have a <b>Help</b> button in the sidebar. It opens the detailed help for that page in a new tab.</div>
+<div class="box eg"><b>Same work every month?</b>Ask an admin to build it once in <b>Report builder</b>. After that you only upload the new files in <b>Reports</b> and click Run.</div>
+
+</main>
+</body>
+</html>
