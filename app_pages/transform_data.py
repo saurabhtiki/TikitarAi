@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 #: the widgets are drawn, and a typo there would fail silently as "the picker ignored me".
 PICK_CATEGORY_KEY = "tf_pick_category"
 PICK_OPERATION_KEY = "tf_pick_operation"
+_LAST_CATEGORY_KEY = "tf_pick_last_category"
 
 # Which pages can receive the transformed tables, and where each one lives. Add an entry
 # here when a future page grows an adoption path into the Data Engine. The same constant
@@ -543,18 +544,18 @@ def _render_step_dialog(workspace: dict[str, NamedFrame], *, editing: bool) -> N
         )
 
     spec = _render_operation_picker(existing)
-    if spec is None:
-        return
+    step, missing = None, []
+    # No step chosen yet: still draw the buttons, so Cancel is there.
+    if spec is not None:
+        seed_form(spec, existing)
+        st.caption(f":red[{spec.summary}]")
 
-    seed_form(spec, existing)
-    st.caption(f":red[{spec.summary}]")
+        step, missing = render_step_form(spec, base_workspace, existing)
 
-    step, missing = render_step_form(spec, base_workspace, existing)
-
-    if missing:
-        st.caption(":red[Still needed: " + ", ".join(missing) + "]")
-    elif step is not None:
-        _render_step_sentence(spec, step)
+        if missing:
+            st.caption(":red[Still needed: " + ", ".join(missing) + "]")
+        elif step is not None:
+            _render_step_sentence(spec, step)
 
     preview, commit, cancel = st.columns([2, 2, 1])
 
@@ -596,7 +597,9 @@ def _render_step_sentence(spec, step: dict) -> None:
     """The step in plain words, the way the step list will show it once added."""
     try:
         sentence = spec.describe(step)
-    except (KeyError, TypeError, ValueError):
+    # Any operation's own describe can trip on a half-valid step; a missing sentence is
+    # fine, a crashed dialog isn't.
+    except Exception:
         logger.exception("Could not describe the '%s' step being built.", spec.operation)
         return
     st.caption(f":red[This step will: {sentence}]")
@@ -619,30 +622,28 @@ def _render_operation_picker(existing: dict | None):
     if st.session_state.get(PICK_CATEGORY_KEY) not in categories:
         st.session_state[PICK_CATEGORY_KEY] = categories[0]
 
-    st.markdown("**What do you want to do?**")
     category = st.segmented_control(
-        "What do you want to do?",
+        "**What do you want to do?**",
         options=categories,
         key=PICK_CATEGORY_KEY,
-        label_visibility="collapsed",
+        on_change=_keep_a_category_chosen,
         width="stretch",
         help="Steps are grouped by the kind of job they do. Click one to see its steps.",
     )
-    # A click on the chosen button un-chooses it; keep showing that group's steps.
-    specs = grouped.get(category or categories[0], [])
+    st.session_state[_LAST_CATEGORY_KEY] = category
+    specs = grouped.get(category, [])
     if not specs:
         return None
 
-    st.markdown("**Which step?**")
-    step_key = operation_pick_key(category or categories[0])
-    if step_key not in st.session_state:
-        st.session_state[step_key] = specs[0]
+    # One key for every group, so a step left over from the group shown before is dropped
+    # here: it isn't one of these buttons, and the user hasn't chosen anything in this group.
+    if st.session_state.get(PICK_OPERATION_KEY) not in specs:
+        st.session_state.pop(PICK_OPERATION_KEY, None)
     spec = st.pills(
-        "Which step?",
+        "**Which step?**",
         options=specs,
         format_func=lambda option: option.label,
-        key=step_key,
-        label_visibility="collapsed",
+        key=PICK_OPERATION_KEY,
         help="Click the step to add. Its description appears underneath.",
     )
     if spec is None:
@@ -650,19 +651,16 @@ def _render_operation_picker(existing: dict | None):
     return spec
 
 
-def operation_pick_key(category: str) -> str:
-    """The step buttons' state key for one group.
-
-    One key per group, because the buttons' options change with the group and a value left
-    over from another group is not one of them.
-    """
-    return f"{PICK_OPERATION_KEY}_{category}"
+def _keep_a_category_chosen() -> None:
+    """A click on the chosen group's button un-chooses it; put that group back instead."""
+    if st.session_state.get(PICK_CATEGORY_KEY) is None:
+        st.session_state[PICK_CATEGORY_KEY] = st.session_state.get(_LAST_CATEGORY_KEY)
 
 
 def preselect_operation(spec) -> None:
     """Points the picker at one operation, for the shortcut buttons that open the dialog."""
     st.session_state[PICK_CATEGORY_KEY] = spec.category
-    st.session_state[operation_pick_key(spec.category)] = spec
+    st.session_state[PICK_OPERATION_KEY] = spec
 
 
 def _render_preview(workspace: dict[str, NamedFrame], step: dict | None) -> None:

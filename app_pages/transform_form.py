@@ -224,7 +224,8 @@ def _columns_by_role(
                 merged.extend(column for column in columns_of(workspace, str(name)) if column not in merged)
             columns[role.name] = merged
         else:
-            columns[role.name] = columns_of(workspace, str(value or ""))
+            # No table chosen yet is normal (the picker starts empty); don't look up "".
+            columns[role.name] = columns_of(workspace, str(value)) if value else []
     return columns
 
 
@@ -241,16 +242,22 @@ def _render_params(spec: OperationSpec, columns_by_role: dict[str, list[str]]) -
     with st.container(border=True):
         st.markdown("**2. Settings**")
         hidden_for_table = False
+        drawn = 0
         for param in visible_params(spec.params, values):
             if param.kind in _COLUMN_KINDS and not option_columns(param, columns_by_role):
-                # Nothing to pick from yet: hide the box rather than show a greyed-out one.
+                # Nothing to pick from yet: hide the box rather than show a greyed-out one,
+                # and forget any column it held for a table that is no longer chosen.
                 hidden_for_table = True
+                values[param.name] = [] if param.kind is ParamKind.COLUMNS else None
                 continue
             values[param.name] = _WIDGET_BUILDERS[param.kind](param, columns_by_role)
+            drawn += 1
             # Re-read so the next parameter's `depends_on` sees this one's new value.
             values = {**values, param.name: values[param.name]}
         if hidden_for_table:
             st.caption(":red[Choose the table(s) above to see the column boxes.]")
+        elif not drawn:
+            st.caption(":red[Nothing to set for this step.]")
 
     return values
 
@@ -271,8 +278,7 @@ def _build_column(param: ParamSpec, columns_by_role: dict[str, list[str]]):
         index=index,
         key=key,
         help=param.help,
-        placeholder="Choose a column" if options else "Choose a table first",
-        disabled=not options,
+        placeholder="Choose a column",
     )
 
 
@@ -286,8 +292,7 @@ def _build_columns(param: ParamSpec, columns_by_role: dict[str, list[str]]):
         options=options,
         key=key,
         help=param.help,
-        placeholder="Choose column(s)" if options else "Choose a table first",
-        disabled=not options,
+        placeholder="Choose column(s)",
     )
 
 

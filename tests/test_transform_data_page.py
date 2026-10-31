@@ -27,6 +27,10 @@ from transform.registry import get_operation
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TRANSFORM_PAGE_PATH = str(PROJECT_ROOT / "app_pages" / "transform_data.py")
 
+# The step picker's keys, from app_pages/transform_data.py (importing the page runs it).
+PICK_CATEGORY_KEY = "tf_pick_category"
+PICK_OPERATION_KEY = "tf_pick_operation"
+
 SALES_CSV = b"customer_id,amount\n1,100\n1,200\n2,300\n"
 CUSTOMERS_CSV = b"customer_id,customer\n1,Acme\n2,Bolt\n"
 
@@ -292,7 +296,7 @@ class TestTheAddStepDialog:
     def test_it_draws_the_chosen_operations_own_form(self, tmp_path, monkeypatch):
         app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
         app.session_state[session.TF_DIALOG_KEY] = "add"
-        app.session_state["tf_pick_category"] = "Filter & sort"
+        _choose_step(app, "filter_rows")
         app.run()
 
         assert app.selectbox(key="tf_form_comparison") is not None
@@ -301,7 +305,7 @@ class TestTheAddStepDialog:
     def test_the_column_picker_offers_the_real_columns(self, tmp_path, monkeypatch):
         app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
         app.session_state[session.TF_DIALOG_KEY] = "add"
-        app.session_state["tf_pick_category"] = "Filter & sort"
+        _choose_step(app, "filter_rows")
         app.session_state["tf_form_input_source"] = "sales"
         app.run()
 
@@ -413,11 +417,18 @@ class TestRenamingAnUploadedTable:
         assert any(tab.label == "merged_data" for tab in app.tabs)
 
 
-def _pick_operation(app, category: str, operation: str) -> None:
-    """Chooses a step the way the step buttons would, then reruns."""
+def _choose_step(app, operation: str) -> None:
+    """Chooses a step's group and button the way clicking them would (no rerun)."""
     from transform.registry import get_operation
 
-    app.session_state[f"tf_pick_operation_{category}"] = get_operation(operation)
+    spec = get_operation(operation)
+    app.session_state[PICK_CATEGORY_KEY] = spec.category
+    app.session_state[PICK_OPERATION_KEY] = spec
+
+
+def _pick_operation(app, operation: str) -> None:
+    """Chooses a step the way the step buttons would, then reruns."""
+    _choose_step(app, operation)
     app.run()
 
 
@@ -425,7 +436,7 @@ class TestSwitchingOperationInTheDialog:
     def test_the_old_operations_boxes_do_not_carry_over(self, tmp_path, monkeypatch):
         app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
         app.session_state[session.TF_DIALOG_KEY] = "add"
-        app.session_state["tf_pick_category"] = "Filter & sort"
+        _choose_step(app, "filter_rows")
         app.session_state["tf_form_input_source"] = "sales"
         app.run()
 
@@ -433,7 +444,7 @@ class TestSwitchingOperationInTheDialog:
         assert app.session_state["tf_form_column"] == "amount"
 
         # Switching to another step in the same category, which has boxes of its own.
-        _pick_operation(app, "Filter & sort", "sort_rows")
+        _pick_operation(app, "sort_rows")
 
         assert not app.exception
         assert "tf_form_column" not in app.session_state
@@ -441,13 +452,52 @@ class TestSwitchingOperationInTheDialog:
     def test_the_table_already_chosen_is_kept(self, tmp_path, monkeypatch):
         app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
         app.session_state[session.TF_DIALOG_KEY] = "add"
-        app.session_state["tf_pick_category"] = "Filter & sort"
+        _choose_step(app, "filter_rows")
         app.session_state["tf_form_input_source"] = "sales"
         app.run()
 
-        _pick_operation(app, "Filter & sort", "sort_rows")
+        _pick_operation(app, "sort_rows")
 
         assert app.session_state["tf_form_input_source"] == "sales"
+
+    def test_a_new_group_starts_with_no_step_chosen(self, tmp_path, monkeypatch):
+        app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        app.session_state[session.TF_DIALOG_KEY] = "add"
+        _choose_step(app, "filter_rows")
+        app.run()
+
+        _group(app, PICK_CATEGORY_KEY).set_value("Tidy up").run()
+
+        assert not app.exception
+        assert _state(app, PICK_OPERATION_KEY, None) is None
+        assert any("Click a step above" in item.value for item in app.caption)
+        assert app.button(key="tf_cancel_step") is not None
+
+    def test_clicking_the_chosen_group_again_keeps_it(self, tmp_path, monkeypatch):
+        app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        app.session_state[session.TF_DIALOG_KEY] = "add"
+        _choose_step(app, "filter_rows")
+        app.run()
+
+        _group(app, PICK_CATEGORY_KEY).set_value(None).run()
+
+        assert not app.exception
+        assert app.session_state[PICK_CATEGORY_KEY] == "Filter & sort"
+
+    def test_cancel_forgets_the_picked_step(self, tmp_path, monkeypatch):
+        app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
+        app.session_state[session.TF_DIALOG_KEY] = "add"
+        _choose_step(app, "filter_rows")
+        app.run()
+
+        app.button(key="tf_cancel_step").click().run()
+
+        assert _state(app, PICK_OPERATION_KEY, None) is None
+
+
+def _group(app, key: str):
+    """The button row (segmented control or pills) with this key."""
+    return next(group for group in app.get("button_group") if group.key == key)
 
 
 class TestAddingAStepThroughTheDialog:
@@ -460,7 +510,7 @@ class TestAddingAStepThroughTheDialog:
     def _open_filter_dialog(self, tmp_path, monkeypatch):
         app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
         app.session_state[session.TF_DIALOG_KEY] = "add"
-        app.session_state["tf_pick_category"] = "Filter & sort"
+        _choose_step(app, "filter_rows")
         app.session_state["tf_form_input_source"] = "sales"
         app.run()
         return app
@@ -506,7 +556,7 @@ class TestAddingAStepThroughTheDialog:
     def test_column_boxes_stay_hidden_until_a_table_is_chosen(self, tmp_path, monkeypatch):
         app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
         app.session_state[session.TF_DIALOG_KEY] = "add"
-        app.session_state["tf_pick_category"] = "Filter & sort"
+        _choose_step(app, "filter_rows")
         app.run()
 
         assert not app.exception
@@ -1044,8 +1094,8 @@ class TestCalculatedColumns:
     def _open_the_form(self, tmp_path, monkeypatch):
         app = _upload_and_load(_make_app(tmp_path, monkeypatch), ("sales.csv", SALES_CSV))
         spec = get_operation("add_calculated_column")
-        app.session_state["tf_pick_category"] = spec.category
-        app.session_state["tf_pick_operation"] = spec
+        app.session_state[PICK_CATEGORY_KEY] = spec.category
+        app.session_state[PICK_OPERATION_KEY] = spec
         # Written into session state, not `session.open_dialog()`, which needs the running
         # script's context — the same reason the rename test uses the page's own widget.
         app.session_state[session.TF_DIALOG_KEY] = "add"

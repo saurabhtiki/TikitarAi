@@ -411,7 +411,7 @@ def close_dialog() -> None:
     for key in [
         key
         for key in st.session_state
-        if str(key).startswith("tf_form_") or str(key).startswith("tf_ai_")
+        if str(key).startswith(("tf_form_", "tf_ai_", "tf_pick_"))
     ]:
         st.session_state.pop(key, None)
 
