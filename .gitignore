@@ -9,9 +9,7 @@ wheels/
 # Virtual environments
 .venv
 
-# Runtime SQLite database
-data/
-
+# data/ is kept in git on purpose so Streamlit Cloud gets every file
 
 # Development/testing data folder
 data_testing/
