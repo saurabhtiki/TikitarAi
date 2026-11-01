@@ -382,7 +382,8 @@ def _shown_file_id(
     """The id of the document to show under a bot reply, only if it exists and can be shown.
 
     The bot's own pick comes first. If it forgot, a file named in the note of the step the
-    reply is about ("Show demo.mp4, then discuss") is shown, once per chat.
+    reply is about ("Show demo.mp4, then discuss") is shown, once per step: a later step
+    naming the same file shows it again.
     """
     name = turn.show_file
     record = show_files.pick_file(name, files)
@@ -391,21 +392,38 @@ def _shown_file_id(
     if name.strip():
         logger.info("Bot asked to show '%s', which is not a showable reference document.", name)
     note = next((item.ai_note for item in meeting.agenda if item.item == turn.agenda_tag), "")
-    shown_ids = {message.shown_file_id for message in messages if message.shown_file_id}
+    shown_ids = {
+        message.shown_file_id
+        for message in messages
+        if message.shown_file_id and message.agenda_tag == turn.agenda_tag
+    }
     step_file = show_files.file_for_step(note, files, shown_ids)
     return step_file["file_id"] if step_file else None
 
 
-def _render_shown_file(record: dict | None) -> None:
+@st.cache_resource(max_entries=4, ttl=3600, show_spinner=False)
+def _shown_file_bytes(filepath: str, modified: float) -> bytes:
+    """A shown document's bytes, read from disk once rather than on every rerun.
+
+    `modified` is only part of the cache key, so a replaced file is read again.
+    """
+    return storage.read_file(filepath)
+
+
+def _render_shown_file(file_id: int, record: dict | None) -> None:
     """A reference document under a bot reply: picture, video, PDF or HTML page (phase 67)."""
     if record is None:
+        logger.warning("Shown reference document %s is no longer in the meeting's files.", file_id)
         st.caption(":red[This file is no longer available.]")
         return
     filename = record["filename"]
     kind = show_files.file_kind(filename)
+    filepath = Path(record["filepath"])
     try:
-        payload = storage.read_file(record["filepath"])
-    except MeetingError:
+        modified = filepath.stat().st_mtime
+        # The PDF viewer reads the file itself, so only the other kinds need its bytes.
+        payload = b"" if kind == show_files.PDF_KIND else _shown_file_bytes(str(filepath), modified)
+    except (OSError, MeetingError):
         logger.exception("Could not read reference document %s to show it.", record["file_id"])
         st.caption(f":red[{filename} — not available.]")
         return
@@ -416,7 +434,7 @@ def _render_shown_file(record: dict | None) -> None:
             st.video(payload, format=show_files.video_format(filename))
         elif kind == show_files.PDF_KIND:
             # The browser's own PDF viewer; st.iframe uploads a Path to media storage.
-            st.iframe(Path(record["filepath"]), height=600)
+            st.iframe(filepath, height=600)
         elif kind == show_files.HTML_KIND:
             # A data: URL runs in its own sealed-off origin, so the organiser's page can't
             # reach into the app the way an HTML string passed to st.iframe could.
@@ -481,7 +499,7 @@ def _render_discussion(
         ):
             st.write(message.text)
             if message.shown_file_id is not None:
-                _render_shown_file(files_by_id.get(message.shown_file_id))
+                _render_shown_file(message.shown_file_id, files_by_id.get(message.shown_file_id))
             if message.is_from_ai():
                 reply_id = f"{meeting_id}-{invitee_id}-{message.message_id or index}"
                 listen_button(

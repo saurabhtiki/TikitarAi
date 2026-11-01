@@ -153,13 +153,19 @@ export default function (component) {
     const play = (parentElement.play = (parentElement.play || 0) + 1)
     const current = () => parentElement.play === play
     // One utterance per sentence: Chrome's voices stop a long single utterance after ~15s.
-    const sentences = data.text.match(/[^.!?\\n]+[.!?]*/g) || [data.text]
+    // A sentence ends at . ! ? followed by a space or the end, so "45000.50" and "INV.102"
+    // stay whole.
+    const sentences = data.text.match(/[^\\n]+?(?:[.!?]+(?=\\s|$)|(?=\\n)|$)/g) || [data.text]
     sentences.forEach((sentence, index) => {
       const utterance = new SpeechSynthesisUtterance(sentence)
       utterance.lang = voiceLanguage()
       if (index === sentences.length - 1) utterance.onend = () => current() && done()
       utterance.onerror = (event) => {
         if (!current() || event.error === "interrupted" || event.error === "canceled") return
+        // Drop the sentences still queued, so a failed reply stops instead of playing on
+        // behind a 🔊 that no longer stops it.
+        parentElement.play = (parentElement.play || 0) + 1
+        window.speechSynthesis.cancel()
         done()
         // Blocked until the person has clicked or typed on the page: try again at their first one.
         if (event.error === "not-allowed" && data.auto) waitForTap()
@@ -243,14 +249,17 @@ def heard_text(value) -> str:
 
 
 def spoken_text(text: str) -> str:
-    """A reply as it should be read aloud: Markdown marks (`**`, `#`, backticks) dropped.
+    """A reply as it should be read aloud: Markdown marks (`**`, `#`, backticks, table `|`) dropped.
 
-    `_` and `>` stay unless they are clearly Markdown (`__bold__`, a `> quote` line), so
-    "INV_102" and "amounts > 60000" are read as written.
+    `_` and `>` stay unless they are clearly Markdown (`__bold__`, `_italic_`, a `> quote`
+    line), so "INV_102" and "amounts > 60000" are read as written.
     """
     without_links = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text or "")
     without_quotes = re.sub(r"(?m)^\s*>\s?", "", without_links)
-    return re.sub(r"[*#`]+|__+", " ", without_quotes).strip()
+    # A table's divider row ("|---|:--:|") has nothing to say.
+    without_dividers = re.sub(r"(?m)^[\s|:-]*-[\s|:-]*$", "", without_quotes)
+    without_italics = re.sub(r"(?<!\w)_(?!\s)([^_\n]+?)(?<!\s)_(?!\w)", r"\1", without_dividers)
+    return re.sub(r"[*#`|]+|__+", " ", without_italics).strip()
 
 
 def fill_chat_box(speak_key: str, chat_box_key: str) -> None:

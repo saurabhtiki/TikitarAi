@@ -11,6 +11,7 @@ while every other field in it stays live — and the item itself is what the gri
 it has to exist first either way.
 """
 
+import dataclasses
 import logging
 import os
 from urllib.parse import urlsplit
@@ -1064,12 +1065,10 @@ def _handle_save_setup(
     if problems:
         st.warning("Please fix the agenda first:\n\n" + "\n".join(f"- {problem}" for problem in problems), icon=":material/error:")
         return
-    meeting.agenda = agenda
-    meeting.meeting_context = texts["meeting_context"]
-    meeting.persona = texts["persona"]
-    meeting.context_sop = texts["context_sop"]
+    # A copy, so a failed save leaves the shown meeting as it is stored.
+    updated = dataclasses.replace(meeting, agenda=agenda, **texts)
     try:
-        db.update_meeting(user_id, meeting)
+        db.update_meeting(user_id, updated)
         db.replace_evaluation_fields(meeting.meeting_id, user_id, _evaluation_from_frame(evaluation_frame, fields))
     except MeetingError as error:
         logger.exception("Could not save the setup for meeting %s.", meeting.meeting_id)

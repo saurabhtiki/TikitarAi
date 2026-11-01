@@ -417,7 +417,7 @@ def send_turn(
         text_field="reply",
         key_path=key_path,
     )
-    result.unanswered_question =" ".join(str(result.unanswered_question or "").split()) if faq_block(faq) else ""
+    result.unanswered_question = " ".join(str(result.unanswered_question or "").split()) if faq_block(faq) else ""
     if step_tag:
         result.agenda_tag = step_tag
         return result
