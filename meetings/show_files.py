@@ -4,15 +4,24 @@ The bot only ever sees each file's **name and description**, never its contents 
 Word or Excel file costs no tokens, and the bot can only point the invitee to it. Images,
 videos, PDFs and HTML pages can be shown under the bot's reply; everything else is
 "refer only".
+
+Phase 68: a reference document can also be a **link** (`url` set, no file on disk). A YouTube
+link or a link to a video/picture file plays or shows like an upload; any other link (Google
+Drive, a web page) becomes an "Open" button, since most sites refuse to be framed.
 """
 
 import re
+from urllib.parse import urlparse
 
 IMAGE_KIND = "image"
 VIDEO_KIND = "video"
 PDF_KIND = "pdf"
 HTML_KIND = "html"
 OTHER_KIND = "other"
+LINK_KIND = "link"
+
+_YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}
+MAX_LINK_CHARS = 2000
 
 _KIND_BY_SUFFIX = {
     "png": IMAGE_KIND, "jpg": IMAGE_KIND, "jpeg": IMAGE_KIND, "gif": IMAGE_KIND, "webp": IMAGE_KIND,
@@ -42,6 +51,48 @@ def can_show(filename: str) -> bool:
     return file_kind(filename) != OTHER_KIND
 
 
+def is_link(record: dict) -> bool:
+    return bool(str(record.get("url") or "").strip())
+
+
+def link_kind(url: str) -> str:
+    """'video' for YouTube or a video file, 'image' for a picture file, otherwise 'link'."""
+    parsed = urlparse(str(url or "").strip())
+    if parsed.hostname in _YOUTUBE_HOSTS:
+        return VIDEO_KIND
+    kind = file_kind(parsed.path)
+    return kind if kind in (VIDEO_KIND, IMAGE_KIND) else LINK_KIND
+
+
+def record_kind(record: dict) -> str:
+    """The kind of a reference document record, upload or link."""
+    if is_link(record):
+        return link_kind(record["url"])
+    return file_kind(record.get("filename", ""))
+
+
+def shows(record: dict) -> bool:
+    """True when the record can appear under a bot reply (every link can, as a video, picture or button)."""
+    return record_kind(record) != OTHER_KIND
+
+
+def link_problems(name: str, url: str, files: list[dict]) -> list[str]:
+    """Why a link is refused; empty when it is fine. Only http(s) links with a host are allowed."""
+    problems = []
+    clean_name = " ".join(str(name or "").split())
+    clean_url = str(url or "").strip()
+    if not clean_name:
+        problems.append("Give the link a name, e.g. 'Product demo'.")
+    elif pick_file(clean_name, files) is not None:
+        problems.append(f"{clean_name} is already in the list — use another name.")
+    parsed = urlparse(clean_url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        problems.append("The link must start with http:// or https://, e.g. https://youtu.be/abc123.")
+    elif len(clean_url) > MAX_LINK_CHARS:
+        problems.append(f"The link is too long (at most {MAX_LINK_CHARS} characters).")
+    return problems
+
+
 def video_format(filename: str) -> str:
     return VIDEO_FORMAT_BY_SUFFIX.get(_suffix(filename), "video/mp4")
 
@@ -60,7 +111,7 @@ def files_block(files: list[dict]) -> str:
         name = str(record.get("filename") or "").strip()
         if not name:
             continue
-        mark = "can show" if can_show(name) else "refer only"
+        mark = "can show" if shows(record) else "refer only"
         description = " ".join(str(record.get("description") or "").split())
         lines.append(f"- {name} ({mark})" + (f" — {description}" if description else ""))
     return "\n".join(lines)
@@ -92,7 +143,7 @@ def file_for_step(note: str, files: list[dict], shown_ids: set[int]) -> dict | N
             record
             for record in files
             if record.get("file_id") not in shown_ids
-            and can_show(record.get("filename"))
+            and shows(record)
             # Whole name only: "plan.png" must not match inside "floorplan.png".
             and re.search(rf"(?<![\w.]){re.escape(_plain(record.get('filename')))}(?!\w)", text)
         ),

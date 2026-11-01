@@ -7,7 +7,7 @@ means the automatic steps. No Streamlit here, so both pages show the same defaul
 
 from meetings import steps
 from meetings.model import AgendaTable, Meeting
-from meetings.show_files import can_show
+from meetings.show_files import shows
 from meetings.tables import describe_column
 
 
@@ -43,7 +43,7 @@ def default_steps(
                 "see the list on the left."
             )
     lines.append("You can ask your own question at any time, e.g. 'What is the notice period?'.")
-    if any(can_show(record.get("filename", "")) for record in ref_files or []):
+    if any(shows(record) for record in ref_files or []):
         lines.append("Ask to see a document, e.g. 'Show me the product demo' — it opens right in the chat.")
     for item in meeting.table_items():
         sheet = sheets.get(item.item)

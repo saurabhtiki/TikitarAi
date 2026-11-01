@@ -300,13 +300,15 @@ def _ensure_list_columns(connection: sqlite3.Connection) -> None:
 def _ensure_model_columns(connection: sqlite3.Connection) -> None:
     """Phase 56: the meeting's chosen model, and the model that last replied in each chat.
     Phase 59: the organiser's own "How to use this meeting" text.
-    Phase 67: a reference document's description, and the file a bot reply showed."""
+    Phase 67: a reference document's description, and the file a bot reply showed.
+    Phase 68: a reference document that is a link (`url` set, `filepath` empty)."""
     added = (
         ("meetings", "profile_id", "INTEGER"),
         ("meeting_sessions", "model_used", "TEXT NOT NULL DEFAULT ''"),
         ("meetings", "how_to_use", "TEXT NOT NULL DEFAULT ''"),
         ("meeting_files", "description", "TEXT NOT NULL DEFAULT ''"),
         ("meeting_messages", "shown_file_id", "INTEGER"),
+        ("meeting_files", "url", "TEXT NOT NULL DEFAULT ''"),
     )
     for table, column, kind in added:
         columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table});").fetchall()}
@@ -918,6 +920,23 @@ def add_file(
         cursor = connection.execute(
             "INSERT INTO meeting_files (meeting_id, invitee_id, filename, filepath) VALUES (?, ?, ?, ?);",
             (meeting_id, invitee_id, filename, filepath),
+        )
+        return cursor.lastrowid
+
+
+def add_link(
+    meeting_id: int, user_id: int, name: str, url: str, db_path: Path | str = DEFAULT_DB_PATH
+) -> int:
+    """Phase 68: a reference document that is only a link (YouTube, Drive...); nothing on disk.
+
+    Raises:
+        MeetingStorageError: if the meeting doesn't belong to user_id, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        cursor = connection.execute(
+            "INSERT INTO meeting_files (meeting_id, invitee_id, filename, filepath, url) VALUES (?, NULL, ?, '', ?);",
+            (meeting_id, " ".join(str(name).split()), str(url).strip()),
         )
         return cursor.lastrowid
 

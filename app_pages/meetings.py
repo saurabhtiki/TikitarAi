@@ -928,7 +928,7 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
         key=f"meetings_refdocs_{meeting.meeting_id}",
         help="Shared with every invitee, read-only. The AI never reads them: it can show a picture, "
         f"video (max {show_files.MAX_VIDEO_MB} MB), PDF or HTML page in the chat when asked, and "
-        "points to any other file (Word, Excel...).",
+        "points to any other file (Word, Excel...). For a big video, use Add a link instead.",
     )
     if uploaded and st.button(
         "Save documents",
@@ -944,7 +944,18 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
         logger.exception("Could not list reference documents for meeting %s.", meeting.meeting_id)
         files = []
 
+    _render_add_link(meeting.meeting_id, user_id, files)
+
     for record in files:
+        if show_files.is_link(record):
+            st.link_button(
+                record["filename"],
+                record["url"],
+                icon=":material/open_in_new:",
+                key=f"meetings_refdoc_link_{record['file_id']}",
+                help="Open this link in a new tab.",
+            )
+            continue
         try:
             payload = storage.read_file(record["filepath"])
         except MeetingError:
@@ -961,12 +972,56 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
         _render_file_descriptions(meeting.meeting_id, user_id, files)
 
 
+_LINK_LABELS = {show_files.VIDEO_KIND: "Yes — video", show_files.IMAGE_KIND: "Yes — picture"}
+
+
+def _shown_in_chat_label(record: dict) -> str:
+    if show_files.is_link(record):
+        return _LINK_LABELS.get(show_files.link_kind(record["url"]), "Yes — opens link")
+    return "Yes" if show_files.shows(record) else "No — pointed to"
+
+
+def _render_add_link(meeting_id: int, user_id: int, files: list[dict]) -> None:
+    """Phase 68: a reference document that is only a link, so a big video costs no upload."""
+    with st.popover("Add a link", icon=":material/link:", help="Share a YouTube video, Google Drive file or web page without uploading it."):
+        name = st.text_input(
+            "Name",
+            key=f"meetings_reflink_name_{meeting_id}",
+            placeholder="Product demo",
+            max_chars=120,
+            help="What the bot and invitee call it, e.g. 'Product demo'. Put it in an agenda note to show it at that step.",
+        )
+        url = st.text_input(
+            "Link",
+            key=f"meetings_reflink_url_{meeting_id}",
+            placeholder="https://youtu.be/abc123",
+            max_chars=show_files.MAX_LINK_CHARS,
+            help="YouTube or a video/picture file plays in the chat; any other link becomes an Open button.",
+        )
+        if st.button("Add link", key=f"meetings_reflink_add_{meeting_id}", icon=":material/add_link:", help="Add this link to the reference documents."):
+            problems = show_files.link_problems(name, url, files)
+            if problems:
+                logger.info("Reference link refused for meeting %s: %s", meeting_id, problems)
+                st.error(" ".join(problems), icon=":material/error:")
+                return
+            try:
+                db.add_link(meeting_id, user_id, name, url)
+            except MeetingError as error:
+                logger.exception("Could not add a reference link to meeting %s.", meeting_id)
+                st.error(str(error), icon=":material/error:")
+                return
+            for field in ("name", "url"):
+                st.session_state.pop(f"meetings_reflink_{field}_{meeting_id}", None)
+            session.flash("Link added.")
+            st.rerun()
+
+
 def _render_file_descriptions(meeting_id: int, user_id: int, files: list[dict]) -> None:
     """Phase 67: a short description per document, so the bot knows which one to show."""
     frame = pd.DataFrame(
         {
             "File": [record["filename"] for record in files],
-            "Shown in chat": ["Yes" if show_files.can_show(record["filename"]) else "No — pointed to" for record in files],
+            "Shown in chat": [_shown_in_chat_label(record) for record in files],
             "Description": [record.get("description") or "" for record in files],
         }
     )

@@ -387,7 +387,7 @@ def _shown_file_id(
     """
     name = turn.show_file
     record = show_files.pick_file(name, files)
-    if record is not None and show_files.can_show(record["filename"]):
+    if record is not None and show_files.shows(record):
         return record["file_id"]
     if name.strip():
         logger.info("Bot asked to show '%s', which is not a showable reference document.", name)
@@ -410,11 +410,14 @@ def _shown_file_bytes(filepath: str, modified: float) -> bytes:
     return storage.read_file(filepath)
 
 
-def _render_shown_file(file_id: int, record: dict | None) -> None:
+def _render_shown_file(file_id: int, record: dict | None, message_index: int) -> None:
     """A reference document under a bot reply: picture, video, PDF or HTML page (phase 67)."""
     if record is None:
         logger.warning("Shown reference document %s is no longer in the meeting's files.", file_id)
         st.caption(":red[This file is no longer available.]")
+        return
+    if show_files.is_link(record):
+        _render_shown_link(record, message_index)
         return
     filename = record["filename"]
     kind = show_files.file_kind(filename)
@@ -449,6 +452,29 @@ def _render_shown_file(file_id: int, record: dict | None) -> None:
         st.caption(f":red[{filename} couldn't be shown here — open it under Reference documents.]")
 
 
+def _render_shown_link(record: dict, message_index: int) -> None:
+    """A link under a bot reply (phase 68): YouTube/video plays, a picture shows, else an Open button."""
+    name, url = record["filename"], record["url"]
+    kind = show_files.link_kind(url)
+    try:
+        if kind == show_files.VIDEO_KIND:
+            st.video(url)
+        elif kind == show_files.IMAGE_KIND:
+            st.image(url, caption=name)
+        else:
+            st.link_button(
+                f"Open {name}",
+                url,
+                icon=":material/open_in_new:",
+                # The same link can be shown under several replies, so the key needs the reply too.
+                key=f"invitee_shown_link_{record['file_id']}_{message_index}",
+                help="Opens in a new tab.",
+            )
+    except (ValueError, StreamlitAPIException):
+        logger.exception("Could not show reference link %s.", record["file_id"])
+        st.caption(f":red[{name} couldn't be shown here — open it under Reference documents.]")
+
+
 def _render_reference_documents(meeting_id: int) -> None:
     """The organiser's shared documents, read-only; nothing when there are none."""
     files = _reference_files(meeting_id)
@@ -456,6 +482,15 @@ def _render_reference_documents(meeting_id: int) -> None:
         return
     with st.expander("Reference documents", icon=":material/description:"):
         for record in files:
+            if show_files.is_link(record):
+                st.link_button(
+                    record["filename"],
+                    record["url"],
+                    icon=":material/open_in_new:",
+                    key=f"invitee_refdoc_link_{record['file_id']}",
+                    help="A link the organiser shared for this meeting; opens in a new tab.",
+                )
+                continue
             try:
                 payload = storage.read_file(record["filepath"])
             except MeetingError:
@@ -499,7 +534,7 @@ def _render_discussion(
         ):
             st.write(message.text)
             if message.shown_file_id is not None:
-                _render_shown_file(message.shown_file_id, files_by_id.get(message.shown_file_id))
+                _render_shown_file(message.shown_file_id, files_by_id.get(message.shown_file_id), index)
             if message.is_from_ai():
                 reply_id = f"{meeting_id}-{invitee_id}-{message.message_id or index}"
                 listen_button(
