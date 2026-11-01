@@ -1024,29 +1024,67 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
     _render_add_link(meeting.meeting_id, user_id, files)
 
     for record in files:
-        if show_files.is_link(record):
-            st.link_button(
-                record["filename"],
-                record["url"],
-                icon=":material/open_in_new:",
-                key=f"meetings_refdoc_link_{record['file_id']}",
-                help="Open this link in a new tab.",
-            )
-            continue
-        try:
-            payload = storage.read_file(record["filepath"])
-        except MeetingError:
-            st.caption(f"{record['filename']} — no longer on disk")
-            continue
-        st.download_button(
-            record["filename"],
-            data=payload,
-            file_name=record["filename"],
-            key=f"meetings_refdoc_dl_{record['file_id']}",
-            help="Download this reference document.",
-        )
+        open_column, remove_column = st.columns([4, 1], vertical_alignment="center")
+        with open_column:
+            _render_ref_doc(record)
+        with remove_column:
+            _render_remove_ref_doc(meeting.meeting_id, user_id, record)
     if files:
         _render_file_descriptions(meeting.meeting_id, user_id, files)
+
+
+def _render_ref_doc(record: dict) -> None:
+    """One reference document: an Open button for a link, a Download button for a file."""
+    if show_files.is_link(record):
+        st.link_button(
+            record["filename"],
+            record["url"],
+            icon=":material/open_in_new:",
+            key=f"meetings_refdoc_link_{record['file_id']}",
+            help="Open this link in a new tab.",
+        )
+        return
+    try:
+        payload = storage.read_file(record["filepath"])
+    except MeetingError:
+        st.caption(f":red[{record['filename']} — no longer on disk]")
+        return
+    st.download_button(
+        record["filename"],
+        data=payload,
+        file_name=record["filename"],
+        key=f"meetings_refdoc_dl_{record['file_id']}",
+        help="Download this reference document.",
+    )
+
+
+def _render_remove_ref_doc(meeting_id: int, user_id: int, record: dict) -> None:
+    """Phase 72: Remove asks first, then deletes the row and any file on disk."""
+    file_id = record["file_id"]
+    with st.popover("Remove", icon=":material/delete:", key=f"meetings_refdoc_remove_{file_id}", help="Take this document off the meeting."):
+        st.write(f"Remove **{record['filename']}**? Invitees won't see it any more.")
+        if not st.button(
+            "Yes, remove",
+            key=f"meetings_refdoc_remove_yes_{file_id}",
+            type="primary",
+            icon=":material/delete_forever:",
+            help="Delete it now. This can't be undone.",
+        ):
+            return
+        try:
+            filepath = db.delete_ref_file(meeting_id, user_id, file_id)
+        except MeetingError as error:
+            logger.exception("Could not remove reference document %s of meeting %s.", file_id, meeting_id)
+            st.error(str(error), icon=":material/error:")
+            return
+        if filepath:
+            try:
+                storage.delete_file(filepath)
+            except MeetingError:
+                # The row is gone, so nobody sees it; a leftover file on disk is only clutter.
+                logger.exception("Removed document %s but its file stayed on disk.", file_id)
+        session.flash(f"{record['filename']} removed.")
+        st.rerun()
 
 
 _LINK_LABELS = {show_files.VIDEO_KIND: "Yes — video", show_files.IMAGE_KIND: "Yes — picture"}

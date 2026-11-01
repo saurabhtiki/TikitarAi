@@ -20,7 +20,7 @@ Plan → Confirm Plan → Test → Build, one phase at a time.
 # Current phase
 
 <!-- delet last pase & update this line each time a phase is completed with 2-3 lines in brief-->
- phase 71 (done) - Question/Discussion rows gain **Accept only if** (plain-words condition, `AgendaItem.accept_if` in the agenda JSON): a question's reply that passes the Rule is also judged by the AI (`chat_agent.read_accept`) and asked again with no tries limit; a discussion ends only when the condition is met (no 5-reply limit); such a step holds Close chat (`steps.questions_left`), and Question answers gains a **Stuck at** column (`steps.stuck_at`)
+ phase 72 (done) - Reference documents (uploads and links) get a **Remove** button in meeting setup, asks "Yes, remove" first; `db.delete_ref_file` (owner-only, never invitee uploads) + `storage.delete_file` (missing file is fine); an agenda still naming it shows the existing red note
 
 # Library docs (Agno, Streamlit)
 

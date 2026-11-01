@@ -965,6 +965,27 @@ def list_files(
     return [dict(row) for row in rows]
 
 
+def delete_ref_file(meeting_id: int, user_id: int, file_id: int, db_path: Path | str = DEFAULT_DB_PATH) -> str:
+    """Phase 72: removes one reference document (upload or link) and returns its filepath,
+    '' for a link, so the caller can delete the file on disk. An invitee's own upload is never
+    matched here.
+
+    Raises:
+        MeetingStorageError: if the meeting doesn't belong to user_id, the document isn't one
+            of its reference documents, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        row = connection.execute(
+            "SELECT filepath FROM meeting_files WHERE file_id = ? AND meeting_id = ? AND invitee_id IS NULL;",
+            (file_id, meeting_id),
+        ).fetchone()
+        if row is None:
+            raise MeetingStorageError("This document is no longer in the meeting.")
+        connection.execute("DELETE FROM meeting_files WHERE file_id = ?;", (file_id,))
+    return str(row["filepath"] or "")
+
+
 def save_file_descriptions(
     meeting_id: int, user_id: int, descriptions: dict[int, str], db_path: Path | str = DEFAULT_DB_PATH
 ) -> None:

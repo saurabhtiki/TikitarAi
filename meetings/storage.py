@@ -119,3 +119,16 @@ def read_file(filepath: str | Path) -> bytes:
     except OSError as error:
         logger.exception("Failed to read the stored file %s.", filepath)
         raise MeetingStorageError("This file is no longer available on disk.") from error
+
+
+def delete_file(filepath: str | Path) -> None:
+    """Removes a stored file (phase 72). Already gone is fine — that is the wanted end state.
+
+    Raises:
+        MeetingStorageError: if it exists but can't be deleted.
+    """
+    try:
+        Path(filepath).unlink(missing_ok=True)
+    except OSError as error:
+        logger.exception("Failed to delete the stored file %s.", filepath)
+        raise MeetingStorageError("Could not delete this file from disk.") from error
