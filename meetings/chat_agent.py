@@ -41,6 +41,7 @@ from meetings.model import (
 )
 from meetings.faq import faq_block
 from meetings.running_summary import render_turns
+from meetings.show_files import files_block
 from meetings.steps import describe_rule
 from meetings.tables import describe_column
 
@@ -63,6 +64,13 @@ class ChatTurnOutput(BaseModel):
         default="",
         description="If the invitee asked a question the FAQ does not answer, their question "
         "in a few words; otherwise empty.",
+    )
+    show_file: str = Field(
+        # Phase 67. Checked against the real file list in the app; an invented name shows nothing.
+        default="",
+        description="The exact name of a reference document marked (can show) to show under "
+        "this reply, when the invitee asks to see it or a step you are starting says to show "
+        "it; otherwise empty.",
     )
 
 
@@ -170,11 +178,13 @@ def system_instructions(
     *,
     invitee_name: str = "",
     sheets: dict[str, AgendaTable] | None = None,
+    ref_files: list[dict] | None = None,
 ) -> str:
     """The persona, the context, the SOP and the agenda, as one instruction block.
 
     Phase 59: `invitee_name` makes the chat personal ("Hi Ravi"), and `sheets` (the table
     grids by title) lets the bot explain what each column to fill in accepts.
+    Phase 67: `ref_files` (reference document records) lets the bot show or point to one.
 
     Assembled per turn from the meeting as it stands rather than cached, so a creator who
     fixes a wrong figure in an agenda item's note has it apply to the very next message
@@ -276,6 +286,24 @@ def system_instructions(
             "carry on with the conversation where it was."
         )
 
+    # Phase 67: names and descriptions only — the files themselves are never read.
+    files_text = files_block(ref_files or [])
+    if files_text:
+        parts.append(
+            "Reference documents the organiser shared (you know only their names and "
+            "descriptions):\n"
+            + files_text
+            + "\nIf the invitee asks to see something that matches a (can show) document, reply "
+            "briefly (for example \"Here is our product demo:\") and set show_file to its exact "
+            "name; it appears under your reply. When you start an agenda item or question whose "
+            "note says to show a (can show) document, start your reply with one short line saying "
+            "what you are showing (for example \"Showing our product demo:\" or \"Here is the plan "
+            "layout:\"), set show_file to its exact name, then start the discussion. For a (refer "
+            "only) document, tell them to open it under Reference documents on the left. Never "
+            "describe what is inside a document beyond its description. Leave show_file empty "
+            "otherwise."
+        )
+
     parts.append(
         "Ask about one item at a time and wait for the answer. Be concise and professional. "
         "Never invent facts about the subject: if something isn't in your instructions and the "
@@ -317,6 +345,7 @@ def opening_message(
     faq: Faq | None = None,
     invitee_name: str = "",
     sheets: dict[str, AgendaTable] | None = None,
+    ref_files: list[dict] | None = None,
     key_path: Path | str | None = None,
 ) -> ChatTurnOutput:
     """The AI's own first message, generated before the invitee has said anything.
@@ -333,7 +362,8 @@ def opening_message(
         "through, and invite them to begin with the first one.",
         ChatTurnOutput,
         instructions=system_instructions(
-            meeting, evaluation_fields, step_guidance, faq, invitee_name=invitee_name, sheets=sheets
+            meeting, evaluation_fields, step_guidance, faq,
+            invitee_name=invitee_name, sheets=sheets, ref_files=ref_files,
         ),
         text_field="reply",
         key_path=key_path,
@@ -341,6 +371,7 @@ def opening_message(
     # A meeting that opens on a question is already discussing it, unlike an agenda list.
     result.agenda_tag = step_tag or OPENING_TAG
     result.unanswered_question = ""
+    # show_file is kept: a first question whose note says "show plan.png" shows it at once.
     return result
 
 
@@ -357,6 +388,7 @@ def send_turn(
     faq: Faq | None = None,
     invitee_name: str = "",
     sheets: dict[str, AgendaTable] | None = None,
+    ref_files: list[dict] | None = None,
     key_path: Path | str | None = None,
 ) -> ChatTurnOutput:
     """One reply to one invitee message.
@@ -379,12 +411,13 @@ def send_turn(
         prompt,
         ChatTurnOutput,
         instructions=system_instructions(
-            meeting, evaluation_fields, step_guidance, faq, invitee_name=invitee_name, sheets=sheets
+            meeting, evaluation_fields, step_guidance, faq,
+            invitee_name=invitee_name, sheets=sheets, ref_files=ref_files,
         ),
         text_field="reply",
         key_path=key_path,
     )
-    result.unanswered_question = " ".join(str(result.unanswered_question or "").split()) if faq_block(faq) else ""
+    result.unanswered_question =" ".join(str(result.unanswered_question or "").split()) if faq_block(faq) else ""
     if step_tag:
         result.agenda_tag = step_tag
         return result

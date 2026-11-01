@@ -5,9 +5,13 @@ when the URL carries an invitee link, before the login gate — an invitee has n
 this screen has to exist entirely outside `st.navigation`. `checks_view.py` set the
 precedent for a page module rendered by call rather than by registration.
 
-Nothing here touches `auth/`. The invitee's unlock lives in its own `invitee_*` session
-keys, so `st.session_state["user_id"]` stays empty and nothing that checks it can mistake
-an invitee for an employee.
+Nothing here touches `auth/` sessions. The invitee's unlock lives in its own `invitee_*`
+session keys, so `st.session_state["user_id"]` stays empty and nothing that checks it can
+mistake an invitee for an employee. (Phase 67 only *reads* the organiser's profile photo,
+for the bot's chat icon.)
+
+Phase 67: the bot can show a reference document (picture, video, PDF, HTML) under its
+reply; Word, Excel and other files are only pointed to (`meetings.show_files`).
 
 The model used is the one the organiser picked for this meeting, else their default
 (phase 56, `meetings.llm_choice`).
@@ -25,11 +29,16 @@ Discussion** tab, and each table item gets its own grid tab. Ten discussion item
 tables are three tabs, not twelve.
 """
 
+import base64
 import datetime
 import logging
+from pathlib import Path
 
 import streamlit as st
+from streamlit.errors import StreamlitAPIException
 
+from auth.db import get_user_by_id
+from auth.exceptions import AuthDatabaseError
 from llm.client import LLMConnectionError
 from meetings import (
     chat_agent,
@@ -40,6 +49,7 @@ from meetings import (
     loops,
     running_summary,
     session,
+    show_files,
     steps,
     storage,
     summary_agent,
@@ -69,6 +79,8 @@ logger = logging.getLogger(__name__)
 
 DISCUSSION_TAB = "💬 General Discussion"
 AUTO_READ_KEY = "invitee_auto_read"
+# Chrome's data: URL limit is 2 MB; an HTML page shown in the chat must fit inside it.
+_MAX_HTML_URL_CHARS = 2_000_000
 
 
 def render_invitee_page(meeting_id: int, token: str) -> None:
@@ -321,7 +333,7 @@ def _render_side_panel(
     sheets = _table_sheets(meeting, meeting_id)
     with st.expander("How to use this meeting", icon=":material/help:", expanded=True):
         list_sizes = {key: len(rows) for key, rows in lists.rows.items()}
-        st.markdown(guide.invitee_text(meeting, guide.default_steps(meeting, sheets, list_sizes)))
+        st.markdown(guide.invitee_text(meeting, guide.default_steps(meeting, sheets, list_sizes, _reference_files(meeting_id))))
     with st.expander("Agenda", icon=":material/list:"):
         if meeting.agenda:
             st.markdown("\n".join(f"- {item.item}" for item in meeting.agenda))
@@ -342,13 +354,86 @@ def _render_lists(meeting: Meeting, answers: dict[str, StepAnswer], lists: loops
             show_dataframe(loops.invitee_rows_frame(meeting, name, lists, answers), width="stretch", hide_index=True)
 
 
-def _render_reference_documents(meeting_id: int) -> None:
-    """The organiser's shared documents, read-only; nothing when there are none."""
+def _reference_files(meeting_id: int) -> list[dict]:
+    """The organiser's shared documents; none if they can't be read."""
     try:
-        files = db.list_files(meeting_id)
+        return db.list_files(meeting_id)
     except MeetingError:
         logger.exception("Could not list the reference documents of meeting %s.", meeting_id)
+        return []
+
+
+def _bot_avatar(meeting: Meeting) -> str | None:
+    """The organiser's profile photo (Settings), or None for the default bot icon (phase 67)."""
+    if meeting.created_by is None:
+        return None
+    try:
+        user = get_user_by_id(meeting.created_by)
+    except AuthDatabaseError:
+        logger.exception("Could not read the organiser of meeting %s for the chat icon.", meeting.meeting_id)
+        return None
+    photo_path = (user or {}).get("photo_path")
+    return photo_path if photo_path and Path(photo_path).is_file() else None
+
+
+def _shown_file_id(
+    turn: chat_agent.ChatTurnOutput, files: list[dict], meeting: Meeting, messages: list
+) -> int | None:
+    """The id of the document to show under a bot reply, only if it exists and can be shown.
+
+    The bot's own pick comes first. If it forgot, a file named in the note of the step the
+    reply is about ("Show demo.mp4, then discuss") is shown, once per chat.
+    """
+    name = turn.show_file
+    record = show_files.pick_file(name, files)
+    if record is not None and show_files.can_show(record["filename"]):
+        return record["file_id"]
+    if name.strip():
+        logger.info("Bot asked to show '%s', which is not a showable reference document.", name)
+    note = next((item.ai_note for item in meeting.agenda if item.item == turn.agenda_tag), "")
+    shown_ids = {message.shown_file_id for message in messages if message.shown_file_id}
+    step_file = show_files.file_for_step(note, files, shown_ids)
+    return step_file["file_id"] if step_file else None
+
+
+def _render_shown_file(record: dict | None) -> None:
+    """A reference document under a bot reply: picture, video, PDF or HTML page (phase 67)."""
+    if record is None:
+        st.caption(":red[This file is no longer available.]")
         return
+    filename = record["filename"]
+    kind = show_files.file_kind(filename)
+    try:
+        payload = storage.read_file(record["filepath"])
+    except MeetingError:
+        logger.exception("Could not read reference document %s to show it.", record["file_id"])
+        st.caption(f":red[{filename} — not available.]")
+        return
+    try:
+        if kind == show_files.IMAGE_KIND:
+            st.image(payload, caption=filename)
+        elif kind == show_files.VIDEO_KIND:
+            st.video(payload, format=show_files.video_format(filename))
+        elif kind == show_files.PDF_KIND:
+            # The browser's own PDF viewer; st.iframe uploads a Path to media storage.
+            st.iframe(Path(record["filepath"]), height=600)
+        elif kind == show_files.HTML_KIND:
+            # A data: URL runs in its own sealed-off origin, so the organiser's page can't
+            # reach into the app the way an HTML string passed to st.iframe could.
+            encoded = base64.b64encode(payload).decode("ascii")
+            if len(encoded) > _MAX_HTML_URL_CHARS:
+                # Chrome leaves an over-long data: URL blank without any error to catch.
+                st.caption(f":red[{filename} is too big to show here — open it under Reference documents.]")
+                return
+            st.iframe(f"data:text/html;charset=utf-8;base64,{encoded}", height=500)
+    except (OSError, ValueError, StreamlitAPIException):
+        logger.exception("Could not show reference document %s.", record["file_id"])
+        st.caption(f":red[{filename} couldn't be shown here — open it under Reference documents.]")
+
+
+def _render_reference_documents(meeting_id: int) -> None:
+    """The organiser's shared documents, read-only; nothing when there are none."""
+    files = _reference_files(meeting_id)
     if not files:
         return
     with st.expander("Reference documents", icon=":material/description:"):
@@ -387,9 +472,16 @@ def _render_discussion(
     # read from session state here (on until the invitee turns it off).
     auto_read = not chat_session.closed and st.session_state.get(AUTO_READ_KEY, True)
     newest = len(messages) - 1
+    # Phase 67: the organiser's photo as the bot's icon, and files a reply showed under it.
+    bot_avatar = _bot_avatar(meeting)
+    files_by_id = {record["file_id"]: record for record in _reference_files(meeting_id)}
     for index, message in enumerate(messages):
-        with st.chat_message("assistant" if message.is_from_ai() else "user"):
+        with st.chat_message(
+            "assistant" if message.is_from_ai() else "user", avatar=bot_avatar if message.is_from_ai() else None
+        ):
             st.write(message.text)
+            if message.shown_file_id is not None:
+                _render_shown_file(files_by_id.get(message.shown_file_id))
             if message.is_from_ai():
                 reply_id = f"{meeting_id}-{invitee_id}-{message.message_id or index}"
                 listen_button(
@@ -407,7 +499,7 @@ def _render_discussion(
         st.caption(f":red[{_progress(meeting, current, answers, lists)}]")
 
     auto_read_switch(key=AUTO_READ_KEY)
-    speak_button("invitee_chat_input", key="invitee_speak")
+    speak_button("invitee_chat_input", key="invitee_speak", turn=len(messages))
     prompt = st.chat_input("Type your reply", key="invitee_chat_input")
     if prompt:
         _handle_turn(
@@ -553,6 +645,7 @@ def _open_conversation(
             just_happened="Open with a short welcome in character and say why this conversation is happening.",
             row_context=lists.row_context(first),
         )
+    ref_files = _reference_files(meeting_id)
     try:
         with st.spinner("Starting the conversation..."):
             opening = chat_agent.opening_message(
@@ -564,8 +657,12 @@ def _open_conversation(
                 faq=_meeting_faq(meeting_id),
                 invitee_name=invitee.get("name", ""),
                 sheets=_table_sheets(meeting, meeting_id),
+                ref_files=ref_files,
             )
-        db.add_message(meeting_id, invitee_id, SENDER_AI, opening.reply, opening.agenda_tag)
+        db.add_message(
+            meeting_id, invitee_id, SENDER_AI, opening.reply, opening.agenda_tag,
+            shown_file_id=_shown_file_id(opening, ref_files, meeting, []),
+        )
         _note_model(meeting_id, invitee_id, profile)
     except (LLMConnectionError, MeetingError) as error:
         logger.exception("Could not open the conversation for invitee %s.", invitee_id)
@@ -604,6 +701,7 @@ def _handle_turn(
     # Set once an answer is saved: the plain-words next question, posted if the reply fails,
     # so the chat never moves on to a question the invitee was not asked.
     fallback = ""
+    ref_files = _reference_files(meeting_id)
     try:
         with st.spinner("Thinking..."):
             guidance, step_tag = "", ""
@@ -625,8 +723,12 @@ def _handle_turn(
                 faq=_meeting_faq(meeting_id),
                 invitee_name=invitee.get("name", ""),
                 sheets=_table_sheets(meeting, meeting_id),
+                ref_files=ref_files,
             )
-        db.add_message(meeting_id, invitee_id, SENDER_AI, turn.reply, turn.agenda_tag)
+        db.add_message(
+            meeting_id, invitee_id, SENDER_AI, turn.reply, turn.agenda_tag,
+            shown_file_id=_shown_file_id(turn, ref_files, meeting, messages),
+        )
         _note_model(meeting_id, invitee_id, profile)
         _log_unanswered(meeting_id, invitee_id, turn.unanswered_question, turn.agenda_tag)
     except (LLMConnectionError, MeetingError) as error:

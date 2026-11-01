@@ -33,6 +33,7 @@ from meetings import (
     loops,
     matrix,
     session,
+    show_files,
     steps,
     storage,
     summary_agent,
@@ -924,7 +925,9 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
         "Add reference documents",
         accept_multiple_files=True,
         key=f"meetings_refdocs_{meeting.meeting_id}",
-        help="Shared with every invitee, read-only. Stored for reference, not searched by the AI.",
+        help="Shared with every invitee, read-only. The AI never reads them: it can show a picture, "
+        f"video (max {show_files.MAX_VIDEO_MB} MB), PDF or HTML page in the chat when asked, and "
+        "points to any other file (Word, Excel...).",
     )
     if uploaded and st.button(
         "Save documents",
@@ -953,6 +956,53 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
             key=f"meetings_refdoc_dl_{record['file_id']}",
             help="Download this reference document.",
         )
+    if files:
+        _render_file_descriptions(meeting.meeting_id, user_id, files)
+
+
+def _render_file_descriptions(meeting_id: int, user_id: int, files: list[dict]) -> None:
+    """Phase 67: a short description per document, so the bot knows which one to show."""
+    frame = pd.DataFrame(
+        {
+            "File": [record["filename"] for record in files],
+            "Shown in chat": ["Yes" if show_files.can_show(record["filename"]) else "No — pointed to" for record in files],
+            "Description": [record.get("description") or "" for record in files],
+        }
+    )
+    edited = st.data_editor(
+        frame,
+        num_rows="fixed",
+        hide_index=True,
+        width="stretch",
+        disabled=["File", "Shown in chat"],
+        column_config={
+            "Description": st.column_config.TextColumn(
+                help="A few words, e.g. 'Product demo video'. The bot uses it to pick the file to show.",
+                max_chars=200,
+            ),
+        },
+        # Keyed by the file ids too: the grid keeps edits by row position, so a changed file
+        # list must start a fresh grid instead of pinning old edits onto other files.
+        key=f"meetings_refdoc_descriptions_{meeting_id}_" + "_".join(str(record["file_id"]) for record in files),
+    )
+    if st.button(
+        "Save descriptions",
+        key=f"meetings_refdoc_descriptions_save_{meeting_id}",
+        icon=":material/save:",
+        help="Store the descriptions; the bot uses them from the next message.",
+    ):
+        descriptions = {
+            record["file_id"]: str(text or "")
+            for record, text in zip(files, edited["Description"].fillna("").tolist())
+        }
+        try:
+            db.save_file_descriptions(meeting_id, user_id, descriptions)
+        except MeetingError as error:
+            logger.exception("Could not save reference document descriptions for meeting %s.", meeting_id)
+            st.error(str(error), icon=":material/error:")
+            return
+        session.flash("Descriptions saved.")
+        st.rerun()
 
 
 def _render_setup_editor(meeting: Meeting, user_id: int, fields: list[EvaluationField]) -> None:
@@ -961,13 +1011,32 @@ def _render_setup_editor(meeting: Meeting, user_id: int, fields: list[Evaluation
     Collapsed by default and separate from the read-only summary above it, because reading
     what a meeting is set up to do is the common visit and rewriting it is the rare one.
     """
-    with st.expander("Edit agenda & questions"):
-        st.caption("Agenda — changing an item's title detaches any table data attached to it.")
+    with st.expander("Edit setup (context, persona, SOP, agenda & questions)"):
+        meeting_context = st.text_area(
+            "Meeting context",
+            value=meeting.meeting_context,
+            key=f"meetings_edit_context_{meeting.meeting_id}",
+            help="Two to four lines on why this conversation is happening. The AI is told this.",
+        )
+        persona = st.text_area(
+            "Persona",
+            value=meeting.persona,
+            key=f"meetings_edit_persona_{meeting.meeting_id}",
+            help="Who the AI should be, e.g. 'You are the Purchase Manager...'.",
+        )
+        context_sop = st.text_area(
+            "Context / SOP",
+            value=meeting.context_sop,
+            key=f"meetings_edit_sop_{meeting.meeting_id}",
+            help="Rules and background the AI must apply throughout the conversation.",
+        )
+
+        st.caption(":red[Agenda — changing an item's title detaches any table data attached to it.]")
         agenda_frame = _agenda_editor(
             _agenda_to_frame(meeting.agenda), f"meetings_edit_agenda_{meeting.meeting_id}"
         )
 
-        st.caption("Evaluation questions — removing one also removes the answers extracted for it.")
+        st.caption(":red[Evaluation questions — removing one also removes the answers extracted for it.]")
         evaluation_frame = _evaluation_editor(
             _evaluation_to_frame(fields), f"meetings_edit_evaluation_{meeting.meeting_id}"
         )
@@ -978,12 +1047,14 @@ def _render_setup_editor(meeting: Meeting, user_id: int, fields: list[Evaluation
             icon=":material/save:",
             help="Applies to every invitee's next message, including chats already in progress.",
         ):
-            _handle_save_setup(meeting, user_id, agenda_frame, evaluation_frame, fields)
+            texts = {"meeting_context": meeting_context, "persona": persona, "context_sop": context_sop}
+            _handle_save_setup(meeting, user_id, texts, agenda_frame, evaluation_frame, fields)
 
 
 def _handle_save_setup(
     meeting: Meeting,
     user_id: int,
+    texts: dict[str, str],
     agenda_frame: pd.DataFrame,
     evaluation_frame: pd.DataFrame,
     fields: list[EvaluationField],
@@ -994,6 +1065,9 @@ def _handle_save_setup(
         st.warning("Please fix the agenda first:\n\n" + "\n".join(f"- {problem}" for problem in problems), icon=":material/error:")
         return
     meeting.agenda = agenda
+    meeting.meeting_context = texts["meeting_context"]
+    meeting.persona = texts["persona"]
+    meeting.context_sop = texts["context_sop"]
     try:
         db.update_meeting(user_id, meeting)
         db.replace_evaluation_fields(meeting.meeting_id, user_id, _evaluation_from_frame(evaluation_frame, fields))
@@ -1013,8 +1087,13 @@ def _render_how_to_use_setup(meeting: Meeting, user_id: int) -> None:
     except MeetingError:
         logger.exception("Could not read the tables of meeting %s.", meeting.meeting_id)
         sheets = {}
+    try:
+        ref_files = db.list_files(meeting.meeting_id)
+    except MeetingError:
+        logger.exception("Could not read the reference documents of meeting %s.", meeting.meeting_id)
+        ref_files = []
     list_sizes = {key: table.row_count() for key, table in loops.list_tables(meeting, list(sheets.values())).items()}
-    default_lines = guide.default_steps(meeting, sheets, list_sizes)
+    default_lines = guide.default_steps(meeting, sheets, list_sizes, ref_files)
     custom = bool(meeting.how_to_use.strip())
 
     with st.expander("Invitee instructions (How to use this meeting)", icon=":material/help:"):
@@ -1698,6 +1777,12 @@ def _handle_add_to_faq(meeting_id: int, user_id: int, current: Faq | None, misse
 
 
 def _handle_ref_upload(meeting_id: int, uploaded) -> None:
+    # Phase 67: a big video would make the invitee's chat slow, so nothing is saved if one is.
+    problems = [problem for upload in uploaded for problem in show_files.upload_problems(upload.name, upload.size)]
+    if problems:
+        logger.info("Reference documents refused for meeting %s: %s", meeting_id, problems)
+        st.error("Nothing saved — " + " ".join(problems), icon=":material/error:")
+        return
     try:
         for upload in uploaded:
             path = storage.save_upload(upload.getvalue(), upload.name, meeting_id)

@@ -7,14 +7,21 @@ means the automatic steps. No Streamlit here, so both pages show the same defaul
 
 from meetings import steps
 from meetings.model import AgendaTable, Meeting
+from meetings.show_files import can_show
 from meetings.tables import describe_column
 
 
-def default_steps(meeting: Meeting, sheets: dict[str, AgendaTable], list_sizes: dict[str, int]) -> list[str]:
+def default_steps(
+    meeting: Meeting,
+    sheets: dict[str, AgendaTable],
+    list_sizes: dict[str, int],
+    ref_files: list[dict] | None = None,
+) -> list[str]:
     """The automatic steps, naming this meeting's own tabs and lists.
 
     `sheets` are the table grids by title; `list_sizes` the row count of each For each list,
-    keyed by `steps.loop_key` (a list with no rows is not mentioned).
+    keyed by `steps.loop_key` (a list with no rows is not mentioned). `ref_files` (phase 67)
+    adds a line when a reference document can be shown in the chat.
     """
     lines = [
         "Type your reply in the box at the bottom of the chat and press Enter.",
@@ -36,6 +43,8 @@ def default_steps(meeting: Meeting, sheets: dict[str, AgendaTable], list_sizes: 
                 "see the list on the left."
             )
     lines.append("You can ask your own question at any time, e.g. 'What is the notice period?'.")
+    if any(can_show(record.get("filename", "")) for record in ref_files or []):
+        lines.append("Ask to see a document, e.g. 'Show me the product demo' — it opens right in the chat.")
     for item in meeting.table_items():
         sheet = sheets.get(item.item)
         if sheet is None:

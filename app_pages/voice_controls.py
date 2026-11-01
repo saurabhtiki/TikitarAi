@@ -25,6 +25,7 @@ from streamlit.errors import StreamlitAPIException
 logger = logging.getLogger(__name__)
 
 UNSUPPORTED_NOTE = "Voice typing isn't available in this browser — please type."
+LISTENING_NOTE = "Listening… (this replaces what's in the box)"
 
 _BUTTON_CSS = """
 button {
@@ -41,7 +42,17 @@ button:hover { border-color: var(--st-primary-color); color: var(--st-primary-co
 .note { margin-left: 0.5rem; font-size: 0.875rem; color: #d33; }
 """
 
-_SPEAK_JS = """
+# Phase 66: voice is always English. An English browser keeps its accent (en-IN stays en-IN);
+# any other language would read English replies with a foreign voice and mishear English
+# speech, so it falls back to en-US.
+_ENGLISH_JS = """
+const voiceLanguage = () => {
+  const browser = navigator.language || ""
+  return browser.toLowerCase().startsWith("en") ? browser : "en-US"
+}
+"""
+
+_SPEAK_JS = _ENGLISH_JS + """
 export default function (component) {
   const { data, parentElement, setTriggerValue } = component
   const button = parentElement.querySelector("#speak")
@@ -54,6 +65,12 @@ export default function (component) {
     note.textContent = data.unsupported
     return
   }
+
+  // A new message in the chat means the last note ("Check the text…", an error) is old news.
+  if (parentElement.turn !== undefined && parentElement.turn !== data.turn && !parentElement.recognition) {
+    note.textContent = ""
+  }
+  parentElement.turn = data.turn
 
   const reset = () => {
     parentElement.recognition = null
@@ -68,7 +85,7 @@ export default function (component) {
     // Stop the bot reading aloud, or the mic would hear it.
     if (window.speechSynthesis) window.speechSynthesis.cancel()
     const recognition = new Recognition()
-    recognition.lang = navigator.language || "en-US"
+    recognition.lang = voiceLanguage()
     recognition.interimResults = true
     recognition.continuous = false
     let heard = ""
@@ -100,7 +117,7 @@ export default function (component) {
 
     parentElement.recognition = recognition
     button.textContent = "⏹ Stop"
-    note.textContent = "Listening…"
+    note.textContent = data.listening
     recognition.start()
   }
 
@@ -110,7 +127,7 @@ export default function (component) {
 }
 """
 
-_LISTEN_JS = """
+_LISTEN_JS = _ENGLISH_JS + """
 // Replies already read out by themselves, by id. Kept on `window` so it outlives Streamlit's
 // reruns (the same page) but not a full reload, which reads the newest reply once more.
 const spokenReplies = (window.inviteeSpokenReplies ??= new Set())
@@ -131,17 +148,27 @@ export default function (component) {
   }
   const speak = () => {
     window.speechSynthesis.cancel()
-    const utterance = new SpeechSynthesisUtterance(data.text)
-    utterance.lang = navigator.language || "en-US"
-    utterance.onend = done
-    utterance.onerror = (event) => {
-      done()
-      // Blocked until the person has clicked or typed on the page: try again at their first one.
-      if (event.error === "not-allowed" && data.auto) waitForTap()
-    }
+    // Each play gets its own number: a cancelled play's late onend/onerror sees it is no
+    // longer the current one and leaves the button alone.
+    const play = (parentElement.play = (parentElement.play || 0) + 1)
+    const current = () => parentElement.play === play
+    // One utterance per sentence: Chrome's voices stop a long single utterance after ~15s.
+    const sentences = data.text.match(/[^.!?\\n]+[.!?]*/g) || [data.text]
+    sentences.forEach((sentence, index) => {
+      const utterance = new SpeechSynthesisUtterance(sentence)
+      utterance.lang = voiceLanguage()
+      if (index === sentences.length - 1) utterance.onend = () => current() && done()
+      utterance.onerror = (event) => {
+        if (!current() || event.error === "interrupted" || event.error === "canceled") return
+        done()
+        // Blocked until the person has clicked or typed on the page: try again at their first one.
+        if (event.error === "not-allowed" && data.auto) waitForTap()
+      }
+      window.speechSynthesis.speak(utterance)
+    })
+    if (data.auto && data.id) spokenReplies.add(data.id)
     parentElement.speaking = true
     button.textContent = "⏹"
-    window.speechSynthesis.speak(utterance)
   }
   const onFirstTap = (event) => {
     stopWaiting()
@@ -159,6 +186,7 @@ export default function (component) {
 
   button.onclick = () => {
     if (parentElement.speaking) {
+      parentElement.play = (parentElement.play || 0) + 1
       window.speechSynthesis.cancel()
       done()
       return
@@ -168,14 +196,16 @@ export default function (component) {
 
   if (!data.auto && parentElement.speaking && parentElement.autoStarted) {
     // The switch was turned off mid-reply.
+    parentElement.play = (parentElement.play || 0) + 1
     window.speechSynthesis.cancel()
     done()
   }
+  // Marked as read only once it actually starts (in speak), so a wait for the first tap
+  // that is cleaned up by a rerun is tried again on the next render.
   if (data.auto && data.id && !spokenReplies.has(data.id)) {
-    spokenReplies.add(data.id)
     if (navigator.userActivation && !navigator.userActivation.hasBeenActive) waitForTap()
     else speak()
-    parentElement.autoStarted = true
+    parentElement.autoStarted = parentElement.speaking
   }
 
   return () => {
@@ -186,7 +216,7 @@ export default function (component) {
 """
 
 _SPEAK_HTML = """
-<button id="speak" type="button" title="Say your reply instead of typing it. The words go into the chat box for you to check, then press Enter.">🎤 Speak</button>
+<button id="speak" type="button" title="Say your reply instead of typing it. The words replace what is in the chat box, for you to check, then press Enter.">🎤 Speak</button>
 <span id="note" class="note"></span>
 """
 
@@ -213,9 +243,14 @@ def heard_text(value) -> str:
 
 
 def spoken_text(text: str) -> str:
-    """A reply as it should be read aloud: Markdown marks (`**`, `#`, backticks) dropped."""
+    """A reply as it should be read aloud: Markdown marks (`**`, `#`, backticks) dropped.
+
+    `_` and `>` stay unless they are clearly Markdown (`__bold__`, a `> quote` line), so
+    "INV_102" and "amounts > 60000" are read as written.
+    """
     without_links = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text or "")
-    return re.sub(r"[*_#`>|]+", " ", without_links).strip()
+    without_quotes = re.sub(r"(?m)^\s*>\s?", "", without_links)
+    return re.sub(r"[*#`]+|__+", " ", without_quotes).strip()
 
 
 def fill_chat_box(speak_key: str, chat_box_key: str) -> None:
@@ -225,12 +260,15 @@ def fill_chat_box(speak_key: str, chat_box_key: str) -> None:
         st.session_state[chat_box_key] = text
 
 
-def speak_button(chat_box_key: str, *, key: str) -> None:
-    """🎤 Speak: puts what the invitee says into the chat box `chat_box_key`."""
+def speak_button(chat_box_key: str, *, key: str, turn: int = 0) -> None:
+    """🎤 Speak: puts what the invitee says into the chat box `chat_box_key`.
+
+    `turn` is the number of messages in the chat; when it changes, the old note is cleared.
+    """
     try:
         _speak_component()(
             key=key,
-            data={"unsupported": UNSUPPORTED_NOTE},
+            data={"unsupported": UNSUPPORTED_NOTE, "listening": LISTENING_NOTE, "turn": turn},
             on_heard_change=partial(fill_chat_box, key, chat_box_key),
         )
     except StreamlitAPIException:

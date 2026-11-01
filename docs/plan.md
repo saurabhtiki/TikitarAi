@@ -1,40 +1,49 @@
-# Phase 65 — Read the bot's replies aloud automatically
+# Phase 67 — Organiser's photo as the bot's icon, and documents shown in the chat
 
 **Status: done.**
 
-The invitee no longer has to tap 🔊. Each new bot reply, the first greeting included,
-is read out by the browser as soon as it appears. A switch turns this off.
-
 ## What changes
 
-**1. A switch above the chat box: "🔊 Read replies aloud" (on by default).**
-- On: the newest bot reply is read out once, as soon as it appears.
-  Example: the invitee says "I can join Monday" and the bot's answer is read straight away.
-- Off: nothing is read by itself. Turning it off while the bot is talking stops it.
-- The 🔊 button under every reply stays, so any reply can be heard again.
+**1. The bot's chat icon is the organiser's profile photo.**
+The photo from Settings → Profile photo is used for every bot message. No photo (or the file
+is missing) → the default bot icon.
 
-**2. The first greeting is read too.**
-- Browsers only let a page talk after the person has clicked or typed on it. The invitee
-  has just typed the access code and clicked **Continue**, so the greeting can be read.
-- If the browser still blocks it (for example, the page was reloaded), the reply is read
-  at the invitee's first tap or key press anywhere on the page.
+**2. The bot can show a reference document in the chat.**
+Example: the invitee says "show me your product demo" → bot "Here is our product demo:" and
+the video plays right under the reply. It stays there after a reload.
+- Picture, video, PDF, HTML page → shown under the reply.
+- Word, Excel, anything else → the bot only says "Please open price_list.xlsx under Reference
+  documents". No preview.
+- The bot gets only each file's **name + description**, never what's inside (no extra tokens).
+  It can only pick a file from the list; a made-up name shows nothing.
+- An HTML page runs walled off from the app (a `data:` URL). A PDF uses the browser's own viewer.
 
-**3. No repeats, no talking over the mic.**
-- Each reply is read only once, even when the page refreshes itself (Save progress, a tab
-  change, the switch). A full page reload reads the newest reply once more.
-- Tapping 🎤 Speak stops the bot talking first, so the mic doesn't hear the bot.
+**2b. Show a file when a step starts.**
+Put the file name in an agenda item's note, e.g. `Show plan_layout.png, then ask what they
+think`. On starting that step the bot writes one short line ("Here is the plan layout:") and the
+picture appears below it. The first step can do it in the greeting. If the bot forgets, the app
+still shows a file named in that step's note, once per chat (`show_files.file_for_step`).
 
-**4. How to use and the help page mention it.**
-"Replies are read aloud — turn off 🔊 Read replies aloud above the chat box to stop this."
+**3. Organiser: descriptions and a video limit (Overview → Reference documents).**
+- A table **File | Shown in chat | Description** + **Save descriptions**. Example:
+  `demo.mp4` → "Product demo video".
+- A video over **50 MB** is refused ("demo.mp4 is 80 MB — videos can be at most 50 MB"),
+  and nothing from that upload is saved.
+- How to use gets "Ask to see a document, e.g. 'Show me the product demo'" when a showable
+  file exists. The Help page explains all of this.
 
-Code: `app_pages/voice_controls.py` (`listen_button(..., auto=True)`, `auto_read_switch`),
-`app_pages/meeting_invitee.py` (switch + only the newest bot reply gets `auto`),
-`meetings/guide.py`, `static/help/meetings.html`.
+Code: `meetings/show_files.py` (new), `meetings/db.py` (`meeting_files.description`,
+`meeting_messages.shown_file_id`, `save_file_descriptions`), `meetings/chat_agent.py`
+(`ChatTurnOutput.show_file`, file list in the prompt), `meetings/guide.py`,
+`app_pages/meeting_invitee.py`, `app_pages/meetings.py`, `static/help/meetings.html`.
 
-## Tests (`tests/test_meetings_phase65.py`)
+## Tests (`tests/test_meetings_phase67.py`)
 
-- The switch is shown and on by default.
-- Only the newest message, and only if it is from the bot, is marked to be read aloud.
-- Switch off → nothing is marked.
-- A closed chat reads nothing by itself.
-- How to use and the help page mention the switch.
+- File kinds by extension (upper case too); Word/Excel are "other".
+- Only videos over 50 MB are refused.
+- The prompt file list marks (can show)/(refer only) and is left out when there are no files.
+- Picking a file matches case and spaces loosely and refuses invented names.
+- An old database gains the two new columns; shown file and descriptions are saved; another
+  user can't change the descriptions.
+- The invitee page uses the organiser's photo, shows a picture under a reply, and says
+  "This file is no longer available." for a deleted file.

@@ -41,6 +41,12 @@ class TestHelpers:
         )
         assert spoken_text("See [the policy](http://x.com)") == "See the policy"
 
+    def test_spoken_text_keeps_underscores_and_comparisons(self):
+        assert spoken_text("Invoice INV_102: amounts > 60000 need approval") == (
+            "Invoice INV_102: amounts > 60000 need approval"
+        )
+        assert spoken_text("> Quoted __note__") == "Quoted  note"
+
 
 class TestHowToUse:
     def test_default_steps_mention_voice(self):

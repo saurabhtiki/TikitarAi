@@ -156,6 +156,8 @@ class ChatMessage:
     text: str = ""
     agenda_tag: str = ""
     created_at: str = ""
+    # Phase 67: the reference document shown under this bot reply, if any.
+    shown_file_id: int | None = None
 
     def is_from_ai(self) -> bool:
         return self.sender == SENDER_AI

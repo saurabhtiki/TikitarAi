@@ -299,11 +299,14 @@ def _ensure_list_columns(connection: sqlite3.Connection) -> None:
 
 def _ensure_model_columns(connection: sqlite3.Connection) -> None:
     """Phase 56: the meeting's chosen model, and the model that last replied in each chat.
-    Phase 59: the organiser's own "How to use this meeting" text."""
+    Phase 59: the organiser's own "How to use this meeting" text.
+    Phase 67: a reference document's description, and the file a bot reply showed."""
     added = (
         ("meetings", "profile_id", "INTEGER"),
         ("meeting_sessions", "model_used", "TEXT NOT NULL DEFAULT ''"),
         ("meetings", "how_to_use", "TEXT NOT NULL DEFAULT ''"),
+        ("meeting_files", "description", "TEXT NOT NULL DEFAULT ''"),
+        ("meeting_messages", "shown_file_id", "INTEGER"),
     )
     for table, column, kind in added:
         columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table});").fetchall()}
@@ -784,6 +787,7 @@ def _row_to_message(row: sqlite3.Row) -> ChatMessage:
         text=row["text"],
         agenda_tag=row["agenda_tag"] or "",
         created_at=row["created_at"],
+        shown_file_id=row["shown_file_id"],
     )
 
 
@@ -817,17 +821,19 @@ def add_message(
     text: str,
     agenda_tag: str = "",
     db_path: Path | str = DEFAULT_DB_PATH,
+    shown_file_id: int | None = None,
 ) -> int:
     """Saves one turn and returns its id, touching the session's last-active stamp.
 
     Both statements are in one transaction because a message whose session still claims the
     invitee was last active an hour ago would make the creator's status table lie.
+    `shown_file_id` (phase 67) is the reference document shown under a bot reply.
     """
     with _get_connection(db_path) as connection:
         cursor = connection.execute(
-            "INSERT INTO meeting_messages (meeting_id, invitee_id, sender, text, agenda_tag) "
-            "VALUES (?, ?, ?, ?, ?);",
-            (meeting_id, invitee_id, sender, text, agenda_tag or None),
+            "INSERT INTO meeting_messages (meeting_id, invitee_id, sender, text, agenda_tag, shown_file_id) "
+            "VALUES (?, ?, ?, ?, ?, ?);",
+            (meeting_id, invitee_id, sender, text, agenda_tag or None, shown_file_id),
         )
         connection.execute(
             "UPDATE meeting_sessions SET last_active_at = ? WHERE meeting_id = ? AND invitee_id = ?;",
@@ -938,6 +944,22 @@ def list_files(
                 (meeting_id, invitee_id),
             ).fetchall()
     return [dict(row) for row in rows]
+
+
+def save_file_descriptions(
+    meeting_id: int, user_id: int, descriptions: dict[int, str], db_path: Path | str = DEFAULT_DB_PATH
+) -> None:
+    """Phase 67: the short description the bot uses to pick a reference document to show.
+
+    Raises:
+        MeetingStorageError: if the meeting doesn't belong to user_id, or on a database failure.
+    """
+    with _get_connection(db_path) as connection:
+        _get_owned_meeting(connection, meeting_id, user_id)
+        connection.executemany(
+            "UPDATE meeting_files SET description = ? WHERE file_id = ? AND meeting_id = ? AND invitee_id IS NULL;",
+            [(" ".join(str(text or "").split()), file_id, meeting_id) for file_id, text in descriptions.items()],
+        )
 
 
 # --------------------------------------------------------------------------------------
