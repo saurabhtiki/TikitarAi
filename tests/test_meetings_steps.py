@@ -127,7 +127,11 @@ class TestAttempts:
             agenda=[_question(ANSWER_TEXT, title="A"), AgendaItem(item="Chat"), _question(ANSWER_TEXT, title="B")]
         )
         assert steps.next_question(meeting, {}).item == "A"
-        done = {"A": StepAnswer(item_ref="A", status=STEP_NOT_ANSWERED)}
+        # Phase 69: the discussion between them is a step too, in grid order.
+        done = {
+            "A": StepAnswer(item_ref="A", status=STEP_NOT_ANSWERED),
+            "Chat": StepAnswer(item_ref="Chat", status=STEP_ANSWERED),
+        }
         current = steps.next_question(meeting, done)
         assert current.item == "B"
         assert steps.progress_text(meeting, current, done) == "Question 2 of 2"

@@ -45,6 +45,7 @@
   <li><a href="#flow">Flow: Go to</a></li>
   <li><a href="#foreach">For each (a list)</a></li>
   <li><a href="#table">Table items</a></li>
+  <li><a href="#steps">Show document &amp; Fill table</a></li>
   <li><a href="#eval">Evaluation questions</a></li>
   <li><a href="#faq">FAQ</a></li>
   <li><a href="#after">After you create it</a></li>
@@ -74,7 +75,7 @@
 <tr><td><b>Question</b></td><td>You need one exact answer, checked by rules.</td><td>"Expected salary?" (a number)</td></tr>
 <tr><td><b>Table</b></td><td>The person must fill a grid of rows and columns.</td><td>A vendor's price list.</td></tr>
 </table>
-<p>Items are covered in the order you list them. Question items are asked first, one at a time ("Question 2 of 5").</p>
+<p>Items are covered one at a time, in the order you list them — questions and discussions mixed ("Question 2 of 5"). A discussion moves on once the AI sees it is covered, or after 5 replies. Table items are filled in on their own tabs.</p>
 
 <h2 id="question">3. Question items</h2>
 <p>For a <b>Question</b> row, fill these cells:</p>
@@ -85,6 +86,8 @@
 <tr><td><b>Tries</b></td><td>How many times the person may try. If a wrong answer is given, the AI asks again and uses one try. After the last try, "Not answered" is saved and the chat moves on. A side question does not use a try.</td></tr>
 <tr><td><b>Go to</b></td><td>Skip ahead depending on the answer. See <a href="#flow">section 4</a>.</td></tr>
 <tr><td><b>For each</b></td><td>Repeat for every row of a list. See <a href="#foreach">section 5</a>.</td></tr>
+<tr><td><b>Show document</b></td><td>Optional, Question or Discussion rows: a video, picture or file shown in the chat when this step starts. See <a href="#steps">section 6b</a>.</td></tr>
+<tr><td><b>Fill table</b></td><td>Optional, Question or Discussion rows: a Table the person must fill in before this step goes on. See <a href="#steps">section 6b</a>.</td></tr>
 </table>
 
 <h3>Rule examples</h3>
@@ -105,7 +108,8 @@ The candidate writes "evening please". The AI understands it as <b>Evening</b> a
 <h2 id="flow">4. Flow: skip questions with Go to</h2>
 <p>Use <b>Go to</b> when the next question depends on the last answer. You write <code>if (condition) go to (question name)</code>. For several conditions, separate them with <code>;</code>. The first one that matches wins.</p>
 <ul>
-  <li>Go to only jumps <b>forward</b>: to a later question or to <code>End</code>. Never back.</li>
+  <li>Go to only jumps <b>forward</b>: to a later Question or Discussion row, or to <code>End</code> (the end of the meeting). Never back.</li>
+  <li>Example: <b>About Us</b> (Yes/No) with <code>if No go to Introduction</code>, then a Discussion <b>Company Introduction</b> whose note says "Show Company Info", then the question <b>Introduction</b>. Yes plays the video; No skips it.</li>
   <li>Number conditions: <code>if &gt; 60000</code>, <code>if &lt; 10</code>. Yes/No or Choice: <code>if No</code>, <code>if Evening</code>. Text answers cannot branch.</li>
   <li>If the question was "Not answered", it never branches. The chat just goes to the next question.</li>
 </ul>
@@ -166,6 +170,42 @@ The candidate writes "evening please". The AI understands it as <b>Evening</b> a
   <li>If they type "abc" as a price, the app refuses it when they click <span class="ui">Save progress</span>.</li>
 </ul>
 <p><b>Step 5.</b> You compare all vendors in <span class="ui">Comparisons &rarr; Table comparisons</span>.</p>
+<p>A Table row on its own can be filled in any time. To make the chat <b>wait</b> for it and then talk about it, use <b>Fill table</b> (next section).</p>
+
+<h2 id="steps">6b. Show document and Fill table: what a step shows or needs</h2>
+<p>Two optional cells on a <b>Question</b> or <b>Discussion</b> row. The <b>AI note</b> is then only for what the AI should say or ask.</p>
+
+<h3>Show document: show a video or file when the step starts</h3>
+<table>
+<tr><th>Item</th><th>Type</th><th>Show document</th><th>AI note</th></tr>
+<tr><td>Company Introduction</td><td>Discussion</td><td>Company Info</td><td>Ask what they think about us</td></tr>
+</table>
+<ul>
+  <li>When the chat reaches <b>Company Introduction</b>, the AI says a short line like "Here is a short video about us" and <b>Company Info</b> plays right under it. It is shown once.</li>
+  <li>First add the document under <span class="ui">Reference documents</span> in Overview (a file or <span class="ui">Add a link</span>). In <span class="ui">Edit setup</span> the cell is then a dropdown of those documents. In New meeting there are none yet, so type the name and add the document after creating.</li>
+  <li>If the name is not in Reference documents (renamed or deleted), Overview shows a red note.</li>
+  <li>With Go to you can skip it: <b>About Us</b> (Yes/No) with <code>if No go to Introduction</code> jumps over the video row.</li>
+</ul>
+
+<h3>Fill table: the person must fill a table first</h3>
+<table>
+<tr><th>Item</th><th>Type</th><th>Fill table</th><th>AI note</th></tr>
+<tr><td>Price list</td><td>Table</td><td></td><td></td></tr>
+<tr><td>Rates</td><td>Discussion</td><td>Price list</td><td>Ask why any rate went up a lot</td></tr>
+<tr><td>Delivery</td><td>Question (Number)</td><td></td><td>Days to deliver</td></tr>
+</table>
+<p>What happens in the chat:</p>
+<ol>
+  <li>At <b>Rates</b> the AI says: "Please fill in the Rate column on the Price list tab and press Save progress." A red line above the chat box says the same.</li>
+  <li><b>It is mandatory.</b> Until the table is filled, the chat does not move on. If the person types "looks fine", the AI just reminds them to fill the table. Close chat also stays off.</li>
+  <li>When they press <span class="ui">Save progress</span> with everything filled, the chat shows "I have filled in the Price list table." and the AI starts Rates. It can see what they filled in, e.g. "Bolts went from 5 to 8 — why?".</li>
+  <li>After Rates is covered, the chat goes on to <b>Delivery</b>.</li>
+</ol>
+<div class="box tip"><b>What counts as filled?</b>Every row needs a value in each <b>Required</b> column. If you marked no column Required, every column the person can fill in is needed. A value already in your uploaded sheet counts as filled. Example: Rate is Required, Remarks is not &rarr; the chat waits only for Rate in every row.</div>
+<ul>
+  <li>Fill table must be the exact name of a <b>Table</b> row in the same agenda (capitals don't matter). It cannot be used on a For each question.</li>
+  <li>Upload the table's sheet in Overview. Until you do, nobody is held up, and Overview shows a red note.</li>
+</ul>
 
 <h2 id="eval">7. Evaluation questions: compare people on the same points</h2>
 <p>These are optional. The AI slips them naturally into the chat and notes the answer. The person does not see this list. Later you can compare everyone side by side.</p>
@@ -195,7 +235,7 @@ The candidate writes "evening please". The AI understands it as <b>Evening</b> a
 <p>Add files under <span class="ui">Reference documents</span> in Overview and give each a short description, then click <span class="ui">Save descriptions</span>. Example: <code>demo.mp4</code> → <code>Product demo video</code>.</p>
 <ul>
   <li>When someone asks "Show me the demo", the AI shows a <b>picture, video, PDF or HTML page</b> right under its reply.</li>
-  <li>To show a file when a step starts, put its exact file name in that agenda item's note, e.g. <code>Show plan_layout.png, then ask what they think</code>. The AI says "Here is the plan layout:" and the picture appears below. Each file is shown once per chat.</li>
+  <li>To show a file when a step starts, pick it in that row's <b>Show document</b> cell (see <a href="#steps">section 6b</a>). Older meetings that name the file in the AI note, e.g. <code>Show plan_layout.png, then ask what they think</code>, still work.</li>
   <li>For <b>Word, Excel and other files</b> the AI only says "Please open price_list.xlsx under Reference documents". It never reads the files.</li>
   <li>Videos can be at most 50 MB. The AI's chat icon is your profile photo from Settings.</li>
   <li><b>Big video or file? Add a link instead.</b> Click <span class="ui">Add a link</span>, give a name and the link, e.g. <code>Product demo</code> → <code>https://youtu.be/abc123</code>. Nothing is uploaded. A YouTube link or a link to a video or picture file plays right in the chat; any other link (Google Drive, a web page) shows an <span class="ui">Open Product demo</span> button. Make sure the link is shared so anyone can open it.</li>
@@ -222,6 +262,8 @@ The candidate writes "evening please". The AI understands it as <b>Evening</b> a
 <tr><td>Invitee cannot open the link</td><td>Check the link and code in <b>Share</b>. Send them again.</td></tr>
 <tr><td>The AI model is missing</td><td>The model you picked was deleted. The default one is used instead. Pick another in Overview.</td></tr>
 <tr><td>For each list shows 0 rows</td><td>The Match column found no row for that person. Clear the Match column to give everyone all rows, or fix the names/emails in your sheet.</td></tr>
+<tr><td>The chat is stuck on a step</td><td>That step has a <b>Fill table</b>. The person must fill every Required column (or every fill-in column if none is Required) in every row and press Save progress.</td></tr>
+<tr><td>The video shows at the wrong step</td><td>Put the document in the <b>Show document</b> cell of the right row, and remove its name from other rows' AI notes.</td></tr>
 <tr><td>Dates</td><td>Always write dates as dd-mm-yyyy, for example 15-11-2026.</td></tr>
 </table>
 </main>

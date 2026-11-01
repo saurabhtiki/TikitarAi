@@ -92,6 +92,48 @@ class AnswerReading(BaseModel):
     )
 
 
+class DiscussionReading(BaseModel):
+    """Whether the discussion step in progress has been covered enough to move on (phase 69)."""
+
+    covered: bool = Field(
+        default=False,
+        description="True if the invitee has given their view on this item, said they have "
+        "nothing more to add, or asked to move on; false if they asked something or the "
+        "discussion is still going.",
+    )
+
+
+def read_discussion(
+    profile: dict,
+    item: AgendaItem,
+    recent: list[ChatMessage],
+    message: str,
+    *,
+    key_path: Path | str | None = None,
+) -> DiscussionReading:
+    """Decides whether one discussion step can move on after the invitee's latest reply.
+
+    Only a yes/no reading: the app counts the replies and moves on after
+    `steps.DISCUSSION_REPLY_LIMIT` anyway, so a model that never says yes can't trap anyone.
+
+    Raises:
+        LLMConnectionError: if the provider fails.
+    """
+    turns = render_turns(recent)
+    wanted = item.ai_note.strip() or "the invitee's view on it"
+    prompt = (
+        f"The agenda item being discussed: {item.item}\n"
+        f"What the organiser wants from it: {wanted}\n"
+        + (f"Recent turns:\n{turns}\n" if turns else "")
+        + f"The invitee just replied: {message.strip()}\n\n"
+        "Is this item covered enough to move on to the next one? Say covered if the invitee has "
+        "given their view or the information asked for, said they have nothing more to add, or "
+        "asked to move on. Say not covered if they asked a question or the discussion is clearly "
+        "still going."
+    )
+    return run_structured(profile, prompt, DiscussionReading, key_path=key_path)
+
+
 def read_answer(
     profile: dict,
     item: AgendaItem,
@@ -157,16 +199,48 @@ def question_guidance(
     return " ".join(parts)
 
 
-def finished_questions_guidance(meeting: Meeting, *, just_happened: str = "") -> str:
-    """The step instruction once every question is answered or given up on."""
+def discussion_guidance(item: AgendaItem, *, just_happened: str = "") -> str:
+    """The step instruction for a discussion row (phase 69): talk about this item only."""
     parts = [just_happened] if just_happened else []
-    if any(not item.is_question() and not item.is_table() for item in meeting.agenda):
-        parts.append("All the set questions are done. Now move on to the discussion agenda items.")
-    else:
-        parts.append(
-            "All the set questions are done. Thank the invitee and ask them to press the "
-            "Close chat button to finish."
-        )
+    note = f" What to cover: {item.ai_note.strip()}" if item.ai_note.strip() else ""
+    parts.append(
+        f"Now discuss this agenda item: \"{item.item}\".{note} Talk about this item only and ask "
+        "one thing at a time. Do not start any other agenda item — the app moves on when this one "
+        "is covered."
+    )
+    return " ".join(parts)
+
+
+def fill_table_guidance(item: AgendaItem, columns: str, *, just_happened: str = "") -> str:
+    """The step instruction while a Fill table step waits for its table (phase 70)."""
+    parts = [just_happened] if just_happened else []
+    what = f" (columns to fill: {columns})" if columns else ""
+    parts.append(
+        f"The next agenda item is \"{item.item}\", but first the invitee must fill in the "
+        f"\"{item.fill_table}\" tab{what} and press its Save progress button. Ask them to do that "
+        "now, in simple words. Do not ask or discuss anything about this item yet and do not move "
+        "on — the app carries on once the table is saved. If they ask something, answer briefly."
+    )
+    return " ".join(parts)
+
+
+def filled_table_note(title: str, text: str) -> str:
+    """What the invitee filled in, added to a step's instruction so the bot can refer to it."""
+    return f"The invitee has filled in the \"{title}\" table (CSV):\n{text}\nYou may refer to it in this step."
+
+
+def document_note(name: str) -> str:
+    """Added to a step's instruction when the app shows its Show document (phase 70)."""
+    return f"The app shows \"{name}\" under your reply — introduce it in one short line."
+
+
+def finished_questions_guidance(meeting: Meeting, *, just_happened: str = "") -> str:
+    """The step instruction once every question and discussion step is done or skipped."""
+    parts = [just_happened] if just_happened else []
+    parts.append(
+        "All the agenda items are done. Thank the invitee and ask them to press the Close chat "
+        "button to finish."
+    )
     return " ".join(parts)
 
 
@@ -212,7 +286,7 @@ def system_instructions(
     if meeting.context_sop.strip():
         parts.append(f"Rules and background you must apply:\n{meeting.context_sop.strip()}")
 
-    discussion_items = [item for item in meeting.discussion_items() if not item.is_question()]
+    discussion_items = [item for item in meeting.agenda if item.is_discussion()]
     if meeting.question_items():
         parts.append(
             "This meeting has set questions that the app asks one at a time, in order. Follow "
@@ -224,8 +298,10 @@ def system_instructions(
         for item in discussion_items:
             note = f" — {item.ai_note.strip()}" if item.ai_note.strip() else ""
             agenda_lines.append(f"- {item.item}{note}")
+        # Phase 69: the app takes them in grid order, so the bot never picks the next one itself.
         parts.append(
-            "Work through these agenda items with the invitee, one at a time:\n"
+            "Work through these agenda items with the invitee, one at a time, when the CURRENT "
+            "STEP names them — never start one on your own:\n"
             + "\n".join(agenda_lines)
         )
     else:
@@ -245,7 +321,8 @@ def system_instructions(
             "These items are filled in on their own tabs as tables, not in this chat:\n"
             + "\n".join(table_lines)
             + "\nMention them once so the invitee knows to open those tabs, and answer "
-            "questions about them, but never ask for their contents row by row here."
+            "questions about them, but never ask for their contents row by row here. When the "
+            "CURRENT STEP asks the invitee to fill one in, follow it."
         )
 
     if evaluation_fields:
@@ -298,10 +375,11 @@ def system_instructions(
             "name; it appears under your reply. When you start an agenda item or question whose "
             "note says to show a (can show) document, start your reply with one short line saying "
             "what you are showing (for example \"Showing our product demo:\" or \"Here is the plan "
-            "layout:\"), set show_file to its exact name, then start the discussion. For a (refer "
-            "only) document, tell them to open it under Reference documents on the left. Never "
-            "describe what is inside a document beyond its description. Leave show_file empty "
-            "otherwise."
+            "layout:\"), set show_file to its exact name, then start the discussion. Never show a "
+            "document just because it is related to the topic, and never one meant for a later "
+            "step. For a (refer only) document, tell them to open it under Reference documents on "
+            "the left. Never describe what is inside a document beyond its description. Leave "
+            "show_file empty otherwise."
         )
 
     parts.append(
@@ -371,7 +449,10 @@ def opening_message(
     # A meeting that opens on a question is already discussing it, unlike an agenda list.
     result.agenda_tag = step_tag or OPENING_TAG
     result.unanswered_question = ""
-    # show_file is kept: a first question whose note says "show plan.png" shows it at once.
+    # Phase 69: nobody has asked for anything yet, so the bot's own pick is dropped — it once
+    # showed a later step's video on "Like to know more about our company?". A file the first
+    # step's note names is still shown, by the page's `file_for_step` safety net.
+    result.show_file = ""
     return result
 
 

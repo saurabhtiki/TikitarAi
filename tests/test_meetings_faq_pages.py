@@ -76,6 +76,8 @@ def _ask_side_question(monkeypatch, probe, meeting_id, invitee_id) -> dict:
     seen = {}
 
     def fake_run_structured(profile, prompt, output_schema, *, instructions=None, text_field=None, key_path=None):
+        if output_schema is not ChatTurnOutput:
+            return output_schema()  # phase 69: the "is this discussion covered?" check says no
         seen["instructions"] = instructions
         return ChatTurnOutput(reply="I'll check with the organiser.", agenda_tag="Salary", unanswered_question=PARKING)
 

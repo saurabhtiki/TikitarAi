@@ -222,7 +222,7 @@ class TestInvitee:
 
         assert meetings_db.load_step_answers(meeting.meeting_id, invitee_id) == {}
         assert seen["step_tag"] == SALARY
-        assert "added after the conversation started" in seen["step_guidance"]
+        assert "Their message was not an answer to it" in seen["step_guidance"]
 
     def test_after_the_last_question_the_invitee_is_told_to_close(self, tmp_path, monkeypatch):
         meeting, invitee_id, app = _started(tmp_path, monkeypatch)

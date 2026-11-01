@@ -68,10 +68,11 @@ class TestFlow:
         )
         assert 'q0 -> q2 [label="if Yes"' in dot
 
-    def test_discussion_items_come_after_the_questions(self):
-        dot = flow.flow_dot([_question("Salary"), AgendaItem(item="Experience")])
-        assert '"Discussion: Experience"' in dot
-        assert "end -> talk;" in dot
+    def test_discussion_items_are_steps_in_grid_order(self):
+        dot = flow.flow_dot([AgendaItem(item="Experience"), _question("Salary")])
+        assert '"1. Experience\\nDiscussion"' in dot
+        assert "q0 -> q1;" in dot
+        assert "q1 -> end;" in dot
 
     def test_a_for_each_list_is_a_box_with_a_next_row_arrow(self):
         dot = flow.flow_dot(templates.TEMPLATE_BY_NAME["AR review"].agenda)

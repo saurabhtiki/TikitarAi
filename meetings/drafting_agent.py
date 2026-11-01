@@ -38,7 +38,7 @@ _INSTRUCTIONS = (
     "- Yes/No: empty\n"
     "- Choice: the options separated by commas, e.g. 'Morning, Evening, Night'\n"
     "go_to is empty unless the description says to jump. Write it as 'if <condition> go to "
-    "<a later question's title>' or 'if <condition> go to End', several separated by ';'. "
+    "<a later question's or discussion's title>' or 'if <condition> go to End', several separated by ';'. "
     "The condition uses the rule words (e.g. '> 60000') or Yes / No or a Choice option. "
     "A Text question can't have a go_to. Jumps only go forward.\n"
     "for_each is empty unless the description says to ask the questions for every row of a "

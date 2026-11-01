@@ -129,6 +129,23 @@ def pick_file(name: str, files: list[dict]) -> dict | None:
     return next((record for record in files if _plain(record.get("filename")) == wanted), None)
 
 
+def missing_documents(agenda: list, files: list[dict]) -> list[str]:
+    """A red-note sentence for each Show document cell naming no Reference document (phase 70)."""
+    return [
+        f"{item.item}: Show document '{item.show_file}' isn't in Reference documents — add it there, or pick another."
+        for item in agenda
+        if item.show_file and pick_file(item.show_file, files) is None
+    ]
+
+
+def chosen_file(name: str, files: list[dict], shown_ids: set[int]) -> dict | None:
+    """The step's Show document (phase 70), if it exists, can be shown, and isn't shown yet."""
+    record = pick_file(name, files)
+    if record is None or not shows(record) or record.get("file_id") in shown_ids:
+        return None
+    return record
+
+
 def file_for_step(note: str, files: list[dict], shown_ids: set[int]) -> dict | None:
     """The showable file an agenda note names ("Show demo.mp4, then discuss"), if not shown yet.
 

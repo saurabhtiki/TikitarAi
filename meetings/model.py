@@ -81,12 +81,19 @@ class AgendaItem:
     branch: str = ""
     # The list this question is repeated for, once per row (phase 52), e.g. "Outstanding invoices".
     loop: str = ""
+    # Phase 70, Question and Discussion rows only: the Reference document shown when the step
+    # starts, and the Table row the invitee must fill in before the step goes on.
+    show_file: str = ""
+    fill_table: str = ""
 
     def is_table(self) -> bool:
         return self.item_type == TABLE_ITEM
 
     def is_question(self) -> bool:
         return self.item_type == QUESTION_ITEM
+
+    def is_discussion(self) -> bool:
+        return self.item_type == DISCUSSION_ITEM
 
 
 @dataclass
@@ -117,6 +124,10 @@ class Meeting:
     def discussion_items(self) -> list[AgendaItem]:
         """The items the chat works through. What `agenda_titles` used to mean, exactly."""
         return [item for item in self.agenda if not item.is_table()]
+
+    def step_items(self) -> list[AgendaItem]:
+        """Questions and discussions in grid order: what the chat takes one at a time (phase 69)."""
+        return [item for item in self.agenda if item.is_question() or item.is_discussion()]
 
     def question_items(self) -> list[AgendaItem]:
         """The step-by-step questions, in the order they are asked (phase 50)."""
@@ -381,6 +392,12 @@ def agenda_to_json(agenda: list[AgendaItem]) -> str:
                 entry["branch"] = item.branch
             if item.loop:
                 entry["loop"] = item.loop
+        if not item.is_table():
+            # Written only when set, so an agenda without them reads back byte-identical.
+            if item.show_file:
+                entry["show_file"] = item.show_file
+            if item.fill_table:
+                entry["fill_table"] = item.fill_table
         items.append(entry)
     return json.dumps({"version": SCHEMA_VERSION, "items": items}, indent=2)
 
@@ -447,6 +464,8 @@ def agenda_from_json(text: str) -> list[AgendaItem]:
                 max_tries=clamp_tries(raw.get("max_tries", DEFAULT_MAX_TRIES)),
                 branch=str(raw.get("branch") or "") if item_type == QUESTION_ITEM else "",
                 loop=str(raw.get("loop") or "").strip() if item_type == QUESTION_ITEM else "",
+                show_file=str(raw.get("show_file") or "").strip() if item_type != TABLE_ITEM else "",
+                fill_table=str(raw.get("fill_table") or "").strip() if item_type != TABLE_ITEM else "",
             )
         )
 

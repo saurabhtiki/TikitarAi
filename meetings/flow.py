@@ -1,8 +1,9 @@
 """The flow picture of a meeting's questions (phase 54), as Graphviz DOT text.
 
 `st.graphviz_chart` draws DOT text directly, so no extra package is needed. The picture
-follows the same reading of the agenda as the invitee page: questions in order, Go to jumps
-read by `steps.parse_branches`, and a For each list drawn as one box repeated per row. A
+follows the same reading of the agenda as the invitee page: questions and discussions in grid
+order (phase 69), Go to jumps read by `steps.parse_branches`, and a For each list drawn as one
+box repeated per row. A
 Go to that can't be read is drawn in red rather than left out, because spotting a wrong
 jump is what the picture is for.
 """
@@ -21,7 +22,10 @@ def _quote(text: str) -> str:
 
 
 def _node_label(number: int, item: AgendaItem) -> str:
-    return f"{number}. {item.item}\n{steps.describe_rule(item)}"
+    kind = "Discussion" if item.is_discussion() else steps.describe_rule(item)
+    # Phase 70: what the step shows and which table it waits for.
+    extras = [f"fill {item.fill_table} first" if item.fill_table else "", f"shows {item.show_file}" if item.show_file else ""]
+    return "\n".join([f"{number}. {item.item}", kind, *[extra for extra in extras if extra]])
 
 
 def _blocks(questions: list[AgendaItem]) -> list[tuple[str, list[int]]]:
@@ -37,28 +41,23 @@ def _blocks(questions: list[AgendaItem]) -> list[tuple[str, list[int]]]:
 
 
 def flow_dot(agenda: list[AgendaItem]) -> str:
-    """DOT text for the questions' flow, or "" when the agenda has no Question rows."""
-    questions = [item for item in agenda if item.is_question()]
-    if not questions:
+    """DOT text for the steps' flow, or "" when the agenda has no Question rows."""
+    if not any(item.is_question() for item in agenda):
         return ""
+    # Named `questions` for the node ids (q0, q1...), but discussions are steps too (phase 69).
+    questions = [item for item in agenda if item.is_question() or item.is_discussion()]
 
     node_by_title: dict[str, str] = {}
     for index, item in enumerate(questions):
         node_by_title.setdefault(item.item.strip().lower(), f"q{index}")
-    others = [item.item for item in agenda if not item.is_question() and item.item.strip()]
 
     lines = [
         "digraph {",
         '  node [shape=box, style="rounded", fontname="Helvetica", fontsize=11];',
         '  edge [fontname="Helvetica", fontsize=10];',
         '  start [label="Start", shape=oval];',
-        f'  end [label={_quote("End of questions" if others else "End")}, shape=oval];',
+        '  end [label="End", shape=oval];',
     ]
-    if others:
-        lines.append(f'  talk [label={_quote("Discussion: " + ", ".join(others))}];')
-        lines.append('  finish [label="End", shape=oval];')
-        lines.append("  end -> talk;")
-        lines.append("  talk -> finish;")
 
     blocks = _blocks(questions)
     for block_number, (name, positions) in enumerate(blocks):
@@ -68,7 +67,9 @@ def flow_dot(agenda: list[AgendaItem]) -> str:
             lines.append(f"    label={_quote('For each row of ' + name)}; style=dashed;")
             indent = "    "
         for index in positions:
-            lines.append(f"{indent}q{index} [label={_quote(_node_label(index + 1, questions[index]))}];")
+            # A discussion is a dashed box, so it reads apart from the questions.
+            style = ', style="rounded,dashed"' if questions[index].is_discussion() else ""
+            lines.append(f"{indent}q{index} [label={_quote(_node_label(index + 1, questions[index]))}{style}];")
         if name:
             lines.append("  }")
 

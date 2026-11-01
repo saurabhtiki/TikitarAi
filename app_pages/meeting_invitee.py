@@ -24,6 +24,10 @@ Phase 57 names each table tab and its columns in How to use, and adds each For e
 Phase 64 adds voice: 🎤 Speak above the chat box and 🔊 under each bot reply, both done by
 the invitee's browser (`app_pages.voice_controls`).
 
+Phase 70: a step's **Show document** is shown when the step starts, and a step with a **Fill
+table** waits until the invitee has filled that tab in; saving it posts "I have filled in the
+… table." and the step starts (`_FillTables`).
+
 Phase 2 adds the tab strip spec 3a asks for: every discussion item shares one **General
 Discussion** tab, and each table item gets its own grid tab. Ten discussion items and two
 tables are three tabs, not twelve.
@@ -32,6 +36,7 @@ tables are three tabs, not twelve.
 import base64
 import datetime
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import streamlit as st
@@ -67,6 +72,7 @@ from meetings.model import (
     SENDER_USER,
     STEP_ANSWERED,
     STEP_NOT_ANSWERED,
+    AgendaItem,
     AgendaTable,
     ColumnRule,
     Faq,
@@ -221,6 +227,73 @@ def _log_unanswered(meeting_id: int, invitee_id: int, question: str, agenda_tag:
         logger.exception("Could not log an unanswered question for invitee %s.", invitee_id)
 
 
+@dataclass
+class _FillTables:
+    """The Table rows named in Fill table cells, as this invitee has them (phase 70).
+
+    Keyed by lower-case title. A table with no data uploaded yet isn't here, so it never holds
+    anyone up.
+    """
+
+    sheets: dict[str, AgendaTable] = field(default_factory=dict)
+    responses: dict[str, dict[int, dict]] = field(default_factory=dict)
+
+    def unfilled(self) -> set[str]:
+        return {
+            sheet.item_ref
+            for key, sheet in self.sheets.items()
+            if not tables.is_filled(sheet, self.responses.get(key, {}))
+        }
+
+    def waits(self, item: AgendaItem | None) -> bool:
+        """Whether this step can't go on yet because its Fill table isn't filled in."""
+        key = item.fill_table.strip().lower() if item is not None else ""
+        sheet = self.sheets.get(key)
+        return sheet is not None and not tables.is_filled(sheet, self.responses.get(key, {}))
+
+    def columns(self, title: str) -> str:
+        sheet = self.sheets.get(title.strip().lower())
+        if sheet is None:
+            return ""
+        return ", ".join(tables.describe_column(column, sheet.rule_for(column)) for column in tables.must_fill_columns(sheet))
+
+    def note(self, title: str) -> str:
+        """What the invitee filled in, for the bot; "" when there is no such table."""
+        key = title.strip().lower()
+        sheet = self.sheets.get(key)
+        if sheet is None:
+            return ""
+        return chat_agent.filled_table_note(sheet.item_ref, tables.filled_text(sheet, self.responses.get(key, {})))
+
+
+def _fill_tables(meeting: Meeting, meeting_id: int, invitee_id: int) -> _FillTables:
+    """This invitee's Fill tables (phase 70). A read failure holds nobody up: it is logged and
+    the steps go on as if there were no table to fill."""
+    wanted = {item.fill_table.strip().lower() for item in meeting.step_items() if item.fill_table.strip()}
+    if not wanted:
+        return _FillTables()
+    fills = _FillTables()
+    try:
+        for sheet in db.list_agenda_tables(meeting_id):
+            key = sheet.item_ref.strip().lower()
+            if key in wanted:
+                fills.sheets[key] = sheet
+                fills.responses[key] = db.load_table_responses(sheet.table_id, invitee_id)
+    except MeetingError:
+        logger.exception("Could not read the Fill tables of meeting %s for invitee %s.", meeting_id, invitee_id)
+        return _FillTables()
+    return fills
+
+
+def _with_table_note(meeting: Meeting, guidance: str, step_tag: str, fills: _FillTables) -> str:
+    """Adds what the invitee filled in to the guidance of a step whose Fill table is done."""
+    item = next((item for item in meeting.agenda if item.item == step_tag), None)
+    if item is None or not item.fill_table or fills.waits(item):
+        return guidance
+    note = fills.note(item.fill_table)
+    return f"{guidance}\n\n{note}" if guidance and note else guidance
+
+
 def _render_chat(meeting: Meeting, invitee: dict) -> None:
     meeting_id = invitee["meeting_id"]
     invitee_id = invitee["invitee_id"]
@@ -245,16 +318,17 @@ def _render_chat(meeting: Meeting, invitee: dict) -> None:
 
     fields = _evaluation_fields(meeting_id)
     lists = _invitee_lists(meeting, invitee)
+    fills = _fill_tables(meeting, meeting_id, invitee_id)
 
     if not messages and not chat_session.closed:
-        _open_conversation(meeting, profile, invitee, fields, answers, lists)
+        _open_conversation(meeting, profile, invitee, fields, answers, lists, fills)
         return
 
     side, main = st.columns([1, 3])
     with side:
         _render_side_panel(meeting, meeting_id, invitee_id, chat_session.closed, answers, lists)
     with main:
-        _render_main(meeting, profile, invitee, chat_session, messages, fields, answers, lists)
+        _render_main(meeting, profile, invitee, chat_session, messages, fields, answers, lists, fills)
 
 
 def _render_main(
@@ -266,22 +340,41 @@ def _render_main(
     fields: list,
     answers: dict[str, StepAnswer],
     lists: loops.InviteeLists,
+    fills: _FillTables,
 ) -> None:
     """The right 3/4: the chat (and any table tabs), then closing."""
     meeting_id = invitee["meeting_id"]
     invitee_id = invitee["invitee_id"]
     table_items = meeting.table_items()
+
+    def _table_saved(title: str) -> None:
+        """Phase 70: saving the table the open step waits for starts that step in the chat."""
+        current = steps.next_question(meeting, answers, lists.rows)
+        if current is None or current.question.fill_table.strip().lower() != title.strip().lower():
+            return
+        now = _fill_tables(meeting, meeting_id, invitee_id)
+        if now.waits(current.question):
+            st.warning(
+                f"Saved — but the chat carries on only once every row has {now.columns(title)} filled in.",
+                icon=":material/warning:",
+            )
+            return
+        _handle_turn(
+            meeting, profile, invitee, chat_session.running_summary, messages,
+            f"I have filled in the {title} table.", fields, answers, lists, now, table_saved=True,
+        )
+
     if table_items:
         # Spec 3a's tab strip: one shared discussion tab, one tab per grid. Built only when
         # there is a grid; a meeting without one shows the chat straight in this column.
         tabs = st.tabs([DISCUSSION_TAB, *[f"📋 {item.item}" for item in table_items]])
         with tabs[0]:
-            _render_discussion(meeting, profile, invitee, chat_session, messages, fields, answers, lists)
+            _render_discussion(meeting, profile, invitee, chat_session, messages, fields, answers, lists, fills)
         for tab, item in zip(tabs[1:], table_items):
             with tab:
-                _render_table_tab(meeting_id, invitee_id, item, chat_session.closed)
+                _render_table_tab(meeting_id, invitee_id, item, chat_session.closed, on_saved=_table_saved)
     else:
-        _render_discussion(meeting, profile, invitee, chat_session, messages, fields, answers, lists)
+        _render_discussion(meeting, profile, invitee, chat_session, messages, fields, answers, lists, fills)
 
     # Below the tabs, because closing and its summary belong to the whole session rather
     # than to whichever tab happens to be open.
@@ -294,13 +387,17 @@ def _render_main(
     left = steps.questions_left(meeting, answers, lists.rows)
     if left:
         st.caption(f":red[{left} question(s) left — finish them to close.]")
+    # Phase 70: a Fill table is mandatory, so it holds Close chat like a question does.
+    tables_left = steps.tables_left(meeting, answers, fills.unfilled(), lists.rows)
+    if tables_left:
+        st.caption(f":red[Still to fill in: {', '.join(tables_left)} — finish to close.]")
     if st.button(
         "Close chat",
         key="invitee_close_chat",
         icon=":material/task_alt:",
-        disabled=left > 0,
+        disabled=left > 0 or bool(tables_left),
         help="Finish and generate your summary. You won't be able to add anything afterwards. "
-        "Available once every question is done.",
+        "Available once every question is done and every table the chat asks for is filled in.",
     ):
         _handle_close(meeting, profile, meeting_id, invitee_id, fields)
 
@@ -381,22 +478,28 @@ def _shown_file_id(
 ) -> int | None:
     """The id of the document to show under a bot reply, only if it exists and can be shown.
 
-    The bot's own pick comes first. If it forgot, a file named in the note of the step the
-    reply is about ("Show demo.mp4, then discuss") is shown, once per step: a later step
-    naming the same file shows it again.
+    The step's own Show document comes first (phase 70), once per step. Then the bot's own
+    pick. If it made none, a file named in the note of the step the reply is about ("Show
+    demo.mp4, then discuss") is shown, once per step: a later step naming the same file shows
+    it again.
     """
+    item = next((item for item in meeting.agenda if item.item == turn.agenda_tag), None)
+    shown_ids = {
+        message.shown_file_id
+        for message in messages
+        if message.shown_file_id and message.agenda_tag == turn.agenda_tag
+    }
+    if item is not None and item.show_file:
+        chosen = show_files.chosen_file(item.show_file, files, shown_ids)
+        if chosen is not None:
+            return chosen["file_id"]
     name = turn.show_file
     record = show_files.pick_file(name, files)
     if record is not None and show_files.shows(record):
         return record["file_id"]
     if name.strip():
         logger.info("Bot asked to show '%s', which is not a showable reference document.", name)
-    note = next((item.ai_note for item in meeting.agenda if item.item == turn.agenda_tag), "")
-    shown_ids = {
-        message.shown_file_id
-        for message in messages
-        if message.shown_file_id and message.agenda_tag == turn.agenda_tag
-    }
+    note = item.ai_note if item is not None else ""
     step_file = show_files.file_for_step(note, files, shown_ids)
     return step_file["file_id"] if step_file else None
 
@@ -515,6 +618,7 @@ def _render_discussion(
     fields: list,
     answers: dict[str, StepAnswer],
     lists: loops.InviteeLists,
+    fills: _FillTables,
 ) -> None:
     """The conversation itself — every discussion agenda item, as one flowing chat."""
     meeting_id = invitee["meeting_id"]
@@ -548,7 +652,9 @@ def _render_discussion(
         return
 
     current = steps.next_question(meeting, answers, lists.rows)
-    if current is not None:
+    if current is not None and fills.waits(current.question):
+        st.caption(f":red[Fill in the 📋 {current.question.fill_table} tab and press Save progress to carry on.]")
+    elif current is not None:
         st.caption(f":red[{_progress(meeting, current, answers, lists)}]")
 
     auto_read_switch(key=AUTO_READ_KEY)
@@ -565,10 +671,11 @@ def _render_discussion(
             fields,
             answers,
             lists,
+            fills,
         )
 
 
-def _render_table_tab(meeting_id: int, invitee_id: int, item, closed: bool) -> None:
+def _render_table_tab(meeting_id: int, invitee_id: int, item, closed: bool, on_saved=None) -> None:
     """One table agenda item's grid: locked columns to read, editable ones to fill.
 
     Loaded fresh on every run rather than cached in session state — the invitee is expected
@@ -629,7 +736,8 @@ def _render_table_tab(meeting_id: int, invitee_id: int, item, closed: bool) -> N
         icon=":material/save:",
         help="Store what you've filled in so far. You can come back and finish later.",
     ):
-        _handle_save_table(table, invitee_id, edited)
+        if _handle_save_table(table, invitee_id, edited) and on_saved is not None:
+            on_saved(item.item)
 
 
 def _grid_column_config(table: AgendaTable) -> dict:
@@ -654,24 +762,26 @@ def _column_cell(column: str, rule: ColumnRule, today: datetime.date):
     return st.column_config.TextColumn(help=tip, max_chars=steps.max_length(question))
 
 
-def _handle_save_table(table: AgendaTable, invitee_id: int, edited) -> None:
+def _handle_save_table(table: AgendaTable, invitee_id: int, edited) -> bool:
     """Stores the invitee's rows once every column rule passes (phase 59). Explicit rather than
-    per-cell, as spec 3a asks; on a problem nothing is saved and the grid keeps what was typed."""
+    per-cell, as spec 3a asks; on a problem nothing is saved and the grid keeps what was typed.
+    True once saved."""
     rows, problems = tables.check_rows(table, tables.responses_from_frame(table, edited), datetime.date.today())
     if problems:
         shown = "\n".join(f"- {problem}" for problem in problems[:10])
         more = f"\n- …and {len(problems) - 10} more" if len(problems) > 10 else ""
         logger.info("Table %s rows refused for invitee %s: %s", table.table_id, invitee_id, problems)
         st.error(f"Nothing saved yet — please fix these:\n\n{shown}{more}", icon=":material/error:")
-        return
+        return False
     try:
         saved = db.save_table_responses(table.table_id, invitee_id, rows)
     except MeetingError as error:
         logger.exception("Could not save table rows for invitee %s.", invitee_id)
         st.error(str(error), icon=":material/error:")
-        return
+        return False
 
     st.success(tables.completion_label(table, saved) + " saved.", icon=":material/check_circle:")
+    return True
 
 
 def _open_conversation(
@@ -681,6 +791,7 @@ def _open_conversation(
     fields: list,
     answers: dict[str, StepAnswer],
     lists: loops.InviteeLists,
+    fills: _FillTables,
 ) -> None:
     """Generates and stores the AI's opening message, then reruns to show it.
 
@@ -692,12 +803,15 @@ def _open_conversation(
     first = steps.next_question(meeting, answers, lists.rows)
     guidance = ""
     if first is not None:
-        guidance = chat_agent.question_guidance(
-            first.question,
-            _progress(meeting, first, answers, lists),
+        guidance = _step_guidance(
+            meeting,
+            first,
+            answers,
+            lists,
+            fills,
             just_happened="Open with a short welcome in character and say why this conversation is happening.",
-            row_context=lists.row_context(first),
         )
+        guidance = _with_table_note(meeting, guidance, first.item, fills)
     ref_files = _reference_files(meeting_id)
     try:
         with st.spinner("Starting the conversation..."):
@@ -734,12 +848,17 @@ def _handle_turn(
     fields: list,
     answers: dict[str, StepAnswer],
     lists: loops.InviteeLists,
+    fills: _FillTables,
+    table_saved: bool = False,
 ) -> None:
     """Saves the invitee's message, replies to it, then folds if the history has grown.
 
     The invitee's own message is written **first and on its own**, so a provider failure
     costs them the reply and not what they typed. While a question step is open the reply is
     steered by `_advance_question`; a failure while reading the answer uses no try.
+
+    A step waiting for its Fill table reads no answer (phase 70); `table_saved` is the
+    "I have filled in…" message posted on saving that table, which starts the step.
     """
     meeting_id = invitee["meeting_id"]
     invitee_id = invitee["invitee_id"]
@@ -758,12 +877,30 @@ def _handle_turn(
     try:
         with st.spinner("Thinking..."):
             guidance, step_tag = "", ""
-            if current is not None and not _was_asked(messages, current):
-                guidance, step_tag = _ask_new_question(meeting, current, answers, lists), current.item
+            if current is not None and table_saved:
+                guidance = _step_guidance(
+                    meeting, current, answers, lists, fills, with_document=False,
+                    just_happened=f"The invitee has just filled in and saved the {current.question.fill_table} "
+                    "table. Thank them in a few words, then start this step.",
+                )
+                step_tag = current.item
+            elif current is not None and fills.waits(current.question):
+                guidance = _step_guidance(
+                    meeting, current, answers, lists, fills, with_document=not _was_asked(messages, current),
+                    just_happened="Reply briefly to what the invitee just said.",
+                )
+                step_tag = current.item
+            elif current is not None and not _was_asked(messages, current):
+                guidance, step_tag = _ask_new_question(meeting, current, answers, lists, fills), current.item
+            elif current is not None and current.is_discussion():
+                guidance, step_tag, fallback = _advance_discussion(
+                    meeting, profile, meeting_id, invitee_id, current, answers, prompt, lists, messages, fills
+                )
             elif current is not None:
                 guidance, step_tag, fallback = _advance_question(
-                    meeting, profile, meeting_id, invitee_id, current, answers, prompt, lists
+                    meeting, profile, meeting_id, invitee_id, current, answers, prompt, lists, fills
                 )
+            guidance = _with_table_note(meeting, guidance, step_tag, fills)
             turn = chat_agent.send_turn(
                 meeting,
                 profile,
@@ -807,6 +944,7 @@ def _advance_question(
     answers: dict[str, StepAnswer],
     reply: str,
     lists: loops.InviteeLists,
+    fills: _FillTables,
 ) -> tuple[str, str, str]:
     """Reads, checks and records one reply to the open question (for its list row, if any).
 
@@ -854,30 +992,103 @@ def _advance_question(
         )
         plain = f"{check.reason} Please try again ({tries_left} tries left)."
 
-    after = {**answers, current.key: updated}
+    return _after_step(meeting, current, {**answers, current.key: updated}, lists, fills, happened, plain)
+
+
+def _advance_discussion(
+    meeting: Meeting,
+    profile: dict,
+    meeting_id: int,
+    invitee_id: int,
+    current: steps.Step,
+    answers: dict[str, StepAnswer],
+    reply: str,
+    lists: loops.InviteeLists,
+    messages: list,
+    fills: _FillTables,
+) -> tuple[str, str, str]:
+    """Records one reply on the open discussion step and moves on once it is covered (phase 69).
+
+    The model only says covered or not (`read_discussion`); `steps.record_discussion_reply`
+    also moves on after `DISCUSSION_REPLY_LIMIT` replies. Returns what `_advance_question` does.
+
+    Raises:
+        LLMConnectionError: if reading the reply fails.
+        MeetingError: if the step can't be saved.
+    """
+    reading = chat_agent.read_discussion(profile, current.question, running_summary.recent_messages(messages), reply)
+    updated = steps.record_discussion_reply(current.question, answers.get(current.key), reading.covered, reply, key=current.key)
+    db.save_step_answer(meeting_id, invitee_id, updated)
+    if updated.status != STEP_ANSWERED:
+        guidance = chat_agent.discussion_guidance(
+            current.question,
+            just_happened="Reply to what the invitee just said and carry on with this item. If they "
+            "asked something, answer it briefly from your instructions (say so if you don't know).",
+        )
+        return guidance, current.item, ""
+    happened = "This agenda item is covered now. Thank them in a few words."
+    return _after_step(
+        meeting, current, {**answers, current.key: updated}, lists, fills, happened, "Thanks for sharing that."
+    )
+
+
+def _after_step(
+    meeting: Meeting,
+    current: steps.Step,
+    after: dict[str, StepAnswer],
+    lists: loops.InviteeLists,
+    fills: _FillTables,
+    happened: str,
+    plain: str,
+) -> tuple[str, str, str]:
+    """The guidance, tag and plain fallback reply once `current` has been saved as `after`."""
     upcoming = steps.next_question(meeting, after, lists.rows)
     if upcoming is None:
         return (
             chat_agent.finished_questions_guidance(meeting, just_happened=happened),
             current.item,
-            f"{plain} That's all my set questions.",
+            f"{plain} That's everything on my agenda.",
         )
     if upcoming.key != current.key:
-        plain += f" Next: {_plain_question(upcoming, lists)}"
-    return (
-        chat_agent.question_guidance(
-            upcoming.question,
-            _progress(meeting, upcoming, after, lists),
-            just_happened=happened,
-            row_context=lists.row_context(upcoming),
-        ),
-        upcoming.item,
-        plain,
-    )
+        plain += f" Next: {_plain_question(upcoming, lists, fills)}"
+    return _step_guidance(meeting, upcoming, after, lists, fills, just_happened=happened), upcoming.item, plain
 
 
-def _plain_question(step: steps.Step, lists: loops.InviteeLists) -> str:
-    """The question in plain words, for when the model can't word it."""
+def _step_guidance(
+    meeting: Meeting,
+    step: steps.Step,
+    answers: dict[str, StepAnswer],
+    lists: loops.InviteeLists,
+    fills: _FillTables,
+    just_happened: str = "",
+    with_document: bool = True,
+) -> str:
+    """What the chat model is told to do for this step: ask the question, discuss the item, or
+    (phase 70) first have the invitee fill in its table. `with_document` adds the line about the
+    step's Show document, for the reply that starts the step."""
+    item = step.question
+    if fills.waits(item):
+        guidance = chat_agent.fill_table_guidance(item, fills.columns(item.fill_table), just_happened=just_happened)
+    elif step.is_discussion():
+        guidance = chat_agent.discussion_guidance(item, just_happened=just_happened)
+    else:
+        guidance = chat_agent.question_guidance(
+            item,
+            _progress(meeting, step, answers, lists),
+            just_happened=just_happened,
+            row_context=lists.row_context(step),
+        )
+    if with_document and item.show_file:
+        guidance += " " + chat_agent.document_note(item.show_file)
+    return guidance
+
+
+def _plain_question(step: steps.Step, lists: loops.InviteeLists, fills: _FillTables) -> str:
+    """The question (or discussion item) in plain words, for when the model can't word it."""
+    if fills.waits(step.question):
+        return f"please fill in the {step.question.fill_table} tab and press Save progress."
+    if step.is_discussion():
+        return f"let's talk about {step.item}."
     text = f"{step.item} — {steps.describe_rule(step.question)}."
     row = lists.row_context(step)
     return f"{text} ({row})" if row else text
@@ -893,13 +1104,18 @@ def _was_asked(messages: list, current: steps.Step) -> bool:
     return last_ai is not None and last_ai.agenda_tag == current.item
 
 
-def _ask_new_question(meeting: Meeting, current: steps.Step, answers: dict, lists: loops.InviteeLists) -> str:
-    return chat_agent.question_guidance(
-        current.question,
-        _progress(meeting, current, answers, lists),
-        just_happened="Reply briefly to what the invitee just said, then ask this question. It was "
-        "added after the conversation started, so their message was not an answer to it.",
-        row_context=lists.row_context(current),
+def _ask_new_question(
+    meeting: Meeting, current: steps.Step, answers: dict, lists: loops.InviteeLists, fills: _FillTables
+) -> str:
+    """The step the invitee hasn't been taken to yet: a new row, or the next one after a reload."""
+    return _step_guidance(
+        meeting,
+        current,
+        answers,
+        lists,
+        fills,
+        just_happened="Reply briefly to what the invitee just said, then start this step. Their "
+        "message was not an answer to it.",
     )
 
 

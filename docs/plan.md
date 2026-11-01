@@ -1,36 +1,58 @@
-# Phase 68 — Reference documents can be links (YouTube, Drive, web pages)
+# Phase 70 — Show document and Fill table columns on agenda rows
 
 **Status: done.**
 
 ## What changes
 
-**1. Organiser: Add a link (Overview → Reference documents).**
-Next to uploading, a small form: **Name** + **Link**. Example: `Product demo` →
-`https://youtu.be/abc123`. Nothing is uploaded, so big videos cost no storage or upload time.
-- The link must start with `http://` or `https://`; the name is required and can't repeat a
-  name already in the list ("Product demo is already in the list").
-- It appears in the same list and **Description** table as uploaded files, with
-  "Shown in chat" = "Yes — video" / "Yes — picture" / "Yes — opens link".
+**1. New "Show document" column.** On a Question or Discussion row, pick one of the meeting's
+Reference documents. When the chat reaches that step, the document appears under the bot's
+reply (once), and the bot introduces it in one short line. The AI note is just instructions now.
 
-**2. Works the same way as an uploaded file.**
-- The bot sees the name + description, marked (can show). "Show me the product demo" →
-  the video plays under the reply.
-- A YouTube link or a link ending in .mp4/.webm/.mov → video player.
-- A link ending in .png/.jpg/.gif/.webp → picture.
-- Anything else (Google Drive, a PDF on a website, a web page) → an **Open Product demo ↗**
-  button under the reply (most sites refuse to be shown inside another page).
-- An agenda note naming the link ("Show Product demo, then ask...") shows it when the step starts.
-- Invitee's Reference documents box: a link is an **Open** button instead of Download.
+| Item | Type | Show document | Note |
+|---|---|---|---|
+| Company Introduction | Discussion | Company Info | Ask what they think of us |
 
-Code: `meetings/show_files.py` (`link_kind`, `record_kind`, `shows`, `link_problems`),
-`meetings/db.py` (`meeting_files.url`, `add_link`), `meetings/guide.py`,
-`app_pages/meeting_invitee.py`, `app_pages/meetings.py`, `static/help/meetings.html`.
+- In the setup editor (after creating) it is a dropdown of the Reference documents. In New
+  meeting there are no documents yet, so you type the name; add the document in Overview after.
+- A name that is not in Reference documents gets a red note (e.g. after a rename or delete).
+- Old notes that name a file ("Show Company Info, then…") keep working.
 
-## Tests (`tests/test_meetings_phase68.py`)
+**2. New "Fill table" column (mandatory).** On a Question or Discussion row, name a Table row
+of the same agenda. When the chat reaches that step:
 
-- Link kinds: YouTube / youtu.be / .mp4 → video, .png → picture, Drive / web page → link.
-- A bad link (`ftp://`, `javascript:`, no host), empty name or repeated name is refused.
-- The prompt marks a link (can show); How to use mentions showing documents.
-- An agenda note naming a link shows it once.
-- An old database gains `url`; `add_link` saves it; another user can't add a link.
-- The invitee page shows a YouTube link as a video and a web page as an Open button.
+1. The bot asks the invitee to fill in that tab and press **Save progress**. A red line above
+   the chat box says the same. Nothing moves on until it is filled — the bot only answers side
+   questions.
+2. Saving the filled table posts "I have filled in the Price list table." in the chat, and the
+   step starts: the question is asked, or the discussion begins. The bot sees what was filled
+   in (up to 50 rows), so it can say "Item 3's rate went up — why?".
+3. **Filled** = every row has a value in every **Required** column (if no column is Required,
+   in every column the invitee fills in). A value already in the uploaded sheet counts.
+4. **Close chat** also waits for any table still to be filled on the invitee's path.
+
+| Item | Type | Fill table | Note |
+|---|---|---|---|
+| Price list | Table | | |
+| Rates | Discussion | Price list | Ask about any rate that changed a lot |
+
+- Fill table must name a Table row; it can't be used on a For each question.
+- A Table row with no data uploaded yet doesn't block anyone (red note for the organiser).
+
+**3. Flow picture** shows "shows Company Info" / "fill Price list" in the step's box.
+
+**4. Help** (`static/help/meetings.html`) explains both columns with these examples.
+
+Code: `meetings/model.py` (`show_file`, `fill_table` on `AgendaItem`, saved in the agenda JSON —
+no new table), `meetings/steps.py` (checks, `tables_left`), `meetings/tables.py` (`is_filled`,
+`filled_text`), `meetings/chat_agent.py` (`fill_table_guidance`), `meetings/show_files.py`
+(`missing_documents`), `meetings/flow.py`, `app_pages/meetings.py`, `app_pages/meeting_invitee.py`.
+
+## Tests (`tests/test_meetings_phase70.py`)
+
+- The two columns save and load (agenda JSON), and an old agenda without them still reads.
+- Fill table naming a non-Table row, or on a For each question, is refused.
+- `is_filled`: Required columns only; sheet values count; no Required = all fill-in columns.
+- The step's Show document is shown when the step starts, once; a missing name warns.
+- Invitee page: an unfilled table holds the step (no answer read); saving it starts the step;
+  Close chat stays disabled while a table is left.
+- Flow picture labels.

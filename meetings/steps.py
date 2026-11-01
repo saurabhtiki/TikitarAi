@@ -24,6 +24,15 @@ more of its options). Jumps only go forward, so a path always ends.
 Questions with a For each list (phase 52) are asked once per row of that list, so a path is
 made of **steps**: a question, plus the row it is about. Inside a list, Go to can also say
 `Next row`. A row's answer is stored under `answer_key(title, row)`.
+
+Since phase 69 Discussion rows are steps too: the chat takes questions and discussions one at
+a time in grid order, and a Go to can jump forward to a Discussion row. A discussion has no
+answer to check; it is finished when the model says it is covered, or after
+`DISCUSSION_REPLY_LIMIT` replies, and that is stored the same way as an answer.
+
+Phase 70: a Question or Discussion row can name a Table row in its Fill table cell. That step
+waits until the invitee has filled the table in (`tables.is_filled`), so `tables_left` keeps
+Close chat disabled too.
 """
 
 import datetime
@@ -80,6 +89,8 @@ _RULE_EXAMPLES = {
 END_TARGET = "End"
 NEXT_ROW_TARGET = "Next row"
 SKIPPED_CELL = "— skipped"
+# Replies after which a discussion step moves on even if the model never calls it covered.
+DISCUSSION_REPLY_LIMIT = 5
 # Between a question's title and its row number in a stored answer key. A control character,
 # so no title typed into a grid cell can collide with a row key.
 ROW_KEY_SEPARATOR = "\x1f"
@@ -101,10 +112,11 @@ class Branch:
 
 @dataclass
 class Step:
-    """One thing to ask: a question, and the list row it is about (None for an ordinary one).
+    """One thing to take up: a question or discussion, and the list row it is about (None for
+    an ordinary one). `question` is the agenda item either way.
 
-    `order` is the question's position among the question items, which is what "forward"
-    means for Go to.
+    `order` is the item's position among `Meeting.step_items`, which is what "forward" means
+    for Go to.
     """
 
     question: AgendaItem
@@ -118,6 +130,9 @@ class Step:
     @property
     def key(self) -> str:
         return answer_key(self.question.item, self.row)
+
+    def is_discussion(self) -> bool:
+        return self.question.is_discussion()
 
 
 @dataclass
@@ -320,7 +335,8 @@ def parse_branches(item: AgendaItem, agenda: list[AgendaItem]) -> list[Branch]:
     if item.answer_type == ANSWER_TEXT:
         raise RuleError("a Text question can't branch — use Yes/No, Choice, Number or Date.")
 
-    questions = [question for question in agenda if question.is_question()]
+    # Every Question and Discussion row is a possible target (phase 69).
+    questions = [question for question in agenda if question.is_question() or question.is_discussion()]
     position = next((index for index, question in enumerate(questions) if question.item == item.item), -1)
     own_loop = loop_key(item.loop)
     later: dict[str, str] = {}
@@ -373,7 +389,8 @@ def parse_branches(item: AgendaItem, agenda: list[AgendaItem]) -> list[Branch]:
             )
         else:
             raise RuleError(
-                f"'{target}' isn't a later question. Go to can only jump forward to a Question row, or End."
+                f"'{target}' isn't a later question or discussion. Go to can only jump forward to a "
+                "Question or Discussion row, or End."
             )
         branches.append(Branch(condition=condition, target=target))
     return branches
@@ -389,8 +406,11 @@ def branch_problem(item: AgendaItem, agenda: list[AgendaItem]) -> str:
 
 
 def loop_problems(agenda: list[AgendaItem]) -> list[str]:
-    """Why the For each lists can't be used: split up, or named like an agenda item."""
-    questions = [item for item in agenda if item.is_question()]
+    """Why the For each lists can't be used: split up, or named like an agenda item.
+
+    Discussion rows count as splitting a list too, since they are asked in grid order.
+    """
+    questions = [item for item in agenda if item.is_question() or item.is_discussion()]
     titles = {item.item.strip().lower() for item in agenda}
     problems = []
     last_seen: dict[str, int] = {}
@@ -411,6 +431,20 @@ def loop_problems(agenda: list[AgendaItem]) -> list[str]:
     return problems
 
 
+def fill_table_problems(agenda: list[AgendaItem]) -> list[str]:
+    """Why a Fill table cell can't be used: not a Table row of this agenda, or on a For each question."""
+    tables = {item.item.strip().lower() for item in agenda if item.is_table()}
+    problems = []
+    for item in agenda:
+        if not item.fill_table or item.is_table():
+            continue
+        if item.fill_table.strip().lower() not in tables:
+            problems.append(f"{item.item}: Fill table '{item.fill_table}' isn't a Table row of this agenda.")
+        elif item.loop.strip():
+            problems.append(f"{item.item}: a For each question can't have a Fill table.")
+    return problems
+
+
 def agenda_problems(agenda: list[AgendaItem]) -> list[str]:
     """Why an agenda can't be saved yet: unreadable rules and Go to, split lists, repeated titles.
 
@@ -420,6 +454,7 @@ def agenda_problems(agenda: list[AgendaItem]) -> list[str]:
     problems = [problem for problem in (rule_problem(item) for item in agenda) if problem]
     problems.extend(problem for problem in (branch_problem(item, agenda) for item in agenda) if problem)
     problems.extend(loop_problems(agenda))
+    problems.extend(fill_table_problems(agenda))
     titles = [item.item.strip().lower() for item in agenda]
     repeated = sorted({item.item for item in agenda if titles.count(item.item.strip().lower()) > 1})
     problems.extend(f"'{title}' is on the agenda twice — give each item its own title." for title in repeated)
@@ -672,6 +707,22 @@ def record_attempt(
     return replace(current, value="", status=status, tries=tries, last_reply=reply, updated_at="")
 
 
+def record_discussion_reply(
+    item: AgendaItem, previous: StepAnswer | None, covered: bool, reply: str, key: str = ""
+) -> StepAnswer:
+    """A discussion step's state after one invitee reply (phase 69).
+
+    Finished once the model calls it covered, or after `DISCUSSION_REPLY_LIMIT` replies so a
+    talkative chat still moves on. `tries` counts the replies.
+    """
+    current = previous or StepAnswer(item_ref=key or item.item)
+    tries = current.tries + 1
+    done = covered or tries >= DISCUSSION_REPLY_LIMIT
+    return replace(
+        current, status=STEP_ANSWERED if done else STEP_PENDING, tries=tries, last_reply=reply, updated_at=""
+    )
+
+
 def _answer_day(answer: StepAnswer) -> datetime.date:
     """The local day the answer was saved, so a date condition like "within 30 days" is
     judged once. Not saved yet (no time) means today.
@@ -729,7 +780,7 @@ def _flat_steps(meeting: Meeting, loop_rows: dict[str, list[int]] | None) -> lis
     A list with no rows (none attached, or none matching this invitee) has no steps, so its
     questions are simply not asked.
     """
-    questions = meeting.question_items()
+    questions = meeting.step_items()
     flat: list[Step] = []
     index = 0
     while index < len(questions):
@@ -752,14 +803,15 @@ def _same_row(first: Step, second: Step) -> bool:
 
 
 def walk(meeting: Meeting, answers: dict[str, StepAnswer], loop_rows: dict[str, list[int]] | None = None) -> Walk:
-    """Goes through the steps from the first, following Go to, until an open one or the end.
+    """Goes through the questions and discussions from the first, following Go to, until an
+    open one or the end.
 
     `loop_rows` maps each list (by `loop_key`) to this invitee's row numbers. Worked out from
     the saved answers every time rather than stored, so there is no second record of the path
     that could disagree with the answers. Every jump moves forward, so this always ends.
     """
     flat = _flat_steps(meeting, loop_rows)
-    orders = {item.item: order for order, item in enumerate(meeting.question_items())}
+    orders = {item.item: order for order, item in enumerate(meeting.step_items())}
     path: list[Step] = []
     skipped: list[Step] = []
     index = 0
@@ -804,22 +856,55 @@ def questions_left(
 ) -> int:
     """How many questions are still open on this invitee's path; 0 once they may close (phase 56).
 
-    Counts the open one and every unfinished step after it. A later Go to may still skip some,
-    so this is "at most", which is what a "3 left" note should say anyway.
+    Counts the open one and every unfinished question after it. A later Go to may still skip
+    some, so this is "at most", which is what a "3 left" note should say anyway. Discussions
+    don't count: they don't stop the invitee closing.
     """
     current = next_question(meeting, answers, loop_rows)
     if current is None:
         return 0
     flat = _flat_steps(meeting, loop_rows)
     start = next((index for index, step in enumerate(flat) if step.key == current.key), 0)
-    return sum(1 for step in flat[start:] if not (step.key in answers and answers[step.key].is_finished()))
+    return sum(
+        1
+        for step in flat[start:]
+        if not step.is_discussion() and not (step.key in answers and answers[step.key].is_finished())
+    )
+
+
+def tables_left(
+    meeting: Meeting,
+    answers: dict[str, StepAnswer],
+    unfilled: set[str],
+    loop_rows: dict[str, list[int]] | None = None,
+) -> list[str]:
+    """The Fill tables still to be filled on this invitee's path (phase 70), in agenda order.
+
+    `unfilled` is the titles of the Table rows this invitee hasn't filled in yet. Like
+    `questions_left` this is "at most": a later Go to may still skip a step that needs one.
+    """
+    current = next_question(meeting, answers, loop_rows)
+    if current is None or not unfilled:
+        return []
+    flat = _flat_steps(meeting, loop_rows)
+    start = next((index for index, step in enumerate(flat) if step.key == current.key), 0)
+    wanted = {title.strip().lower() for title in unfilled}
+    left: list[str] = []
+    for step in flat[start:]:
+        title = step.question.fill_table
+        finished = step.key in answers and answers[step.key].is_finished()
+        if title and not finished and title.strip().lower() in wanted and title not in left:
+            left.append(title)
+    return left
 
 
 def skipped_questions(
     meeting: Meeting, answers: dict[str, StepAnswer], loop_rows: dict[str, list[int]] | None = None
 ) -> list[str]:
     """Titles of the ordinary (not For each) questions a Go to jumped over, so never asked."""
-    return [step.item for step in walk(meeting, answers, loop_rows).skipped if step.row is None]
+    return [
+        step.item for step in walk(meeting, answers, loop_rows).skipped if step.row is None and not step.is_discussion()
+    ]
 
 
 def progress_text(
@@ -847,12 +932,14 @@ def progress_text(
             f"question {question_number} of {len(block)}"
         )
 
-    ordinary = [step for step in question_path(meeting, answers, loop_rows) if step.row is None]
+    ordinary = [
+        step for step in question_path(meeting, answers, loop_rows) if step.row is None and not step.is_discussion()
+    ]
     position = next(
         (index for index, step in enumerate(ordinary, start=1) if step.item == current.item), len(ordinary) + 1
     )
-    questions = meeting.question_items()
-    ahead = sum(1 for item in questions[current.order + 1 :] if not item.loop)
+    items = meeting.step_items()
+    ahead = sum(1 for item in items[current.order + 1 :] if item.is_question() and not item.loop)
     return f"Question {position} of {position + ahead}"
 
 

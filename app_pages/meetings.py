@@ -123,6 +123,8 @@ def _blank_agenda_row() -> dict:
         "Tries": DEFAULT_MAX_TRIES,
         "Go to": "",
         "For each": "",
+        "Show document": "",
+        "Fill table": "",
         "AI note": "",
     }
 
@@ -328,6 +330,26 @@ def _render_new_notice() -> None:
     show(text, icon=":material/info:" if level == "success" else ":material/error:")
 
 
+def _render_step_notes(meeting: Meeting) -> None:
+    """Red notes for Show document / Fill table cells that can't work yet (phase 70)."""
+    if not any(item.show_file or item.fill_table for item in meeting.agenda):
+        return
+    try:
+        files = db.list_files(meeting.meeting_id)
+        attached = {table.item_ref.strip().lower() for table in db.list_agenda_tables(meeting.meeting_id)}
+    except MeetingError:
+        logger.exception("Could not check the Show document / Fill table cells of meeting %s.", meeting.meeting_id)
+        return
+    notes = show_files.missing_documents(meeting.agenda, files)
+    notes.extend(
+        f"{item.item}: the table '{item.fill_table}' has no data uploaded yet, so nobody is asked to fill it."
+        for item in meeting.agenda
+        if item.fill_table and item.fill_table.strip().lower() not in attached
+    )
+    for note in notes:
+        st.caption(f":red[Note — {note}]")
+
+
 def _render_flow(agenda: list[AgendaItem], expanded: bool = False) -> None:
     """The flow picture of the questions (phase 54); nothing when there are no questions."""
     dot = flow.flow_dot(agenda)
@@ -341,12 +363,28 @@ def _render_flow(agenda: list[AgendaItem], expanded: bool = False) -> None:
         st.graphviz_chart(dot, width="stretch")
 
 
-def _agenda_editor(frame: pd.DataFrame, key: str) -> pd.DataFrame:
+def _document_column(documents: list[str] | None, frame: pd.DataFrame):
+    """Show document (phase 70): a dropdown of the Reference documents once there are any, else
+    a name to type (New meeting has none yet). Names already in the grid stay pickable."""
+    tip = (
+        "Question or Discussion items only, optional: a Reference document shown in the chat when "
+        "this step starts, e.g. 'Company Info'. Add documents under Reference documents in Overview."
+    )
+    if not documents:
+        return st.column_config.TextColumn("Show document", help=tip)
+    typed = [str(value) for value in frame.get("Show document", pd.Series(dtype=str)).dropna() if str(value).strip()]
+    options = list(dict.fromkeys([*documents, *typed]))
+    return st.column_config.SelectboxColumn("Show document", options=options, help=tip)
+
+
+def _agenda_editor(frame: pd.DataFrame, key: str, documents: list[str] | None = None) -> pd.DataFrame:
     """The agenda grid, shared by the creation dialog and the detail page's setup editor.
 
     `Type` is a fixed-option column rather than free text: it decides which table the item's
     substance is stored in, so a typo would have to become a silent fallback to Discussion —
     an agenda item quietly demoted from a grid to a chat question.
+
+    `documents` are the meeting's Reference document names, for the Show document dropdown.
     """
     return st.data_editor(
         frame,
@@ -386,7 +424,7 @@ def _agenda_editor(frame: pd.DataFrame, key: str) -> pd.DataFrame:
                 "Go to",
                 help="Question items only, optional: where to jump after this answer, e.g. "
                 "'if > 60000 go to End' or 'if No go to Notice period'. Separate several with ';'. "
-                "Only forward to a later question, or End. Blank means the next question. "
+                "Only forward to a later question or discussion, or End. Blank means the next row. "
                 "Inside a For each list, 'Next row' skips the rest of that row.",
             ),
             "For each": st.column_config.TextColumn(
@@ -394,6 +432,13 @@ def _agenda_editor(frame: pd.DataFrame, key: str) -> pd.DataFrame:
                 help="Question items only, optional: the name of a list, e.g. 'Outstanding invoices'. "
                 "The question is asked once for every row of that list. Give the questions of one "
                 "list the same name and keep them together. Upload the list in Overview.",
+            ),
+            "Show document": _document_column(documents, frame),
+            "Fill table": st.column_config.TextColumn(
+                "Fill table",
+                help="Question or Discussion items only, optional: the title of a Table row, e.g. "
+                "'Price list'. When the chat reaches this step the invitee must fill in that tab "
+                "and press Save progress first; then the question or discussion goes on.",
             ),
         },
     )
@@ -599,6 +644,7 @@ def _agenda_from_frame(frame: pd.DataFrame) -> list[AgendaItem]:
         branch = row.get("Go to")
         loop = row.get("For each")
         item_type = ITEM_TYPE_BY_LABEL.get(label, DISCUSSION_ITEM)
+        is_step = item_type != TABLE_ITEM
         items.append(
             AgendaItem(
                 item=title,
@@ -609,9 +655,20 @@ def _agenda_from_frame(frame: pd.DataFrame) -> list[AgendaItem]:
                 max_tries=clamp_tries(row.get("Tries")),
                 branch="" if item_type != QUESTION_ITEM or pd.isna(branch) else str(branch).strip(),
                 loop="" if pd.isna(loop) else str(loop).strip(),
+                show_file=_cell_text(row.get("Show document")) if is_step else "",
+                fill_table=_cell_text(row.get("Fill table")) if is_step else "",
             )
         )
+    # "price list" in Fill table means the Table row "Price list", spelt as that row is.
+    table_titles = {item.item.lower(): item.item for item in items if item.is_table()}
+    for item in items:
+        item.fill_table = table_titles.get(item.fill_table.lower(), item.fill_table)
     return steps.tidy_loop_names(items)
+
+
+def _cell_text(value) -> str:
+    """A grid cell as stripped text; blank for an empty or missing cell."""
+    return "" if value is None or pd.isna(value) else str(value).strip()
 
 
 def _agenda_to_frame(agenda: list[AgendaItem]) -> pd.DataFrame:
@@ -626,6 +683,8 @@ def _agenda_to_frame(agenda: list[AgendaItem]) -> pd.DataFrame:
             "Tries": item.max_tries,
             "Go to": item.branch,
             "For each": item.loop,
+            "Show document": item.show_file,
+            "Fill table": item.fill_table,
             "AI note": item.ai_note,
         }
         for item in agenda
@@ -883,10 +942,15 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
                     kind += f" · go to: {item.branch}"
                 if item.loop:
                     kind += f" · for each row of: {item.loop}"
+            if item.show_file:
+                kind += f" · shows: {item.show_file}"
+            if item.fill_table:
+                kind += f" · fill table first: {item.fill_table}"
             st.markdown(f"- **{item.item}**{kind}" + (f" — {item.ai_note}" if item.ai_note else ""))
     else:
         st.write("_No agenda items._")
     _render_flow(meeting.agenda)
+    _render_step_notes(meeting)
 
     if fields:
         st.markdown("**Evaluation questions**")
@@ -1088,8 +1152,13 @@ def _render_setup_editor(meeting: Meeting, user_id: int, fields: list[Evaluation
         )
 
         st.caption(":red[Agenda — changing an item's title detaches any table data attached to it.]")
+        try:
+            documents = [record["filename"] for record in db.list_files(meeting.meeting_id)]
+        except MeetingError:
+            logger.exception("Could not list the reference documents of meeting %s.", meeting.meeting_id)
+            documents = []
         agenda_frame = _agenda_editor(
-            _agenda_to_frame(meeting.agenda), f"meetings_edit_agenda_{meeting.meeting_id}"
+            _agenda_to_frame(meeting.agenda), f"meetings_edit_agenda_{meeting.meeting_id}", documents
         )
 
         st.caption(":red[Evaluation questions — removing one also removes the answers extracted for it.]")
@@ -1951,7 +2020,7 @@ def _render_invitee_status(
                         1 for item in ordinary if item.item in answers and answers[item.item].status == STEP_ANSWERED
                     )
                     # Questions a Go to jumped over are not counted as missing.
-                    skipped = sum(1 for step in walk.skipped if step.row is None)
+                    skipped = sum(1 for step in walk.skipped if step.row is None and not step.is_discussion())
                     st.caption(f":red[{answered} of {len(ordinary) - skipped} question(s) answered]")
                 for name in steps.loop_names(meeting):
                     if steps.loop_key(name) not in list_sheets:

@@ -248,6 +248,34 @@ def check_rows(
     return cleaned, problems
 
 
+def must_fill_columns(table: AgendaTable) -> list[str]:
+    """The columns a Fill table step waits for (phase 70): the Required ones, else every editable one."""
+    required = [column for column in table.editable_columns if table.rule_for(column).required]
+    return required or list(table.editable_columns)
+
+
+def is_filled(table: AgendaTable, responses: dict[int, dict]) -> bool:
+    """Whether every row has a value in every `must_fill_columns` column; a sheet value counts."""
+    columns = must_fill_columns(table)
+    return all(
+        str(responses.get(index, {}).get(column, "") or "").strip() or sheet_value(table, index, column)
+        for index in range(len(table.base_data))
+        for column in columns
+    )
+
+
+MAX_ROWS_FOR_BOT = 50
+
+
+def filled_text(table: AgendaTable, responses: dict[int, dict]) -> str:
+    """The grid as the invitee filled it, as CSV lines for the chat prompt (at most 50 rows)."""
+    frame = display_frame(table, responses).head(MAX_ROWS_FOR_BOT).map(cell_text)
+    text = frame.to_csv(index=False).strip()
+    if table.row_count() > MAX_ROWS_FOR_BOT:
+        text += f"\n(…and {table.row_count() - MAX_ROWS_FOR_BOT} more rows)"
+    return text
+
+
 def completion(table: AgendaTable, filled_rows: int) -> tuple[int, int, int]:
     """`(filled, total, percent)` for one invitee's progress through one grid.
 
