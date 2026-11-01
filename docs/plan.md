@@ -38,6 +38,11 @@ of the same agenda. When the chat reaches that step:
 - Fill table must name a Table row; it can't be used on a For each question.
 - A Table row with no data uploaded yet doesn't block anyone (red note for the organiser).
 
+**2b. A Show document belongs to its row.** A document picked in a row's Show document cell is
+shown only at that row — never at another step because its note names it or the bot picks it.
+Example: About Us asks "Like to see video for company Intro?" (Yes → Company Video, No → go to
+Introduction); the video plays only at Company Video. The bot is told which step shows it.
+
 **3. Flow picture** shows "shows Company Info" / "fill Price list" in the step's box.
 
 **4. Help** (`static/help/meetings.html`) explains both columns with these examples.

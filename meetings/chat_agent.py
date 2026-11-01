@@ -364,7 +364,7 @@ def system_instructions(
         )
 
     # Phase 67: names and descriptions only — the files themselves are never read.
-    files_text = files_block(ref_files or [])
+    files_text = files_block(ref_files or [], meeting.agenda)
     if files_text:
         parts.append(
             "Reference documents the organiser shared (you know only their names and "

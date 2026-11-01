@@ -482,6 +482,8 @@ def _shown_file_id(
     pick. If it made none, a file named in the note of the step the reply is about ("Show
     demo.mp4, then discuss") is shown, once per step: a later step naming the same file shows
     it again.
+
+    A document that is another row's Show document is never shown here: only that row shows it.
     """
     item = next((item for item in meeting.agenda if item.item == turn.agenda_tag), None)
     shown_ids = {
@@ -493,14 +495,16 @@ def _shown_file_id(
         chosen = show_files.chosen_file(item.show_file, files, shown_ids)
         if chosen is not None:
             return chosen["file_id"]
+    kept = show_files.kept_for_other_steps(meeting.agenda, turn.agenda_tag, files)
+    free_files = [record for record in files if record.get("file_id") not in kept]
     name = turn.show_file
-    record = show_files.pick_file(name, files)
+    record = show_files.pick_file(name, free_files)
     if record is not None and show_files.shows(record):
         return record["file_id"]
     if name.strip():
-        logger.info("Bot asked to show '%s', which is not a showable reference document.", name)
+        logger.info("Bot asked to show '%s', which is not a showable reference document here.", name)
     note = item.ai_note if item is not None else ""
-    step_file = show_files.file_for_step(note, files, shown_ids)
+    step_file = show_files.file_for_step(note, free_files, shown_ids)
     return step_file["file_id"] if step_file else None
 
 

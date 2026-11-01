@@ -195,3 +195,40 @@ class TestInviteePage:
         # Once shown for this step, it isn't shown again.
         shown = [ChatMessage(sender=SENDER_AI, agenda_tag=RATES, shown_file_id=files[0]["file_id"])]
         assert page._shown_file_id(turn, files, meeting, shown) is None
+
+
+class TestOnlyItsStep:
+    """The user's setup: About Us asks "Like to see video for company Intro?", and the video
+    is the Company Video row's Show document — it must not play at About Us."""
+
+    FILES = [{"file_id": 7, "filename": "Company Intro", "url": "https://youtu.be/abc"}]
+
+    def _meeting(self) -> Meeting:
+        return Meeting(
+            agenda=[
+                AgendaItem(item="About Us", item_type=QUESTION_ITEM, ai_note="Like to see video for company Intro?"),
+                AgendaItem(item="Company Video", show_file="Company Intro"),
+            ]
+        )
+
+    def test_the_note_naming_it_does_not_show_it(self):
+        import app_pages.meeting_invitee as page
+
+        turn = ChatTurnOutput(reply="Would you like to see it?", agenda_tag="About Us")
+        assert page._shown_file_id(turn, self.FILES, self._meeting(), []) is None
+
+    def test_the_bot_picking_it_does_not_show_it(self):
+        import app_pages.meeting_invitee as page
+
+        turn = ChatTurnOutput(reply="Here it is.", agenda_tag="About Us", show_file="Company Intro")
+        assert page._shown_file_id(turn, self.FILES, self._meeting(), []) is None
+
+    def test_its_own_step_shows_it(self):
+        import app_pages.meeting_invitee as page
+
+        turn = ChatTurnOutput(reply="Here is our video.", agenda_tag="Company Video")
+        assert page._shown_file_id(turn, self.FILES, self._meeting(), []) == 7
+
+    def test_the_bot_is_told_which_step_shows_it(self):
+        text = show_files.files_block(self.FILES, self._meeting().agenda)
+        assert 'the app shows it at "Company Video" only' in text

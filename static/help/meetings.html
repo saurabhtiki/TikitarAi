@@ -184,7 +184,8 @@ The candidate writes "evening please". The AI understands it as <b>Evening</b> a
   <li>When the chat reaches <b>Company Introduction</b>, the AI says a short line like "Here is a short video about us" and <b>Company Info</b> plays right under it. It is shown once.</li>
   <li>First add the document under <span class="ui">Reference documents</span> in Overview (a file or <span class="ui">Add a link</span>). In <span class="ui">Edit setup</span> the cell is then a dropdown of those documents. In New meeting there are none yet, so type the name and add the document after creating.</li>
   <li>If the name is not in Reference documents (renamed or deleted), Overview shows a red note.</li>
-  <li>With Go to you can skip it: <b>About Us</b> (Yes/No) with <code>if No go to Introduction</code> jumps over the video row.</li>
+  <li>A document picked in a Show document cell plays <b>only at that row</b>. Example: <b>About Us</b> asks "Like to see our company video?" &mdash; the video does not play there, even if the note names it. It plays when the chat reaches <b>Company Video</b>.</li>
+  <li>With Go to you can skip it: <b>About Us</b> (Yes/No) with <code>if No go to Introduction</code> jumps over the video row, so the video never shows.</li>
 </ul>
 
 <h3>Fill table: the person must fill a table first</h3>
@@ -263,7 +264,7 @@ The candidate writes "evening please". The AI understands it as <b>Evening</b> a
 <tr><td>The AI model is missing</td><td>The model you picked was deleted. The default one is used instead. Pick another in Overview.</td></tr>
 <tr><td>For each list shows 0 rows</td><td>The Match column found no row for that person. Clear the Match column to give everyone all rows, or fix the names/emails in your sheet.</td></tr>
 <tr><td>The chat is stuck on a step</td><td>That step has a <b>Fill table</b>. The person must fill every Required column (or every fill-in column if none is Required) in every row and press Save progress.</td></tr>
-<tr><td>The video shows at the wrong step</td><td>Put the document in the <b>Show document</b> cell of the right row, and remove its name from other rows' AI notes.</td></tr>
+<tr><td>The video shows at the wrong step</td><td>Put the document in the <b>Show document</b> cell of the right row. Then it shows only at that row.</td></tr>
 <tr><td>Dates</td><td>Always write dates as dd-mm-yyyy, for example 15-11-2026.</td></tr>
 </table>
 </main>

@@ -104,14 +104,44 @@ def upload_problems(filename: str, size: int) -> list[str]:
     return []
 
 
-def files_block(files: list[dict]) -> str:
-    """The file list for the chat prompt, one line each: name, (can show)/(refer only), description."""
+def step_documents(agenda: list) -> dict[str, list[str]]:
+    """Each Show document name (plain) -> the rows that show it (phase 70b)."""
+    rows: dict[str, list[str]] = {}
+    for item in agenda:
+        if item.show_file:
+            rows.setdefault(_plain(item.show_file), []).append(item.item)
+    return rows
+
+
+def kept_for_other_steps(agenda: list, step_title: str, files: list[dict]) -> set[int]:
+    """Ids of documents another row's Show document owns: only that row may show them.
+
+    "Like to see our company video?" on About Us must not play the video meant for the
+    Company Video row, whether the bot picks it or the note happens to name it.
+    """
+    owners = step_documents(agenda)
+    return {
+        record.get("file_id")
+        for record in files
+        if (rows := owners.get(_plain(record.get("filename")))) and step_title not in rows
+    }
+
+
+def files_block(files: list[dict], agenda: list | None = None) -> str:
+    """The file list for the chat prompt, one line each: name, (can show)/(refer only), description.
+
+    A document a row's Show document owns is marked so: the app shows it at that step itself.
+    """
+    owners = step_documents(agenda or [])
     lines = []
     for record in files:
         name = str(record.get("filename") or "").strip()
         if not name:
             continue
         mark = "can show" if shows(record) else "refer only"
+        if rows := owners.get(_plain(name)):
+            steps_text = ", ".join(f'"{row}"' for row in rows)
+            mark = f"the app shows it at {steps_text} only — never set show_file to it"
         description = " ".join(str(record.get("description") or "").split())
         lines.append(f"- {name} ({mark})" + (f" — {description}" if description else ""))
     return "\n".join(lines)
