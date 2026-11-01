@@ -101,6 +101,21 @@ class DiscussionReading(BaseModel):
         "nothing more to add, or asked to move on; false if they asked something or the "
         "discussion is still going.",
     )
+    missing: str = Field(
+        # Phase 71: only asked for with an Accept only if, so the bot can say what is needed.
+        default="",
+        description="When not covered: one short sentence on what is still needed, or empty.",
+    )
+
+
+class AcceptReading(BaseModel):
+    """Whether a reply meets the organiser's Accept only if (phase 71)."""
+
+    accepted: bool = Field(default=False, description="True only if the condition is clearly met.")
+    missing: str = Field(
+        default="",
+        description="When not accepted: one short sentence, said to the invitee, on what is still needed.",
+    )
 
 
 def read_discussion(
@@ -115,23 +130,64 @@ def read_discussion(
 
     Only a yes/no reading: the app counts the replies and moves on after
     `steps.DISCUSSION_REPLY_LIMIT` anyway, so a model that never says yes can't trap anyone.
+    With an Accept only if (phase 71) there is no limit, and only that condition counts.
 
     Raises:
         LLMConnectionError: if the provider fails.
     """
     turns = render_turns(recent)
     wanted = item.ai_note.strip() or "the invitee's view on it"
+    if item.accept_if:
+        question = (
+            f"Has this been met in the discussion so far: {item.accept_if}? Say covered only if it "
+            "clearly has. Saying they have nothing more to add, refusing, or asking to move on does "
+            "not count. If not, say in one short sentence what is still needed."
+        )
+    else:
+        question = (
+            "Is this item covered enough to move on to the next one? Say covered if the invitee has "
+            "given their view or the information asked for, said they have nothing more to add, or "
+            "asked to move on. Say not covered if they asked a question or the discussion is clearly "
+            "still going."
+        )
     prompt = (
         f"The agenda item being discussed: {item.item}\n"
         f"What the organiser wants from it: {wanted}\n"
         + (f"Recent turns:\n{turns}\n" if turns else "")
         + f"The invitee just replied: {message.strip()}\n\n"
-        "Is this item covered enough to move on to the next one? Say covered if the invitee has "
-        "given their view or the information asked for, said they have nothing more to add, or "
-        "asked to move on. Say not covered if they asked a question or the discussion is clearly "
-        "still going."
+        + question
     )
     return run_structured(profile, prompt, DiscussionReading, key_path=key_path)
+
+
+def read_accept(
+    profile: dict,
+    item: AgendaItem,
+    reply: str,
+    value: str,
+    *,
+    row_context: str = "",
+    key_path: Path | str | None = None,
+) -> AcceptReading:
+    """Judges a reply that passed the Rule against the question's Accept only if (phase 71).
+
+    The model judges here, unlike `read_answer`, because the organiser wrote the condition in
+    plain words that no rule can check. A too-strict model only asks again; it can't skip.
+
+    Raises:
+        LLMConnectionError: if the provider fails.
+    """
+    prompt = (
+        f"The question was: {item.item}\n"
+        f"Background: {item.ai_note.strip() or 'none'}\n"
+        + (f"The question is about this row of the list '{item.loop}': {row_context}\n" if row_context else "")
+        + f"The invitee replied: {reply.strip()}\n"
+        f"Read as: {value}\n\n"
+        f"The organiser accepts an answer only if: {item.accept_if}\n"
+        "Is that clearly met by this reply? If not, say in one short, polite sentence what is "
+        "still needed, without repeating the organiser's wording word for word."
+    )
+    return run_structured(profile, prompt, AcceptReading, key_path=key_path)
 
 
 def read_answer(
@@ -192,9 +248,14 @@ def question_guidance(
         if row_context
         else ""
     )
+    accept = (
+        f" The meeting can't go on until the answer meets this: {item.accept_if}."
+        if item.accept_if
+        else ""
+    )
     parts.append(
         f"Now ask this question ({progress}): \"{item.item}\". The answer must be "
-        f"{describe_rule(item)}.{note}{row} Ask only this question and nothing else."
+        f"{describe_rule(item)}.{note}{accept}{row} Ask only this question and nothing else."
     )
     return " ".join(parts)
 
@@ -203,8 +264,14 @@ def discussion_guidance(item: AgendaItem, *, just_happened: str = "") -> str:
     """The step instruction for a discussion row (phase 69): talk about this item only."""
     parts = [just_happened] if just_happened else []
     note = f" What to cover: {item.ai_note.strip()}" if item.ai_note.strip() else ""
+    accept = (
+        f" The meeting can't go on until this is met: {item.accept_if}. Keep politely steering "
+        "towards it."
+        if item.accept_if
+        else ""
+    )
     parts.append(
-        f"Now discuss this agenda item: \"{item.item}\".{note} Talk about this item only and ask "
+        f"Now discuss this agenda item: \"{item.item}\".{note}{accept} Talk about this item only and ask "
         "one thing at a time. Do not start any other agenda item — the app moves on when this one "
         "is covered."
     )

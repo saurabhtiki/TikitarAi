@@ -383,10 +383,13 @@ def _render_main(
         return
 
     # Phase 56: the questions are the point of the meeting, so they must be done first. Tries
-    # make sure nobody is stuck — running out marks a question Not answered and moves on.
+    # make sure nobody is stuck — running out marks a question Not answered and moves on —
+    # except on an Accept only if step (phase 71), which holds Close chat until it is met.
     left = steps.questions_left(meeting, answers, lists.rows)
     if left:
-        st.caption(f":red[{left} question(s) left — finish them to close.]")
+        # An Accept only if discussion counts too (phase 71), so say "step" when there is one.
+        holding = "step(s)" if any(item.is_discussion() and item.accept_if for item in meeting.agenda) else "question(s)"
+        st.caption(f":red[{left} {holding} left — finish them to close.]")
     # Phase 70: a Fill table is mandatory, so it holds Close chat like a question does.
     tables_left = steps.tables_left(meeting, answers, fills.unfilled(), lists.rows)
     if tables_left:
@@ -976,6 +979,14 @@ def _advance_question(
         return guidance, current.item, ""
 
     check = steps.check_answer(question, reading.value, today)
+    if check.ok and question.accept_if:
+        # Phase 71: past the Rule, the organiser's plain-words condition must hold too.
+        judged = chat_agent.read_accept(
+            profile, question, reply, check.value, row_context=lists.row_context(current)
+        )
+        if not judged.accepted:
+            reason = judged.missing.strip() or "That doesn't give what's needed yet."
+            check = steps.AnswerCheck(ok=False, reason=reason)
     updated = steps.record_attempt(question, answers.get(current.key), check, reply, key=current.key)
     db.save_step_answer(meeting_id, invitee_id, updated)
 
@@ -988,6 +999,13 @@ def _advance_question(
             "that you have noted it for the organiser and are moving on."
         )
         plain = "I've noted that for the organiser and will move on."
+    elif question.accept_if:
+        # No tries limit here, so no count to give: the step waits for a good answer.
+        happened = (
+            f"That answer can't be accepted yet. {check.reason} Explain politely, in simple words, "
+            "what is needed and why, with a small example, and ask again. Don't move on."
+        )
+        plain = f"{check.reason} Please try again."
     else:
         tries_left = question.max_tries - updated.tries
         happened = (
@@ -1024,10 +1042,15 @@ def _advance_discussion(
     updated = steps.record_discussion_reply(current.question, answers.get(current.key), reading.covered, reply, key=current.key)
     db.save_step_answer(meeting_id, invitee_id, updated)
     if updated.status != STEP_ANSWERED:
+        still_needed = (
+            f" Still needed before moving on: {reading.missing.strip()}"
+            if current.question.accept_if and reading.missing.strip()
+            else ""
+        )
         guidance = chat_agent.discussion_guidance(
             current.question,
             just_happened="Reply to what the invitee just said and carry on with this item. If they "
-            "asked something, answer it briefly from your instructions (say so if you don't know).",
+            f"asked something, answer it briefly from your instructions (say so if you don't know).{still_needed}",
         )
         return guidance, current.item, ""
     happened = "This agenda item is covered now. Thank them in a few words."

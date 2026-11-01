@@ -85,6 +85,9 @@ class AgendaItem:
     # starts, and the Table row the invitee must fill in before the step goes on.
     show_file: str = ""
     fill_table: str = ""
+    # Phase 71, Question and Discussion rows only: in plain words, what a reply must show
+    # before the step ends ("describes their company"). Set = no tries or reply limit.
+    accept_if: str = ""
 
     def is_table(self) -> bool:
         return self.item_type == TABLE_ITEM
@@ -398,6 +401,8 @@ def agenda_to_json(agenda: list[AgendaItem]) -> str:
                 entry["show_file"] = item.show_file
             if item.fill_table:
                 entry["fill_table"] = item.fill_table
+            if item.accept_if:
+                entry["accept_if"] = item.accept_if
         items.append(entry)
     return json.dumps({"version": SCHEMA_VERSION, "items": items}, indent=2)
 
@@ -466,6 +471,7 @@ def agenda_from_json(text: str) -> list[AgendaItem]:
                 loop=str(raw.get("loop") or "").strip() if item_type == QUESTION_ITEM else "",
                 show_file=str(raw.get("show_file") or "").strip() if item_type != TABLE_ITEM else "",
                 fill_table=str(raw.get("fill_table") or "").strip() if item_type != TABLE_ITEM else "",
+                accept_if=str(raw.get("accept_if") or "").strip() if item_type != TABLE_ITEM else "",
             )
         )
 

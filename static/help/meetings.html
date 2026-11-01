@@ -46,6 +46,7 @@
   <li><a href="#foreach">For each (a list)</a></li>
   <li><a href="#table">Table items</a></li>
   <li><a href="#steps">Show document &amp; Fill table</a></li>
+  <li><a href="#accept">Accept only if</a></li>
   <li><a href="#eval">Evaluation questions</a></li>
   <li><a href="#faq">FAQ</a></li>
   <li><a href="#after">After you create it</a></li>
@@ -75,7 +76,7 @@
 <tr><td><b>Question</b></td><td>You need one exact answer, checked by rules.</td><td>"Expected salary?" (a number)</td></tr>
 <tr><td><b>Table</b></td><td>The person must fill a grid of rows and columns.</td><td>A vendor's price list.</td></tr>
 </table>
-<p>Items are covered one at a time, in the order you list them — questions and discussions mixed ("Question 2 of 5"). A discussion moves on once the AI sees it is covered, or after 5 replies. Table items are filled in on their own tabs.</p>
+<p>Items are covered one at a time, in the order you list them — questions and discussions mixed ("Question 2 of 5"). A discussion moves on once the AI sees it is covered, or after 5 replies (unless it has an <a href="#accept">Accept only if</a>). Table items are filled in on their own tabs.</p>
 
 <h2 id="question">3. Question items</h2>
 <p>For a <b>Question</b> row, fill these cells:</p>
@@ -88,6 +89,7 @@
 <tr><td><b>For each</b></td><td>Repeat for every row of a list. See <a href="#foreach">section 5</a>.</td></tr>
 <tr><td><b>Show document</b></td><td>Optional, Question or Discussion rows: a video, picture or file shown in the chat when this step starts. See <a href="#steps">section 6b</a>.</td></tr>
 <tr><td><b>Fill table</b></td><td>Optional, Question or Discussion rows: a Table the person must fill in before this step goes on. See <a href="#steps">section 6b</a>.</td></tr>
+<tr><td><b>Accept only if</b></td><td>Optional, Question or Discussion rows: in plain words, what the answer must show. The chat waits until it is met. See <a href="#accept">section 6c</a>.</td></tr>
 </table>
 
 <h3>Rule examples</h3>
@@ -208,6 +210,22 @@ The candidate writes "evening please". The AI understands it as <b>Evening</b> a
   <li>Upload the table's sheet in Overview. Until you do, nobody is held up, and Overview shows a red note.</li>
 </ul>
 
+<h2 id="accept">6c. Accept only if: don't move on until the answer is right</h2>
+<p>A <b>Rule</b> checks the form (a number, a date, 20 characters). <b>Accept only if</b> checks the <b>meaning</b>, in your own words. The AI reads each reply and only moves on when it fits.</p>
+<table>
+<tr><th>Item</th><th>Type</th><th>Answer type</th><th>Accept only if</th></tr>
+<tr><td>Company Demo</td><td>Question</td><td>Yes/No</td><td><code>Yes</code></td></tr>
+<tr><td>Introduction</td><td>Question</td><td>Text</td><td><code>describes their company: what it does and where</code></td></tr>
+<tr><td>Pricing</td><td>Discussion</td><td></td><td><code>invitee has agreed a demo date</code></td></tr>
+</table>
+<ul>
+  <li>At <b>Introduction</b> the person writes "No". The AI says what is needed ("a short intro of your company: what it does and where it is") and asks again. "We make solar panels in Pune" is accepted and the chat moves on.</li>
+  <li><b>No limit.</b> On such a row Tries is ignored, and a Discussion's 5-reply limit is off. The chat never moves past it without a good answer.</li>
+  <li><b>Close chat stays off</b> until it is met. If the person closes the browser and comes back later, the chat starts again at the same step.</li>
+  <li>In <span class="ui">Comparisons &rarr; Question answers</span>, the <b>Stuck at</b> column shows who is waiting on such a step, with their last reply, so you can follow up.</li>
+  <li>Leave it empty and the row works as before.</li>
+</ul>
+
 <h2 id="eval">7. Evaluation questions: compare people on the same points</h2>
 <p>These are optional. The AI slips them naturally into the chat and notes the answer. The person does not see this list. Later you can compare everyone side by side.</p>
 <h3>Full example: hiring an accountant</h3>
@@ -263,7 +281,7 @@ The candidate writes "evening please". The AI understands it as <b>Evening</b> a
 <tr><td>Invitee cannot open the link</td><td>Check the link and code in <b>Share</b>. Send them again.</td></tr>
 <tr><td>The AI model is missing</td><td>The model you picked was deleted. The default one is used instead. Pick another in Overview.</td></tr>
 <tr><td>For each list shows 0 rows</td><td>The Match column found no row for that person. Clear the Match column to give everyone all rows, or fix the names/emails in your sheet.</td></tr>
-<tr><td>The chat is stuck on a step</td><td>That step has a <b>Fill table</b>. The person must fill every Required column (or every fill-in column if none is Required) in every row and press Save progress.</td></tr>
+<tr><td>The chat is stuck on a step</td><td>That step has a <b>Fill table</b>: the person must fill every Required column (or every fill-in column if none is Required) in every row and press Save progress. Or it has an <b>Accept only if</b>: the person's answer doesn't meet it yet — see the Stuck at column.</td></tr>
 <tr><td>The video shows at the wrong step</td><td>Put the document in the <b>Show document</b> cell of the right row. Then it shows only at that row.</td></tr>
 <tr><td>Dates</td><td>Always write dates as dd-mm-yyyy, for example 15-11-2026.</td></tr>
 </table>

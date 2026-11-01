@@ -125,6 +125,7 @@ def _blank_agenda_row() -> dict:
         "For each": "",
         "Show document": "",
         "Fill table": "",
+        "Accept only if": "",
         "AI note": "",
     }
 
@@ -440,6 +441,13 @@ def _agenda_editor(frame: pd.DataFrame, key: str, documents: list[str] | None = 
                 "'Price list'. When the chat reaches this step the invitee must fill in that tab "
                 "and press Save progress first; then the question or discussion goes on.",
             ),
+            "Accept only if": st.column_config.TextColumn(
+                "Accept only if",
+                help="Question or Discussion items only, optional: in plain words, what the answer "
+                "must show, e.g. 'Yes' or 'describes their company: what it does and where'. The "
+                "AI asks again until it is met — Tries and the discussion's 5-reply limit are "
+                "ignored, and Close chat stays off until then.",
+            ),
         },
     )
 
@@ -657,6 +665,7 @@ def _agenda_from_frame(frame: pd.DataFrame) -> list[AgendaItem]:
                 loop="" if pd.isna(loop) else str(loop).strip(),
                 show_file=_cell_text(row.get("Show document")) if is_step else "",
                 fill_table=_cell_text(row.get("Fill table")) if is_step else "",
+                accept_if=_cell_text(row.get("Accept only if")) if is_step else "",
             )
         )
     # "price list" in Fill table means the Table row "Price list", spelt as that row is.
@@ -685,6 +694,7 @@ def _agenda_to_frame(agenda: list[AgendaItem]) -> pd.DataFrame:
             "For each": item.loop,
             "Show document": item.show_file,
             "Fill table": item.fill_table,
+            "Accept only if": item.accept_if,
             "AI note": item.ai_note,
         }
         for item in agenda
@@ -937,7 +947,8 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
         for item in meeting.agenda:
             kind = " · table" if item.is_table() else ""
             if item.is_question():
-                kind = f" · question · {steps.describe_rule(item)}, {item.max_tries} tries"
+                tries = "no tries limit" if item.accept_if else f"{item.max_tries} tries"
+                kind = f" · question · {steps.describe_rule(item)}, {tries}"
                 if item.branch:
                     kind += f" · go to: {item.branch}"
                 if item.loop:
@@ -946,6 +957,8 @@ def _render_overview(meeting: Meeting, user_id: int, fields: list[EvaluationFiel
                 kind += f" · shows: {item.show_file}"
             if item.fill_table:
                 kind += f" · fill table first: {item.fill_table}"
+            if item.accept_if:
+                kind += f" · accept only if: {item.accept_if}"
             st.markdown(f"- **{item.item}**{kind}" + (f" — {item.ai_note}" if item.ai_note else ""))
     else:
         st.write("_No agenda items._")
@@ -2347,7 +2360,9 @@ def _render_question_answers(meeting: Meeting, user_id: int, invitees: list[dict
     """One row per invitee, one column per question item (phase 50). For each questions are
     per row, so they are shown under List answers instead."""
     questions = [item for item in meeting.question_items() if not item.loop]
-    if not questions:
+    # Phase 71: who is held at an Accept only if step, so the organiser can follow up.
+    has_accept_if = any(item.accept_if for item in meeting.step_items())
+    if not questions and not has_accept_if:
         st.info(
             "This meeting has no question items. Set an agenda item's Type to Question in "
             "Overview to ask it step by step.",
@@ -2360,15 +2375,19 @@ def _render_question_answers(meeting: Meeting, user_id: int, invitees: list[dict
     rows = []
     for invitee in invitees:
         answers = all_answers.get(invitee["invitee_id"], {})
-        skipped = set(steps.skipped_questions(meeting, answers, loops.invitee_lists(list_sheets, invitee).rows))
+        loop_rows = loops.invitee_lists(list_sheets, invitee).rows
+        skipped = set(steps.skipped_questions(meeting, answers, loop_rows))
         row = {"Invitee": invitee["name"]}
+        if has_accept_if:
+            row["Stuck at"] = steps.stuck_at(meeting, answers, loop_rows)
         for item in questions:
             row[item.item] = SKIPPED_CELL if item.item in skipped else steps.display_answer(answers.get(item.item))
         rows.append(row)
 
+    stuck_note = " Stuck at shows a step whose Accept only if isn't met yet, with the last reply." if has_accept_if else ""
     st.caption(
         ":red[Saved as each answer passed its rule. ⚠ means the tries ran out; "
-        "skipped means a Go to jumped over it.]"
+        f"skipped means a Go to jumped over it.{stuck_note}]"
     )
     show_dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 

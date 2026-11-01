@@ -692,8 +692,10 @@ def record_attempt(
     """The question's state after one real attempt at answering it.
 
     Every attempt uses a try, the passing one included, so the organiser sees "answered on
-    the 2nd try". The last failed try marks it Not answered so nobody is stuck forever.
-    `key` is where it is stored (see `answer_key`); it defaults to the title.
+    the 2nd try". The last failed try marks it Not answered so nobody is stuck forever —
+    unless the question has an Accept only if (phase 71), which the organiser wants met
+    whatever it takes, so it stays open. `key` is where it is stored (see `answer_key`); it
+    defaults to the title.
     """
     current = previous or StepAnswer(item_ref=key or item.item)
     tries = current.tries + 1
@@ -703,7 +705,8 @@ def record_attempt(
         return replace(
             current, value=check.value, status=STEP_ANSWERED, tries=tries, last_reply=reply, updated_at=""
         )
-    status = STEP_NOT_ANSWERED if tries >= item.max_tries else STEP_PENDING
+    out_of_tries = tries >= item.max_tries and not item.accept_if
+    status = STEP_NOT_ANSWERED if out_of_tries else STEP_PENDING
     return replace(current, value="", status=status, tries=tries, last_reply=reply, updated_at="")
 
 
@@ -713,11 +716,12 @@ def record_discussion_reply(
     """A discussion step's state after one invitee reply (phase 69).
 
     Finished once the model calls it covered, or after `DISCUSSION_REPLY_LIMIT` replies so a
-    talkative chat still moves on. `tries` counts the replies.
+    talkative chat still moves on. `tries` counts the replies. With an Accept only if (phase
+    71) only `covered` ends it: the reply limit would let anyone past by just replying 5 times.
     """
     current = previous or StepAnswer(item_ref=key or item.item)
     tries = current.tries + 1
-    done = covered or tries >= DISCUSSION_REPLY_LIMIT
+    done = covered or (tries >= DISCUSSION_REPLY_LIMIT and not item.accept_if)
     return replace(
         current, status=STEP_ANSWERED if done else STEP_PENDING, tries=tries, last_reply=reply, updated_at=""
     )
@@ -858,7 +862,8 @@ def questions_left(
 
     Counts the open one and every unfinished question after it. A later Go to may still skip
     some, so this is "at most", which is what a "3 left" note should say anyway. Discussions
-    don't count: they don't stop the invitee closing.
+    don't count — they don't stop the invitee closing — unless they have an Accept only if
+    (phase 71), which must be met first like a question.
     """
     current = next_question(meeting, answers, loop_rows)
     if current is None:
@@ -868,8 +873,29 @@ def questions_left(
     return sum(
         1
         for step in flat[start:]
-        if not step.is_discussion() and not (step.key in answers and answers[step.key].is_finished())
+        if (not step.is_discussion() or step.question.accept_if)
+        and not (step.key in answers and answers[step.key].is_finished())
     )
+
+
+def stuck_at(
+    meeting: Meeting, answers: dict[str, StepAnswer], loop_rows: dict[str, list[int]] | None = None
+) -> str:
+    """ 'Introduction (said: "No")' when the open step has an Accept only if that a reply has
+    already missed (phase 71), else "". For the organiser, who can then follow up.
+
+    A discussion's tries count every reply, not misses, so it only counts as stuck once it
+    has gone past the point where it would normally have moved on.
+    """
+    current = next_question(meeting, answers, loop_rows)
+    if current is None or not current.question.accept_if:
+        return ""
+    answer = answers.get(current.key)
+    needed = DISCUSSION_REPLY_LIMIT if current.is_discussion() else 1
+    if answer is None or answer.tries < needed:
+        return ""
+    said = answer.last_reply.strip()
+    return f'{current.item} (said: "{said}")' if said else current.item
 
 
 def tables_left(
